@@ -1,0 +1,48 @@
+[build-system]
+requires = ["maturin==1.14.1"]
+build-backend = "maturin"
+
+[project]
+name = "troupe"
+version = "0.1.0"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.scripts]
+troupe = "troupe._runtime:main"
+
+[dependency-groups]
+dev = [
+    "maturin==1.14.1",
+    "mypy>=1.18.1",
+    "PyYAML>=6.0.3",
+    "pytest",
+    "tomli>=1.1.0; python_version < '3.11'",
+    "typing-extensions>=4.15.0",
+    "wheel>=0.45.1",
+]
+
+[tool.maturin]
+python-source = "src"
+manifest-path = "rust/Cargo.toml"
+module-name = "troupe._runtime"
+locked = true
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"]
+
+[tool.maturin.sbom]
+rust = false
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "README.md" },
+    { file = "rust/Cargo.toml" },
+    { file = "rust/Cargo.lock" },
+    { file = "rust/src/**/*.rs" },
+    { file = "src/troupe/**/*.py" },
+    { file = "src/troupe/**/*.pyi" },
+    { file = "src/troupe/py.typed" },
+]
