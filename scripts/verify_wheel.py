@@ -1,0 +1,844 @@
+from __future__ import annotations
+
+import argparse
+import base64
+import configparser
+import csv
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import venv
+import zipfile
+from collections.abc import Mapping, Sequence
+from email.message import Message
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from wheel.wheelfile import WheelError, WheelFile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE_PACKAGE = ROOT / "src" / "troupe"
+EXPECTED_WRAPPER = (
+    b"from ._runtime import Production as Production\n"
+    b"\n"
+    b'__all__ = ["Production"]\n'
+)
+EXPECTED_STUB = (
+    b"from typing_extensions import disjoint_base\n"
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Production:\n"
+    b"    def __new__(cls, args: list[str], /) -> Production: ...\n"
+    b"    async def start(self) -> None: ...\n"
+    b"    async def scene(self) -> None: ...\n"
+    b"    async def stop(self) -> None: ...\n"
+    b"\n"
+    b'__all__ = ["Production"]\n'
+)
+class VerificationError(Exception):
+    pass
+
+
+def _parse_metadata(data: bytes) -> Message:
+    return BytesParser(policy=default).parsebytes(data)
+
+
+def _validate_entry_points(data: bytes) -> None:
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        strict=True,
+        delimiters=("=",),
+    )
+    parser.optionxform = str
+    try:
+        parser.read_string(data.decode("utf-8"), source="entry_points.txt")
+    except (configparser.Error, UnicodeError) as error:
+        raise VerificationError("wheel console entry point is malformed") from error
+
+    if parser.defaults() or parser.sections() != ["console_scripts"]:
+        raise VerificationError("wheel console entry point is not exact")
+    if dict(parser.items("console_scripts", raw=True)) != {
+        "troupe": "troupe._runtime:main"
+    }:
+        raise VerificationError("wheel console entry point is not exact")
+
+
+def _relative_package_files(names: Sequence[str], prefix: str) -> list[str]:
+    return sorted(name.removeprefix(prefix) for name in names if name.startswith(prefix))
+
+
+def _assert_thin_package(names: Sequence[str], prefix: str) -> None:
+    relative = _relative_package_files(names, prefix)
+    python_files = [name for name in relative if name.endswith(".py")]
+    stub_files = [name for name in relative if name.endswith(".pyi")]
+    if python_files != ["__init__.py"]:
+        raise VerificationError(f"unexpected Python package files: {python_files}")
+    if stub_files != ["__init__.pyi"]:
+        raise VerificationError(f"unexpected stub files: {stub_files}")
+    if relative.count("py.typed") != 1:
+        raise VerificationError("py.typed is missing or ambiguous")
+
+
+def _validate_source(source_package: Path) -> tuple[bytes, bytes]:
+    try:
+        files = [path for path in source_package.rglob("*") if path.is_file()]
+        names = [path.relative_to(source_package).as_posix() for path in files]
+        _assert_thin_package(names, "")
+
+        allowed = {"__init__.py", "__init__.pyi", "py.typed"}
+        for name in names:
+            if name in allowed:
+                continue
+            if name.startswith("__pycache__/") and name.endswith(".pyc"):
+                continue
+            if re.fullmatch(r"_runtime(?:\.[A-Za-z0-9_]+)*\.so", name):
+                continue
+            raise VerificationError(f"unexpected source package file: {name}")
+
+        wrapper = (source_package / "__init__.py").read_bytes()
+        stub = (source_package / "__init__.pyi").read_bytes()
+        if wrapper != EXPECTED_WRAPPER:
+            raise VerificationError("source wrapper is not the approved thin wrapper")
+        if stub != EXPECTED_STUB:
+            raise VerificationError("source stub is not the approved public API")
+        return wrapper, stub
+    except VerificationError:
+        raise
+    except OSError as error:
+        raise VerificationError(f"could not inspect source package: {error}") from error
+
+
+def _safe_archive_name(name: str) -> bool:
+    if not name or "\\" in name or name.startswith("/"):
+        return False
+    stripped = name.rstrip("/")
+    if not stripped:
+        return False
+    path = PurePosixPath(stripped)
+    return not path.is_absolute() and all(part not in ("", ".", "..") for part in path.parts)
+
+
+def _sdist_package_prefix(names: Sequence[str]) -> str:
+    matches = [
+        name.removesuffix("__init__.py")
+        for name in names
+        if name.endswith("/src/troupe/__init__.py")
+    ]
+    if len(matches) != 1:
+        raise VerificationError("sdist must contain one src/troupe package")
+    return matches[0]
+
+
+def _validate_sdist(
+    source_package: Path,
+    sdist: Path,
+    *,
+    expected: tuple[bytes, bytes] | None = None,
+) -> None:
+    wrapper, stub = expected if expected is not None else _validate_source(source_package)
+    try:
+        with tarfile.open(sdist, "r:*") as archive:
+            members = archive.getmembers()
+            names = [member.name for member in members]
+            if len(names) != len(set(names)):
+                raise VerificationError("sdist contains duplicate archive members")
+            if any(not _safe_archive_name(name) for name in names):
+                raise VerificationError("sdist contains an unsafe archive path")
+            if any(not (member.isfile() or member.isdir()) for member in members):
+                raise VerificationError("sdist contains a link or special archive member")
+
+            regular_names = [member.name for member in members if member.isfile()]
+            prefix = _sdist_package_prefix(regular_names)
+            package_names = [name for name in regular_names if name.startswith(prefix)]
+            _assert_thin_package(package_names, prefix)
+            if set(package_names) != {
+                f"{prefix}__init__.py",
+                f"{prefix}__init__.pyi",
+                f"{prefix}py.typed",
+            }:
+                raise VerificationError("sdist runtime package inventory is not exact")
+
+            wrapper_member = archive.extractfile(f"{prefix}__init__.py")
+            stub_member = archive.extractfile(f"{prefix}__init__.pyi")
+            if wrapper_member is None or wrapper_member.read() != wrapper:
+                raise VerificationError("sdist wrapper differs from source")
+            if stub_member is None or stub_member.read() != stub:
+                raise VerificationError("sdist stub differs from source")
+    except VerificationError:
+        raise
+    except (OSError, tarfile.TarError, KeyError) as error:
+        raise VerificationError(f"could not validate sdist: {error}") from error
+
+
+def _expanded_filename_tags(python: str, abi: str, platform: str) -> list[str]:
+    return [
+        f"{python_tag}-{abi_tag}-{platform_tag}"
+        for python_tag in python.split(".")
+        for abi_tag in abi.split(".")
+        for platform_tag in platform.split(".")
+    ]
+
+
+def _parse_wheel_filename(wheel: Path) -> tuple[list[str], list[str]]:
+    match = re.fullmatch(
+        r"troupe-0\.1\.0-(?P<python>[^-]+)-(?P<abi>[^-]+)-(?P<platform>[^-]+)\.whl",
+        wheel.name,
+    )
+    if match is None:
+        raise VerificationError("wheel filename is not troupe 0.1.0 with three tags")
+
+    expanded = _expanded_filename_tags(
+        match.group("python"),
+        match.group("abi"),
+        match.group("platform"),
+    )
+    platforms: list[str] = []
+    for tag in expanded:
+        python_tag, abi_tag, platform_tag = tag.split("-", maxsplit=2)
+        if python_tag != "cp310" or abi_tag != "abi3":
+            raise VerificationError("wheel must contain only cp310-abi3 tag tuples")
+        if not (
+            platform_tag == "manylinux2014_x86_64"
+            or re.fullmatch(r"manylinux_[0-9]+_[0-9]+_x86_64", platform_tag)
+        ):
+            raise VerificationError("wheel must target Linux x86_64 glibc")
+        platforms.append(platform_tag)
+    return expanded, platforms
+
+
+def _required_manylinux_platforms(required: str) -> set[str]:
+    if re.fullmatch(r"[0-9]+_[0-9]+", required) is None:
+        raise VerificationError(f"invalid required manylinux policy: {required}")
+    accepted = {f"manylinux_{required}_x86_64"}
+    if required == "2_17":
+        accepted.add("manylinux2014_x86_64")
+    return accepted
+
+
+def _validate_record(archive: WheelFile, infos: Sequence[zipfile.ZipInfo], record: str) -> None:
+    names = {info.filename for info in infos}
+    try:
+        rows = list(csv.reader(io.StringIO(archive.read(record).decode("utf-8"))))
+    except (csv.Error, UnicodeError, KeyError, WheelError) as error:
+        raise VerificationError(f"could not read wheel RECORD: {error}") from error
+
+    if any(len(row) != 3 for row in rows):
+        raise VerificationError("every RECORD row must contain exactly three columns")
+    paths = [row[0] for row in rows]
+    if len(paths) != len(set(paths)):
+        raise VerificationError("RECORD contains duplicate rows")
+    if set(paths) != names:
+        raise VerificationError("RECORD members do not exactly match the wheel")
+
+    for path, encoded_hash, encoded_size in rows:
+        if path == record:
+            if encoded_hash or encoded_size:
+                raise VerificationError("the RECORD self row must have empty hash and size")
+            continue
+        try:
+            data = archive.read(path)
+        except (KeyError, WheelError) as error:
+            raise VerificationError(f"could not read recorded wheel member: {path}") from error
+        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
+        if encoded_hash != f"sha256={digest.decode('ascii')}":
+            raise VerificationError(f"RECORD hash mismatch for {path}")
+        if encoded_size != str(len(data)):
+            raise VerificationError(f"RECORD size mismatch for {path}")
+
+
+def _validate_wheel(
+    source_package: Path,
+    wheel: Path,
+    *,
+    required_manylinux: str | None,
+    expected: tuple[bytes, bytes] | None = None,
+) -> None:
+    wrapper, stub = expected if expected is not None else _validate_source(source_package)
+    filename_tags, filename_platforms = _parse_wheel_filename(wheel)
+    if required_manylinux is not None and not (
+        set(filename_platforms) & _required_manylinux_platforms(required_manylinux)
+    ):
+        raise VerificationError("wheel does not contain the requested manylinux policy tag")
+
+    try:
+        with WheelFile(wheel) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise VerificationError("wheel contains duplicate archive members")
+            if any(not _safe_archive_name(info.filename) for info in archive.infolist()):
+                raise VerificationError("wheel contains an unsafe archive path")
+
+            native_libraries = [
+                name
+                for name in names
+                if PurePosixPath(name).parent == PurePosixPath("troupe")
+                and name.endswith(".so")
+            ]
+            if len(native_libraries) != 1 or re.fullmatch(
+                r"troupe/_runtime(?:\.[A-Za-z0-9_]+)*\.so", native_libraries[0]
+            ) is None:
+                raise VerificationError("wheel must contain exactly one native runtime module")
+
+            dist_info = "troupe-0.1.0.dist-info"
+            record = f"{dist_info}/RECORD"
+            expected_names = {
+                "troupe/__init__.py",
+                "troupe/__init__.pyi",
+                "troupe/py.typed",
+                native_libraries[0],
+                f"{dist_info}/METADATA",
+                f"{dist_info}/WHEEL",
+                f"{dist_info}/entry_points.txt",
+                record,
+            }
+            if set(names) != expected_names:
+                unexpected = sorted(set(names) - expected_names)
+                missing = sorted(expected_names - set(names))
+                raise VerificationError(
+                    f"wheel inventory differs (unexpected={unexpected}, missing={missing})"
+                )
+
+            for info in infos:
+                archive.read(info)
+            if archive.read("troupe/__init__.py") != wrapper:
+                raise VerificationError("wheel wrapper differs from source")
+            if archive.read("troupe/__init__.pyi") != stub:
+                raise VerificationError("wheel stub differs from source")
+
+            metadata = _parse_metadata(archive.read(f"{dist_info}/METADATA"))
+            if metadata.get("Name") != "troupe":
+                raise VerificationError("wheel has the wrong project name")
+            if metadata.get("Version") != "0.1.0":
+                raise VerificationError("wheel has the wrong project version")
+            if metadata.get("Requires-Python") != ">=3.10":
+                raise VerificationError("wheel has the wrong Requires-Python value")
+            if metadata.get_all("Requires-Dist"):
+                raise VerificationError("wheel must not declare runtime dependencies")
+
+            wheel_metadata = _parse_metadata(archive.read(f"{dist_info}/WHEEL"))
+            if wheel_metadata.get("Wheel-Version") != "1.0":
+                raise VerificationError("wheel must use Wheel-Version 1.0")
+            if wheel_metadata.get("Root-Is-Purelib") != "false":
+                raise VerificationError("native wheel must not be purelib")
+            wheel_tags = wheel_metadata.get_all("Tag") or []
+            if len(wheel_tags) != len(set(wheel_tags)):
+                raise VerificationError("WHEEL contains duplicate Tag fields")
+            if set(wheel_tags) != set(filename_tags):
+                raise VerificationError("wheel filename and WHEEL Tag set differ")
+
+            _validate_entry_points(archive.read(f"{dist_info}/entry_points.txt"))
+            _validate_record(archive, infos, record)
+    except VerificationError:
+        raise
+    except (
+        OSError,
+        ValueError,
+        zipfile.BadZipFile,
+        KeyError,
+        UnicodeError,
+        WheelError,
+    ) as error:
+        raise VerificationError(f"could not validate wheel: {error}") from error
+
+
+def _validate_artifacts(source_package: Path, sdist: Path, wheel: Path) -> None:
+    expected = _validate_source(source_package)
+    _validate_sdist(source_package, sdist, expected=expected)
+    _validate_wheel(source_package, wheel, required_manylinux=None, expected=expected)
+
+
+def _maturin_command(
+    output: Path,
+    release: bool,
+    target: str | None,
+    manylinux: str | None,
+) -> list[str]:
+    command = [
+        "maturin",
+        "build",
+        "--sdist",
+        "--locked",
+        "--manifest-path",
+        "rust/Cargo.toml",
+        "--out",
+        str(output),
+    ]
+    if release:
+        command.append("--release")
+    if target is not None:
+        command.extend(["--target", target])
+    if manylinux is not None:
+        command.extend(["--manylinux", manylinux])
+    return command
+
+
+def _build_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    result = dict(environ)
+    result.pop("CONDA_PREFIX", None)
+    return result
+
+
+def _smoke_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    result = dict(environ)
+    for name in ("CONDA_PREFIX", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        result.pop(name, None)
+    result["PYTHONDONTWRITEBYTECODE"] = "1"
+    return result
+
+
+def _validate_installed_paths(
+    child_venv: Path,
+    payload: Mapping[str, object],
+) -> None:
+    root = child_venv.resolve()
+    for name in ("troupe_file", "runtime_file", "dependency_file"):
+        try:
+            value = payload[name]
+            if not isinstance(value, str):
+                raise TypeError(f"{name} is not a string")
+            Path(value).resolve(strict=True).relative_to(root)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            raise VerificationError(f"{name} was imported outside the child venv") from error
+
+
+def _only_artifact(output: Path, pattern: str) -> Path:
+    matches = list(output.glob(pattern))
+    if len(matches) != 1:
+        raise VerificationError(f"expected one {pattern} artifact, found {len(matches)}")
+    return matches[0]
+
+
+def _run(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    forbidden_stderr: str | None = None,
+) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=dict(env),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise VerificationError(f"could not execute {command[0]}: {error}") from error
+    if completed.returncode != 0:
+        output = completed.stdout + completed.stderr
+        raise VerificationError(f"command failed ({completed.returncode}): {output.strip()}")
+    if forbidden_stderr is not None and forbidden_stderr in completed.stderr:
+        raise VerificationError(f"command emitted forbidden stderr: {completed.stderr.strip()}")
+    return completed.stdout
+
+
+SMOKE = r'''
+import asyncio
+import importlib.metadata
+import inspect
+import json
+import sysconfig
+
+import troupe
+import troupe._runtime as runtime
+import troupe_smoke_dependency
+
+assert troupe.Production is runtime.Production
+assert troupe.Production.__module__ == "troupe"
+assert troupe.__all__ == ["Production"]
+assert sysconfig.get_config_var("Py_GIL_DISABLED") != 1
+
+production_type = troupe.Production
+for args in ([], ["--value", "1"], ["\udcff"]):
+    assert isinstance(production_type(args), production_type)
+for call in (
+    lambda: production_type(),
+    lambda: production_type([], []),
+    lambda: production_type(args=[]),
+    lambda: production_type(()),
+    lambda: production_type("value"),
+    lambda: production_type([1]),
+):
+    try:
+        call()
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("invalid constructor arguments were accepted")
+
+base = production_type([])
+assert not hasattr(base, "args")
+
+class CustomProduction(production_type):
+    def __init__(self, args):
+        self.received = args
+
+    async def scene(self):
+        return None
+
+async def exercise():
+    start = base.start()
+    scene = base.scene()
+    stop = base.stop()
+    assert inspect.isawaitable(start)
+    assert inspect.isawaitable(scene)
+    assert inspect.isawaitable(stop)
+    assert await start is None
+    try:
+        await scene
+    except NotImplementedError as error:
+        assert str(error) == "Production.scene() is not implemented"
+    else:
+        raise AssertionError("base scene did not fail")
+    assert await stop is None
+
+    args = ["--custom"]
+    custom = CustomProduction(args)
+    assert type(custom) is CustomProduction
+    assert custom.received is args
+    assert await custom.start() is None
+    assert await custom.scene() is None
+    assert await custom.stop() is None
+
+asyncio.run(exercise())
+entries = [
+    [entry.name, entry.value]
+    for entry in importlib.metadata.entry_points(group="console_scripts")
+    if entry.name == "troupe"
+]
+assert entries == [["troupe", "troupe._runtime:main"]]
+assert troupe_smoke_dependency.VALUE == "dependency-ok"
+print(json.dumps({
+    "troupe_file": troupe.__file__,
+    "runtime_file": runtime.__file__,
+    "dependency_file": troupe_smoke_dependency.__file__,
+    "production_identity": troupe.Production is runtime.Production,
+    "production_module": troupe.Production.__module__,
+    "exports": troupe.__all__,
+    "gil_disabled": sysconfig.get_config_var("Py_GIL_DISABLED") == 1,
+    "surrogate_constructor": True,
+    "default_hooks": True,
+    "subclass_override": True,
+    "entry_points": entries,
+}))
+'''
+
+
+def _build_dependency_wheel(workspace: Path) -> Path:
+    wheel = workspace / "troupe_smoke_dependency-1.0.0-py3-none-any.whl"
+    dist_info = "troupe_smoke_dependency-1.0.0.dist-info"
+    module = (ROOT / "tests" / "fixtures" / "wheel_smoke_dependency.py").read_bytes()
+    metadata = (
+        b"Metadata-Version: 2.1\n"
+        b"Name: troupe-smoke-dependency\n"
+        b"Version: 1.0.0\n"
+    )
+    wheel_metadata = (
+        b"Wheel-Version: 1.0\n"
+        b"Generator: troupe-wheel-verifier\n"
+        b"Root-Is-Purelib: true\n"
+        b"Tag: py3-none-any\n"
+    )
+    try:
+        with WheelFile(wheel, "w") as archive:
+            archive.writestr("troupe_smoke_dependency.py", module)
+            archive.writestr(f"{dist_info}/METADATA", metadata)
+            archive.writestr(f"{dist_info}/WHEEL", wheel_metadata)
+    except (OSError, WheelError, zipfile.BadZipFile) as error:
+        raise VerificationError(f"could not build smoke dependency wheel: {error}") from error
+    return wheel
+
+
+def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> None:
+    expected_values: dict[str, object] = {
+        "production_identity": True,
+        "production_module": "troupe",
+        "exports": ["Production"],
+        "gil_disabled": False,
+        "surrogate_constructor": True,
+        "default_hooks": True,
+        "subclass_override": True,
+        "entry_points": [["troupe", "troupe._runtime:main"]],
+    }
+    expected_keys = {
+        "troupe_file",
+        "runtime_file",
+        "dependency_file",
+        *expected_values,
+    }
+    if set(payload) != expected_keys:
+        raise VerificationError("wheel smoke payload fields are not exact")
+    for name, value in expected_values.items():
+        if payload.get(name) != value:
+            raise VerificationError(f"wheel smoke reported an invalid {name}")
+    _validate_installed_paths(child_venv, payload)
+
+
+def _validate_smoke_tools(child_venv: Path, env: Mapping[str, str]) -> None:
+    expected_path = f"{child_venv}/bin:/usr/bin:/bin"
+    if env.get("PATH") != expected_path:
+        raise VerificationError("wheel smoke PATH is not isolated")
+    if shutil.which("uv", path=expected_path) is not None:
+        raise VerificationError("uv is visible inside the wheel smoke environment")
+    if shutil.which("troupe", path=expected_path) != str(child_venv / "bin" / "troupe"):
+        raise VerificationError("wheel smoke did not resolve the child venv troupe command")
+
+
+def _validate_smoke_events(path: Path, raw_args: list[str]) -> None:
+    expected = [
+        ["args", raw_args],
+        ["start"],
+        ["scene", "dependency-ok", "module-ok", "resource-ok"],
+        ["stop"],
+    ]
+    try:
+        actual = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise VerificationError("wheel smoke did not write a valid event log") from error
+    if actual != expected:
+        raise VerificationError("wheel smoke event log differs from the lifecycle contract")
+
+
+def _smoke_wheel(wheel: Path, workspace: Path) -> None:
+    child_venv = workspace / "child-venv"
+    outside = workspace / "outside-repository"
+    outside.mkdir()
+    builder = venv.EnvBuilder(with_pip=True)
+    original_base_executable = sys._base_executable
+    try:
+        resolved_base_executable = str(
+            Path(original_base_executable).resolve(strict=True)
+        )
+        try:
+            sys._base_executable = resolved_base_executable
+            builder.create(child_venv)
+        finally:
+            sys._base_executable = original_base_executable
+    except OSError as error:
+        raise VerificationError(f"could not create child venv: {error}") from error
+
+    dependency = _build_dependency_wheel(workspace)
+    child_python = str(child_venv / "bin" / "python")
+    env = _smoke_environment(os.environ)
+    env["PATH"] = f"{child_venv}/bin:/usr/bin:/bin"
+    _run(
+        [
+            child_python,
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-deps",
+            str(wheel.resolve()),
+            str(dependency.resolve()),
+        ],
+        cwd=outside,
+        env=env,
+    )
+    _run([child_python, "-m", "pip", "check"], cwd=outside, env=env)
+    output = _run([child_python, "-c", SMOKE], cwd=outside, env=env)
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise VerificationError("wheel smoke did not return valid JSON metadata") from error
+    if not isinstance(payload, dict):
+        raise VerificationError("wheel smoke metadata must be an object")
+    _validate_smoke_payload(child_venv, payload)
+    _validate_smoke_tools(child_venv, env)
+
+    _run(["troupe", "--help"], cwd=outside, env=env, forbidden_stderr="troupe:")
+    events = workspace / "events.json"
+    fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    raw_args = ["--events", str(events), "--value", "7", "input.txt"]
+    _run(
+        ["troupe", "--production", str(fixture), "--", *raw_args],
+        cwd=outside,
+        env=env,
+        forbidden_stderr="troupe:",
+    )
+    _validate_smoke_events(events, raw_args)
+
+
+def _write_sha256(wheel: Path, checksum: Path) -> None:
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    checksum.write_bytes(f"{digest}  {wheel.name}\n".encode("ascii"))
+
+
+def _validate_sha256(wheel: Path, checksum: Path) -> None:
+    try:
+        expected = f"{hashlib.sha256(wheel.read_bytes()).hexdigest()}  {wheel.name}\n".encode(
+            "ascii"
+        )
+        actual = checksum.read_bytes()
+    except (OSError, UnicodeError) as error:
+        raise VerificationError(f"could not read wheel checksum: {error}") from error
+    if actual != expected:
+        raise VerificationError("SHA256SUMS is not exact or does not match the wheel")
+
+
+def _discard_staging(staging: Path | None) -> None:
+    if staging is not None and staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _stage_publication(wheel: Path, output: Path) -> Path:
+    if output.exists():
+        raise VerificationError(f"output directory already exists: {output}")
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
+    except OSError as error:
+        raise VerificationError(f"could not create publication staging: {error}") from error
+    try:
+        staged_wheel = staging / wheel.name
+        shutil.copy2(wheel, staged_wheel)
+        checksum = staging / "SHA256SUMS"
+        _write_sha256(staged_wheel, checksum)
+        _validate_sha256(staged_wheel, checksum)
+        return staging
+    except Exception as error:
+        _discard_staging(staging)
+        if isinstance(error, VerificationError):
+            raise
+        raise VerificationError(f"could not stage wheel publication: {error}") from error
+
+
+def _commit_publication(staging: Path, output: Path) -> None:
+    try:
+        if output.exists():
+            raise VerificationError(f"output directory already exists: {output}")
+        (staged_wheel,) = staging.glob("*.whl")
+        checksum = staging / "SHA256SUMS"
+        _validate_sha256(staged_wheel, checksum)
+
+        parent = output.parent.stat()
+        staged_wheel.chmod(0o644)
+        checksum.chmod(0o644)
+        staging.chmod(0o755)
+        os.chown(staged_wheel, parent.st_uid, parent.st_gid)
+        os.chown(checksum, parent.st_uid, parent.st_gid)
+        os.chown(staging, parent.st_uid, parent.st_gid)
+        os.rename(staging, output)
+    except Exception as error:
+        _discard_staging(staging)
+        if isinstance(error, VerificationError):
+            raise
+        raise VerificationError(f"could not publish wheel atomically: {error}") from error
+
+
+class _ModeParser(argparse.ArgumentParser):
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if parsed.build:
+            if parsed.sha256_file is not None:
+                self.error("--sha256-file is valid only with --wheel")
+        elif parsed.sha256_file is None:
+            self.error("--wheel requires --sha256-file")
+        elif parsed.release or parsed.target or parsed.manylinux or parsed.output_dir:
+            self.error("build options are valid only with --build")
+        return parsed
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = _ModeParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--build", action="store_true")
+    mode.add_argument("--wheel", type=Path)
+    parser.add_argument("--sha256-file", type=Path)
+    parser.add_argument("--release", action="store_true")
+    parser.add_argument("--target")
+    parser.add_argument("--manylinux")
+    parser.add_argument("--output-dir", type=Path)
+    return parser
+
+
+def _build_mode(arguments: argparse.Namespace) -> None:
+    output: Path | None = arguments.output_dir
+    if output is not None and output.exists():
+        raise VerificationError(f"output directory already exists: {output}")
+
+    staging: Path | None = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="troupe-wheel-") as temporary:
+            workspace = Path(temporary)
+            artifacts = workspace / "artifacts"
+            _run(
+                _maturin_command(
+                    artifacts,
+                    arguments.release,
+                    arguments.target,
+                    arguments.manylinux,
+                ),
+                cwd=ROOT,
+                env=_build_environment(os.environ),
+            )
+            sdist = _only_artifact(artifacts, "*.tar.gz")
+            wheel = _only_artifact(artifacts, "*.whl")
+            expected = _validate_source(SOURCE_PACKAGE)
+            _validate_sdist(SOURCE_PACKAGE, sdist, expected=expected)
+            _validate_wheel(
+                SOURCE_PACKAGE,
+                wheel,
+                required_manylinux=arguments.manylinux,
+                expected=expected,
+            )
+            _smoke_wheel(wheel, workspace)
+            if output is not None:
+                staging = _stage_publication(wheel, output)
+    except Exception:
+        _discard_staging(staging)
+        raise
+
+    if output is not None:
+        if staging is None:
+            raise VerificationError("wheel publication was not staged")
+        _commit_publication(staging, output)
+
+
+def _wheel_mode(arguments: argparse.Namespace) -> None:
+    wheel: Path = arguments.wheel
+    checksum: Path = arguments.sha256_file
+    _validate_sha256(wheel, checksum)
+    with tempfile.TemporaryDirectory(prefix="troupe-wheel-") as temporary:
+        expected = _validate_source(SOURCE_PACKAGE)
+        _validate_wheel(
+            SOURCE_PACKAGE,
+            wheel,
+            required_manylinux=None,
+            expected=expected,
+        )
+        _smoke_wheel(wheel, Path(temporary))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = _parser().parse_args(argv)
+    try:
+        if arguments.build:
+            _build_mode(arguments)
+        else:
+            _wheel_mode(arguments)
+    except (VerificationError, OSError) as error:
+        print(f"troupe artifact verification failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
