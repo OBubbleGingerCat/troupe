@@ -38,6 +38,7 @@ def test_runtime_stub_and_typed_consumers(tmp_path: Path) -> None:
         "--show-error-codes",
         "tests/typing/positive.py",
         "examples/hello_actor/production.py",
+        "examples/repeating_scenes/production.py",
         "examples/actor_pipeline/production.py",
         "examples/cooperative_workers/production.py",
         "examples/cancellation_cleanup/production.py",

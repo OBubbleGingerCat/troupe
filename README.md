@@ -30,9 +30,10 @@ the public `Production`, `Actor`, `ActorHandle`, `Cue`, `CueContextError`,
 ## Examples
 
 [Progressive examples](examples/README.md) cover a first Actor and Effect,
-Actor-to-Actor routing, cooperative workers with per-Actor FIFO execution, and
-structured cancellation cleanup. Every example is a production package that
-runs through the same `troupe --production` command used in deployment.
+continuously repeated Scenes, Actor-to-Actor routing, cooperative workers with
+per-Actor FIFO execution, and structured cancellation cleanup. Every example is
+a production package that runs through the same `troupe --production` command
+used in deployment.
 
 ## Production API
 

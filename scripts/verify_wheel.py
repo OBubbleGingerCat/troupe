@@ -149,6 +149,8 @@ EXPECTED_EXAMPLE_FILES = (
     "cooperative_workers/production.py",
     "hello_actor/__init__.py",
     "hello_actor/production.py",
+    "repeating_scenes/__init__.py",
+    "repeating_scenes/production.py",
 )
 SMOKE_TIMEOUT = 10.0
 

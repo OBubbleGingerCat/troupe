@@ -19,6 +19,7 @@ EXAMPLES = ROOT / "examples"
 TIMEOUT = 5.0
 EXAMPLE_NAMES = (
     "hello_actor",
+    "repeating_scenes",
     "actor_pipeline",
     "cooperative_workers",
     "cancellation_cleanup",
@@ -53,6 +54,7 @@ def _collect_output(
     process: subprocess.Popen[bytes],
     example: str,
     *,
+    readiness_lines: int = 1,
     timeout: float = TIMEOUT,
 ) -> tuple[list[str], bytes]:
     assert process.stdout is not None
@@ -67,7 +69,7 @@ def _collect_output(
 
     try:
         readiness_deadline = time.monotonic() + timeout
-        while b"\n" not in buffers[stdout_fd]:
+        while buffers[stdout_fd].count(b"\n") < readiness_lines:
             if stdout_fd not in selector.get_map():
                 output = bytes(buffers[stdout_fd] + buffers[stderr_fd])
                 raise AssertionError(
@@ -101,6 +103,8 @@ def _collect_output(
 
 def _run_example(
     example: str,
+    *,
+    readiness_lines: int = 1,
 ) -> list[str]:
     console = Path(sys.executable).with_name("troupe")
     assert console.is_file()
@@ -125,7 +129,11 @@ def _run_example(
         bufsize=0,
     )
     try:
-        lines, stderr = _collect_output(process, example)
+        lines, stderr = _collect_output(
+            process,
+            example,
+            readiness_lines=readiness_lines,
+        )
         assert process.returncode == 0, stderr.decode(errors="replace")
         assert stderr == b""
         return lines
@@ -183,6 +191,13 @@ def test_examples_are_documented_public_production_packages() -> None:
 
 def test_hello_actor_runs_through_the_literal_console() -> None:
     assert _run_example("hello_actor") == ["Hello, Ada!"]
+
+
+def test_repeating_scenes_run_as_distinct_scene_calls() -> None:
+    lines = _run_example("repeating_scenes", readiness_lines=3)
+
+    assert len(lines) >= 3
+    assert lines == [f"scene:{number}" for number in range(1, len(lines) + 1)]
 
 
 def test_actor_pipeline_reports_query_and_provenance() -> None:

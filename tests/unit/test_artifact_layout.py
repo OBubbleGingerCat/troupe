@@ -179,6 +179,8 @@ EXAMPLE_FILES = {
     "cooperative_workers/production.py": b"import troupe\n",
     "hello_actor/__init__.py": b"",
     "hello_actor/production.py": b"import troupe\n",
+    "repeating_scenes/__init__.py": b"",
+    "repeating_scenes/production.py": b"import troupe\n",
 }
 
 
