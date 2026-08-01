@@ -64,7 +64,15 @@ def test_runtime_is_a_private_native_surface() -> None:
 
     assert native._Runtime.__module__ == "troupe._runtime"
     assert "_Runtime" not in vars(troupe)
-    assert troupe.__all__ == ["Production"]
+    assert troupe.__all__ == [
+        "Actor",
+        "ActorHandle",
+        "Cue",
+        "CueContextError",
+        "Effect",
+        "EffectContextError",
+        "Production",
+    ]
 
 
 def test_serial_lifecycle_waits_at_every_phase_boundary() -> None:

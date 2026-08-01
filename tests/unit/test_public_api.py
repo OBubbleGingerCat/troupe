@@ -18,12 +18,47 @@ def _modules() -> tuple[ModuleType, ModuleType]:
 def test_public_symbol_is_the_native_class() -> None:
     troupe, runtime = _modules()
 
-    assert troupe.Production is runtime.Production
-    assert troupe.Production.__module__ == "troupe"
-    assert troupe.__all__ == ["Production"]
-    assert {name for name in vars(troupe) if not name.startswith("_")} == {
-        "Production"
-    }
+    expected = [
+        "Actor",
+        "ActorHandle",
+        "Cue",
+        "CueContextError",
+        "Effect",
+        "EffectContextError",
+        "Production",
+    ]
+    assert troupe.__all__ == expected
+    assert {name for name in vars(troupe) if not name.startswith("_")} == set(expected)
+    for name in expected:
+        public = getattr(troupe, name)
+        assert public is getattr(runtime, name)
+        assert public.__module__ == "troupe"
+
+
+def test_actor_and_effect_are_subclassable_but_handle_and_cue_are_final() -> None:
+    troupe, _ = _modules()
+
+    class CustomActor(troupe.Actor):
+        pass
+
+    class CustomEffect(troupe.Effect):
+        pass
+
+    class CustomCueContextError(troupe.CueContextError):
+        pass
+
+    class CustomEffectContextError(troupe.EffectContextError):
+        pass
+
+    assert issubclass(CustomActor, troupe.Actor)
+    assert issubclass(CustomEffect, troupe.Effect)
+    assert issubclass(CustomCueContextError, RuntimeError)
+    assert issubclass(CustomEffectContextError, RuntimeError)
+
+    with pytest.raises(TypeError):
+        type("CustomHandle", (troupe.ActorHandle,), {})
+    with pytest.raises(TypeError):
+        type("CustomCue", (troupe.Cue,), {})
 
 
 def test_constructor_accepts_only_one_positional_list_of_strings() -> None:

@@ -101,6 +101,98 @@ def test_scene_failure_stops_scenes_and_still_stops_once() -> None:
     assert isinstance(failures[0].error, SceneBoom)
 
 
+def test_scene_error_waits_for_cue_cleanup_without_adding_a_phase() -> None:
+    scene_error = RuntimeError("root scene failed")
+    cue_cleanup_error = RuntimeError("cue cleanup failed")
+    events: list[str] = []
+    cue_errors: list[BaseException] = []
+    stop_before_release: list[bool] = []
+    run_done_before_release: list[bool] = []
+    actor_entered: asyncio.Event
+    cleanup_entered: asyncio.Event
+    cleanup_release: asyncio.Event
+    caller_done: asyncio.Event
+    stop_entered: asyncio.Event
+    runtime = _native()._Runtime()
+
+    class CleanupActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            actor_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("cue-cleanup-start")
+                cleanup_entered.set()
+                await cleanup_release.wait()
+                events.append("cue-cleanup-error")
+                raise cue_cleanup_error
+
+    class SceneFailureWithCue(troupe.Production):
+        async def start(self) -> None:
+            events.append("start")
+
+        async def scene(self) -> None:
+            events.append("scene")
+            handle = self.cast_actor(
+                CleanupActor,
+                name="failure-cleanup",
+                actor_args=(),
+                actor_kwargs={},
+            )
+
+            async def consume() -> None:
+                try:
+                    await handle.cue({})
+                except BaseException as error:
+                    cue_errors.append(error)
+                finally:
+                    caller_done.set()
+
+            asyncio.create_task(consume())
+            await actor_entered.wait()
+            raise scene_error
+
+        async def stop(self) -> None:
+            events.append("stop")
+            stop_entered.set()
+
+    async def scenario() -> BaseException:
+        nonlocal actor_entered, cleanup_entered, cleanup_release
+        nonlocal caller_done, stop_entered
+        actor_entered = asyncio.Event()
+        cleanup_entered = asyncio.Event()
+        cleanup_release = asyncio.Event()
+        caller_done = asyncio.Event()
+        stop_entered = asyncio.Event()
+        failure_task = asyncio.create_task(
+            _capture_failure(runtime, SceneFailureWithCue([]))
+        )
+        try:
+            await asyncio.wait_for(cleanup_entered.wait(), TIMEOUT)
+            stop_before_release.append(stop_entered.is_set())
+            run_done_before_release.append(failure_task.done())
+        finally:
+            cleanup_release.set()
+        error = await failure_task
+        await asyncio.wait_for(caller_done.wait(), TIMEOUT)
+        return error
+
+    error = asyncio.run(scenario())
+    failures = _assert_failure(error, ("scene",))
+    assert failures[0].error is scene_error
+    assert stop_before_release == [False]
+    assert run_done_before_release == [False]
+    assert cue_errors == [cue_cleanup_error]
+    assert events == [
+        "start",
+        "scene",
+        "cue-cleanup-start",
+        "cue-cleanup-error",
+        "stop",
+    ]
+    assert traceback.extract_tb(scene_error.__traceback__)[-1].name == "scene"
+
+
 def test_stop_failure_after_normal_shutdown_is_not_retried() -> None:
     class StopBoom(Exception):
         pass
