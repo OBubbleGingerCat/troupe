@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import ast
 import base64
 import contextlib
 import csv
 import hashlib
+import importlib
 import importlib.util
 import importlib.metadata
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -19,7 +22,7 @@ import warnings
 import zipfile
 from collections.abc import Generator
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -33,29 +36,345 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "troupe"
+EXPECTED_RUST_SOURCES = [
+    "actor.rs",
+    "actor_handle.rs",
+    "actor_registry.rs",
+    "cli.rs",
+    "cue.rs",
+    "cue_future.rs",
+    "diagnostics.rs",
+    "effect.rs",
+    "failure.rs",
+    "invocation.rs",
+    "lib.rs",
+    "loader.rs",
+    "mailbox.rs",
+    "production.rs",
+    "python_task.rs",
+    "runtime.rs",
+    "scene_context.rs",
+    "signals.rs",
+]
 
 EXPECTED_WRAPPER = (
+    b"from ._runtime import Actor as Actor\n"
+    b"from ._runtime import ActorHandle as ActorHandle\n"
+    b"from ._runtime import Cue as Cue\n"
+    b"from ._runtime import CueContextError as CueContextError\n"
+    b"from ._runtime import Effect as Effect\n"
+    b"from ._runtime import EffectContextError as EffectContextError\n"
     b"from ._runtime import Production as Production\n"
     b"\n"
-    b'__all__ = ["Production"]\n'
+    b"__all__ = [\n"
+    b'    "Actor",\n'
+    b'    "ActorHandle",\n'
+    b'    "Cue",\n'
+    b'    "CueContextError",\n'
+    b'    "Effect",\n'
+    b'    "EffectContextError",\n'
+    b'    "Production",\n'
+    b"]\n"
 )
 EXPECTED_STUB = (
+    b"from __future__ import annotations\n"
+    b"\n"
+    b"from collections.abc import Mapping\n"
+    b"from re import Pattern\n"
+    b"from typing import Any, TypeVar, final, overload\n"
     b"from typing_extensions import disjoint_base\n"
+    b"\n"
+    b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Actor:\n"
+    b"    def __init__(self) -> None: ...\n"
+    b"    @property\n"
+    b"    def name(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def production(self) -> Production: ...\n"
+    b"    def make_effect(\n"
+    b"        self,\n"
+    b"        effect_type: type[_EffectT],\n"
+    b"        *,\n"
+    b"        effect_args: tuple[Any, ...],\n"
+    b"        effect_kwargs: dict[str, Any],\n"
+    b"    ) -> _EffectT: ...\n"
+    b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
+    b"\n"
+    b"@final\n"
+    b"class ActorHandle:\n"
+    b"    @property\n"
+    b"    def name(self) -> str: ...\n"
+    b"    async def cue(self, instruction: dict[Any, Any]) -> tuple[Effect, ...]: ...\n"
+    b"\n"
+    b"@final\n"
+    b"class Cue:\n"
+    b"    @property\n"
+    b"    def id(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def instruction(self) -> Mapping[Any, Any]: ...\n"
+    b"    @property\n"
+    b"    def source(self) -> str: ...\n"
+    b"\n"
+    b"class CueContextError(RuntimeError): ...\n"
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Effect:\n"
+    b"    @property\n"
+    b"    def id(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def owner(self) -> str: ...\n"
+    b"\n"
+    b"class EffectContextError(RuntimeError): ...\n"
     b"\n"
     b"@disjoint_base\n"
     b"class Production:\n"
     b"    def __new__(cls, args: list[str], /) -> Production: ...\n"
+    b"    def cast_actor(\n"
+    b"        self,\n"
+    b"        actor_type: type[Actor],\n"
+    b"        *,\n"
+    b"        name: str,\n"
+    b"        actor_args: tuple[Any, ...],\n"
+    b"        actor_kwargs: dict[str, Any],\n"
+    b"    ) -> ActorHandle: ...\n"
+    b"    @overload\n"
+    b"    def get_actor(self, name: str) -> ActorHandle | None: ...\n"
+    b"    @overload\n"
+    b"    def get_actor(self, pattern: Pattern[str]) -> list[ActorHandle]: ...\n"
+    b"    def get_actors(self) -> list[ActorHandle]: ...\n"
     b"    async def start(self) -> None: ...\n"
     b"    async def scene(self) -> None: ...\n"
     b"    async def stop(self) -> None: ...\n"
     b"\n"
-    b'__all__ = ["Production"]\n'
+    b"__all__ = [\n"
+    b'    "Actor",\n'
+    b'    "ActorHandle",\n'
+    b'    "Cue",\n'
+    b'    "CueContextError",\n'
+    b'    "Effect",\n'
+    b'    "EffectContextError",\n'
+    b'    "Production",\n'
+    b"]\n"
 )
+EXPECTED_PY_TYPED = b""
 EXPECTED_ENTRY_POINTS = b"[console_scripts]\ntroupe = troupe._runtime:main\n"
+PUBLIC_EXPORTS = [
+    "Actor",
+    "ActorHandle",
+    "Cue",
+    "CueContextError",
+    "Effect",
+    "EffectContextError",
+    "Production",
+]
+
+
+def _is_module_path(name: str, root: str) -> bool:
+    return name == root or name.startswith(f"{root}.")
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _dotted_name(node.value)
+        return f"{owner}.{node.attr}" if owner is not None else None
+    return None
 
 
 def _toml(path: Path) -> dict[str, Any]:
     return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _rust_without_comments(source: str) -> str:
+    output: list[str] = []
+    index = 0
+    block_depth = 0
+
+    while index < len(source):
+        if block_depth:
+            if source.startswith("/*", index):
+                block_depth += 1
+                output.extend("  ")
+                index += 2
+            elif source.startswith("*/", index):
+                block_depth -= 1
+                output.extend("  ")
+                index += 2
+            else:
+                output.append("\n" if source[index] == "\n" else " ")
+                index += 1
+            continue
+
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            if newline == -1:
+                output.extend(" " * (len(source) - index))
+                break
+            output.extend(" " * (newline - index))
+            output.append("\n")
+            index = newline + 1
+            continue
+
+        if source.startswith("/*", index):
+            block_depth = 1
+            output.extend("  ")
+            index += 2
+            continue
+
+        raw = re.match(r"(?:br|cr|r)(?P<hashes>#{0,255})\"", source[index:])
+        if raw is not None:
+            delimiter = '"' + raw.group("hashes")
+            end = source.find(delimiter, index + raw.end())
+            if end == -1:
+                output.append(source[index:])
+                break
+            end += len(delimiter)
+            output.append(source[index:end])
+            index = end
+            continue
+
+        character = re.match(
+            r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\})|[^\\'\n])'",
+            source[index:],
+        )
+        if character is not None:
+            end = index + character.end()
+            output.append(source[index:end])
+            index = end
+            continue
+
+        if source[index] == '"':
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                if source[end] == '"':
+                    end += 1
+                    break
+                end += 1
+            output.append(source[index:end])
+            index = end
+            continue
+
+        output.append(source[index])
+        index += 1
+
+    return "".join(output)
+
+
+def _rust_without_test_modules(source: str) -> str:
+    code = _rust_without_comments(source)
+    structure = list(code)
+    index = 0
+
+    while index < len(code):
+        raw = re.match(r"(?:br|cr|r)(?P<hashes>#{0,255})\"", code[index:])
+        if raw is not None:
+            delimiter = '"' + raw.group("hashes")
+            end = code.find(delimiter, index + raw.end())
+            end = len(code) if end == -1 else end + len(delimiter)
+        else:
+            character = re.match(
+                r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\})|[^\\'\n])'",
+                code[index:],
+            )
+            if character is not None:
+                end = index + character.end()
+            elif code[index] == '"':
+                end = index + 1
+                while end < len(code):
+                    if code[end] == "\\":
+                        end += 2
+                        continue
+                    if code[end] == '"':
+                        end += 1
+                        break
+                    end += 1
+            else:
+                index += 1
+                continue
+
+        for masked in range(index, min(end, len(code))):
+            if structure[masked] != "\n":
+                structure[masked] = " "
+        index = end
+
+    structure_text = "".join(structure)
+    module = re.compile(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+    )
+    output = list(code)
+    search_from = 0
+    while match := module.search(structure_text, search_from):
+        depth = 1
+        end = match.end()
+        while end < len(structure_text) and depth:
+            if structure_text[end] == "{":
+                depth += 1
+            elif structure_text[end] == "}":
+                depth -= 1
+            end += 1
+        if depth:
+            raise ValueError("unbalanced #[cfg(test)] module")
+        for removed in range(match.start(), end):
+            if output[removed] != "\n":
+                output[removed] = " "
+        search_from = end
+
+    return "".join(output)
+
+
+def test_rust_comment_stripper_preserves_literals_and_removes_comments() -> None:
+    source = """\
+// PyModule::import(py, "contextvars");
+/* outer /* struct CuedScope; */ comment */
+let ordinary = "/* not a comment */";
+let raw = r#"// not a comment"#;
+let character = '/';
+let lifetime: Python<'_>;
+PyModule::import(py, "contextvars");
+let context_name = c"contextvars";
+struct CuedScope;
+"""
+
+    code = _rust_without_comments(source)
+
+    assert code.count('PyModule::import(py, "contextvars");') == 1
+    assert '"/* not a comment */"' in code
+    assert 'r#"// not a comment"#' in code
+    assert "'/'" in code
+    assert "Python<'_>" in code
+    assert 'c"contextvars"' in code
+    assert code.count("struct CuedScope;") == 1
+
+
+def test_rust_runtime_filter_removes_only_cfg_test_modules() -> None:
+    source = '''\
+let runtime_name = "ContextVar";
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    type Worker = JoinHandle<()>;
+    const TEST_NAME: &str = "ContextVar";
+    mod nested { const VALUE: &str = "}"; }
+}
+let runtime_after = c"contextvars";
+'''
+
+    code = _rust_without_test_modules(source)
+
+    assert code.count('"ContextVar"') == 1
+    assert "TEST_NAME" not in code
+    assert "mpsc" not in code
+    assert "JoinHandle" not in code
+    assert "mod nested" not in code
+    assert 'c"contextvars"' in code
+    with pytest.raises(ValueError, match=r"^unbalanced #\[cfg\(test\)\] module$"):
+        _rust_without_test_modules("#[cfg(test)] mod tests {")
 
 
 def _verifier() -> ModuleType:
@@ -142,14 +461,14 @@ def _synthetic_artifacts(
     extra_package_python: bool = False,
     source_wrapper: bytes = EXPECTED_WRAPPER,
     source_stub: bytes | None = EXPECTED_STUB,
-    source_py_typed: bool = True,
+    source_py_typed: bytes | None = EXPECTED_PY_TYPED,
     sdist_wrapper: bytes = EXPECTED_WRAPPER,
     sdist_stub: bytes | None = EXPECTED_STUB,
-    sdist_py_typed: bool = True,
+    sdist_py_typed: bytes | None = EXPECTED_PY_TYPED,
     sdist_unsafe: str | None = None,
     wheel_wrapper: bytes = EXPECTED_WRAPPER,
     wheel_stub: bytes | None = EXPECTED_STUB,
-    wheel_py_typed: bool = True,
+    wheel_py_typed: bytes | None = EXPECTED_PY_TYPED,
     native_count: int = 1,
     runtime_stem: str = "_runtime",
     extra_native: str | None = None,
@@ -171,8 +490,8 @@ def _synthetic_artifacts(
     (source / "__init__.py").write_bytes(source_wrapper)
     if source_stub is not None:
         (source / "__init__.pyi").write_bytes(source_stub)
-    if source_py_typed:
-        (source / "py.typed").touch()
+    if source_py_typed is not None:
+        (source / "py.typed").write_bytes(source_py_typed)
     if extra_source_python:
         (source / "nested").mkdir()
         (source / "nested" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -185,8 +504,8 @@ def _synthetic_artifacts(
         _add_tar_bytes(archive, f"{sdist_root}/__init__.py", sdist_wrapper)
         if sdist_stub is not None:
             _add_tar_bytes(archive, f"{sdist_root}/__init__.pyi", sdist_stub)
-        if sdist_py_typed:
-            _add_tar_bytes(archive, f"{sdist_root}/py.typed", b"")
+        if sdist_py_typed is not None:
+            _add_tar_bytes(archive, f"{sdist_root}/py.typed", sdist_py_typed)
         if extra_sdist_python:
             _add_tar_bytes(archive, f"{sdist_root}/nested/helper.py", b"VALUE = 1\n")
         if extra_sdist_stub:
@@ -227,8 +546,8 @@ def _synthetic_artifacts(
     }
     if wheel_stub is not None:
         wheel_files["troupe/__init__.pyi"] = wheel_stub
-    if wheel_py_typed:
-        wheel_files["troupe/py.typed"] = b""
+    if wheel_py_typed is not None:
+        wheel_files["troupe/py.typed"] = wheel_py_typed
     if entry_points == "valid":
         wheel_files[f"{dist_info}/entry_points.txt"] = EXPECTED_ENTRY_POINTS
     elif entry_points == "compact":
@@ -313,7 +632,7 @@ def test_runtime_package_has_exact_thin_sources() -> None:
     assert stub_files == ["__init__.pyi"]
     assert (PACKAGE / "__init__.py").read_bytes() == EXPECTED_WRAPPER
     assert (PACKAGE / "__init__.pyi").read_bytes() == EXPECTED_STUB
-    assert (PACKAGE / "py.typed").is_file()
+    assert (PACKAGE / "py.typed").read_bytes() == EXPECTED_PY_TYPED
 
 
 def test_python_project_metadata_and_build_configuration() -> None:
@@ -393,13 +712,21 @@ def test_python_project_metadata_and_build_configuration() -> None:
     } <= cache_files
 
 
-def test_rust_manifest_and_step_one_source_boundary() -> None:
+def test_rust_manifest_and_step_two_source_boundary() -> None:
     config = _toml(ROOT / "rust" / "Cargo.toml")
 
     assert config["lib"]["name"] == "_runtime"
     assert config["lib"]["crate-type"] == ["cdylib"]
 
     dependencies = config["dependencies"]
+    assert set(dependencies) == {
+        "clap",
+        "pyo3",
+        "pyo3-async-runtimes",
+        "tokio",
+        "tokio-util",
+        "uuid",
+    }
     assert dependencies["pyo3"] == {
         "version": "0.29.0",
         "features": ["abi3-py310", "experimental-async"],
@@ -420,24 +747,47 @@ def test_rust_manifest_and_step_one_source_boundary() -> None:
         "version": "4",
         "features": ["derive"],
     }
+    assert dependencies["uuid"] == {
+        "version": "1",
+        "features": ["v4"],
+    }
     assert "extension-module" not in dependencies["pyo3"]["features"]
 
     rust_sources = sorted(
         path.relative_to(ROOT / "rust" / "src").as_posix()
         for path in (ROOT / "rust" / "src").rglob("*.rs")
     )
-    assert {
-        "cli.rs",
-        "diagnostics.rs",
-        "invocation.rs",
-        "failure.rs",
-        "lib.rs",
-        "loader.rs",
-        "production.rs",
-        "python_task.rs",
-        "runtime.rs",
-        "signals.rs",
-    } <= set(rust_sources)
+    assert rust_sources == EXPECTED_RUST_SOURCES
+    source_code = "\n".join(
+        _rust_without_test_modules(
+            (ROOT / "rust" / "src" / name).read_text(encoding="utf-8")
+        )
+        for name in rust_sources
+    )
+    assert '"contextvars"' not in source_code
+    assert '"ContextVar"' not in source_code
+    effect_source = (ROOT / "rust" / "src" / "effect.rs").read_text(
+        encoding="utf-8"
+    )
+    assert "struct CuedScope" not in _rust_without_test_modules(effect_source)
+    mailbox_source = (ROOT / "rust" / "src" / "mailbox.rs").read_text(
+        encoding="utf-8"
+    )
+    mailbox_code = _rust_without_test_modules(mailbox_source)
+    for forbidden_syntax in (
+        r"\bmpsc::",
+        r"\bSemaphore::",
+        r"\bJoinHandle\s*<",
+        r"^\s*use\s+[^;]*\bmpsc\b",
+        r"^\s*use\s+[^;]*\bSemaphore\b",
+        r"^\s*use\s+[^;]*\bJoinHandle\b",
+    ):
+        assert re.search(forbidden_syntax, mailbox_code, re.MULTILINE) is None
+    locked_packages = {
+        package["name"]
+        for package in _toml(ROOT / "rust" / "Cargo.lock")["package"]
+    }
+    assert "uuid" in locked_packages
     invocation_source = (ROOT / "rust" / "src" / "invocation.rs").read_text(
         encoding="utf-8"
     )
@@ -499,12 +849,15 @@ def test_verifier_accepts_pinned_maturin_entry_point_format(tmp_path: Path) -> N
         {"forbidden_file": "other_package/helper.pyi"},
         {"forbidden_file": "other_package/native.so"},
         {"source_stub": None},
-        {"source_py_typed": False},
+        {"source_py_typed": None},
+        {"source_py_typed": b"partial\n"},
         {"sdist_stub": None},
         {"sdist_stub": b"wrong stub\n"},
-        {"sdist_py_typed": False},
+        {"sdist_py_typed": None},
+        {"sdist_py_typed": b"partial\n"},
         {"wheel_stub": None},
-        {"wheel_py_typed": False},
+        {"wheel_py_typed": None},
+        {"wheel_py_typed": b"partial\n"},
         {"source_wrapper": b"wrong wrapper\n"},
         {"sdist_wrapper": b"wrong wrapper\n"},
         {"wheel_wrapper": b"wrong wrapper\n"},
@@ -1378,6 +1731,31 @@ def test_publication_failure_cleans_staging_and_leaves_output_absent(
     assert not list(tmp_path.glob(".wheel-artifact-*"))
 
 
+def test_publication_abort_cleans_staging_and_preserves_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _verifier()
+    wheel = tmp_path / "troupe.whl"
+    wheel.write_bytes(b"wheel")
+    output = tmp_path / "wheel-artifact"
+
+    class PublicationAbort(BaseException):
+        pass
+
+    abort = PublicationAbort("stage interrupted")
+
+    def abort_copy(*_: object, **__: object) -> None:
+        raise abort
+
+    monkeypatch.setattr(verifier.shutil, "copy2", abort_copy)
+    with pytest.raises(PublicationAbort) as captured:
+        verifier._stage_publication(wheel, output)
+    assert captured.value is abort
+    assert not output.exists()
+    assert not list(tmp_path.glob(".wheel-artifact-*"))
+
+
 @pytest.mark.parametrize("operation", ["mode", "owner"])
 @pytest.mark.parametrize("target_name", ["directory", "wheel", "checksum"])
 def test_publication_metadata_failure_cleans_staging(
@@ -1511,6 +1889,33 @@ def test_rename_failure_cleans_staging_and_leaves_output_absent(
     assert not output.exists()
 
 
+def test_commit_abort_cleans_staging_and_preserves_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _verifier()
+    wheel = tmp_path / "troupe.whl"
+    wheel.write_bytes(b"wheel")
+    output = tmp_path / "wheel-artifact"
+    staging = verifier._stage_publication(wheel, output)
+
+    class PublicationAbort(BaseException):
+        pass
+
+    abort = PublicationAbort("commit interrupted")
+
+    def abort_chmod(*_: object, **__: object) -> None:
+        raise abort
+
+    monkeypatch.setattr(verifier.Path, "chmod", abort_chmod)
+    with pytest.raises(PublicationAbort) as captured:
+        verifier._commit_publication(staging, output)
+    assert captured.value is abort
+    assert not staging.exists()
+    assert not output.exists()
+    assert not list(tmp_path.glob(".wheel-artifact-*"))
+
+
 def test_build_cleanup_finishes_before_atomic_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1593,6 +1998,52 @@ def test_build_cleanup_failure_never_exposes_final_output(
     assert staged and all(not path.exists() for path in staged)
 
 
+def test_build_cleanup_abort_discards_staging_and_preserves_base_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _verifier()
+    output = tmp_path / "published"
+    build_workspace = tmp_path / "build-workspace"
+    staged: list[Path] = []
+    events: list[str] = []
+
+    class BuildAbort(BaseException):
+        pass
+
+    abort = BuildAbort("temporary cleanup interrupted")
+
+    class AbortingTemporaryDirectory:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def __enter__(self) -> str:
+            build_workspace.mkdir()
+            return str(build_workspace)
+
+        def __exit__(self, *_: object) -> None:
+            shutil.rmtree(build_workspace)
+            raise abort
+
+    monkeypatch.setattr(verifier.tempfile, "TemporaryDirectory", AbortingTemporaryDirectory)
+    monkeypatch.setattr(verifier, "_run", _fake_build_run(events))
+    _patch_recording_validators(monkeypatch, verifier, events)
+    real_stage = verifier._stage_publication
+
+    def recording_stage(wheel: Path, destination: Path) -> Path:
+        staging = real_stage(wheel, destination)
+        staged.append(staging)
+        return staging
+
+    monkeypatch.setattr(verifier, "_stage_publication", recording_stage)
+    with pytest.raises(BuildAbort) as captured:
+        verifier.main(["--build", "--output-dir", str(output)])
+    assert captured.value is abort
+    assert not output.exists()
+    assert staged and all(not path.exists() for path in staged)
+    assert not list(tmp_path.glob(".published-*"))
+
+
 def test_dependency_wheel_is_generated_with_valid_metadata_and_record(
     tmp_path: Path,
 ) -> None:
@@ -1654,7 +2105,10 @@ def _installed_smoke_payload(child: Path) -> dict[str, object]:
         "dependency_file": str(installed / "troupe_smoke_dependency.py"),
         "production_identity": True,
         "production_module": "troupe",
-        "exports": ["Production"],
+        "exports": PUBLIC_EXPORTS,
+        "public_identities": True,
+        "public_modules": True,
+        "native_construction_gates": True,
         "gil_disabled": False,
         "surrogate_constructor": True,
         "default_hooks": True,
@@ -1663,14 +2117,102 @@ def _installed_smoke_payload(child: Path) -> dict[str, object]:
     }
 
 
+def _installed_smoke_events(raw_args: list[str]) -> list[list[object]]:
+    scene = "scene-123e4567-e89b-42d3-a456-426614174000"
+    downstream_id = f"{scene}-cue1"
+    effect_id = f"{downstream_id}-effect0"
+    return [
+        ["args", raw_args],
+        ["start"],
+        ["scene", "dependency-ok", "module-ok", "resource-ok"],
+        [
+            "actor-round-trip",
+            {
+                "constructors": [["router", "router", True], ["worker", "worker", True]],
+                "queries": {"exact": "router", "pattern": ["router", "worker"]},
+                "root_cue": {"id": f"{scene}-cue0", "source": scene},
+                "downstream_cue": {"id": downstream_id, "source": "router"},
+                "effect": {"id": effect_id, "owner": "worker", "value": "mutated"},
+                "result": {
+                    "type": "tuple",
+                    "items": [[effect_id, "worker", "mutated"]],
+                },
+                "threads": [4242] * 8,
+            },
+        ],
+        [
+            "cancellation",
+            {
+                "admitted_snapshot": "before-release",
+                "pre_release": {
+                    "caller_done": False,
+                    "successor_done": False,
+                    "successor_entered": False,
+                },
+                "other_actor_result": [],
+                "completion_saw_release": {"caller": True, "successor": True},
+                "caller_outcome": "CancelledError",
+                "successor_result": [],
+            },
+        ],
+        ["stop"],
+    ]
+
+
+def _load_wheel_smoke_production(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    package_root = ROOT / "tests" / "fixtures" / "productions"
+    dependency = ModuleType("troupe_smoke_dependency")
+    dependency.VALUE = "dependency-ok"
+    dependency.__file__ = "/installed/troupe_smoke_dependency.py"
+    monkeypatch.setitem(sys.modules, "troupe_smoke_dependency", dependency)
+    monkeypatch.syspath_prepend(str(package_root))
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    for name in tuple(sys.modules):
+        if name == "wheel_smoke_production" or name.startswith("wheel_smoke_production."):
+            monkeypatch.delitem(sys.modules, name)
+    return importlib.import_module("wheel_smoke_production.production")
+
+
+def _producer_observations() -> tuple[dict[str, object], dict[str, object]]:
+    scene = "scene-123e4567-e89b-42d3-a456-426614174000"
+    downstream_id = f"{scene}-cue1"
+    effect_id = f"{downstream_id}-effect0"
+    actor = {
+        "router": SimpleNamespace(name="router"),
+        "worker": SimpleNamespace(name="worker"),
+        "constructors": [["router", "router", True], ["worker", "worker", True]],
+        "exact": SimpleNamespace(name="router"),
+        "pattern": [SimpleNamespace(name="router"), SimpleNamespace(name="worker")],
+        "root_cue": SimpleNamespace(id=f"{scene}-cue0", source=scene),
+        "downstream_cue": SimpleNamespace(id=downstream_id, source="router"),
+        "result": (SimpleNamespace(id=effect_id, owner="worker", value="mutated"),),
+        "threads": [4242] * 8,
+    }
+    cancellation = {
+        "admitted_snapshot": "before-release",
+        "caller_done": False,
+        "successor_done": False,
+        "successor_entered": False,
+        "other_actor_result": (),
+        "caller_completion_saw_release": True,
+        "successor_completion_saw_release": True,
+        "caller_outcome": "CancelledError",
+        "successor_result": (),
+    }
+    return actor, cancellation
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
         ("production_identity", False),
         ("production_module", "troupe._runtime"),
         ("exports", []),
-        ("exports", ["Production", "Other"]),
+        ("exports", [*PUBLIC_EXPORTS, "Other"]),
         ("exports", ["Other"]),
+        ("public_identities", False),
+        ("public_modules", False),
+        ("native_construction_gates", False),
         ("gil_disabled", True),
         ("surrogate_constructor", False),
         ("default_hooks", False),
@@ -1782,23 +2324,58 @@ def _execute_child_probe(
         def stop(self) -> ProbeAwaitable:
             return ProbeAwaitable("wrong" if mutation == "stop" else None)
 
-    ProbeProduction.__module__ = "wrong" if mutation == "module" else "troupe"
+    class FactoryOnly:
+        gate = ""
+
+        def __new__(cls) -> FactoryOnly:
+            if mutation == f"native-{cls.gate}-construction-gate":
+                return object.__new__(cls)
+            raise TypeError("factory only")
+
+    class ProbeActor(FactoryOnly):
+        gate = "actor"
+
+    class ProbeActorHandle(FactoryOnly):
+        gate = "actor-handle"
+
+    class ProbeCue(FactoryOnly):
+        gate = "cue"
+
+    class ProbeEffect(FactoryOnly):
+        gate = "effect"
+
+    class ProbeCueContextError(RuntimeError):
+        pass
+
+    class ProbeEffectContextError(RuntimeError):
+        pass
+
+    public_types = {
+        "Actor": ProbeActor,
+        "ActorHandle": ProbeActorHandle,
+        "Cue": ProbeCue,
+        "CueContextError": ProbeCueContextError,
+        "Effect": ProbeEffect,
+        "EffectContextError": ProbeEffectContextError,
+        "Production": ProbeProduction,
+    }
+    for public_type in public_types.values():
+        public_type.__module__ = "troupe"
+    if mutation is not None and mutation.startswith("module-"):
+        public_types[mutation.removeprefix("module-")].__module__ = "troupe._runtime"
 
     package = ModuleType("troupe")
     package.__path__ = []
     package.__file__ = "/child/lib/python/site-packages/troupe/__init__.py"
-    package.Production = ProbeProduction
-    package.__all__ = ["Other"] if mutation == "exports" else ["Production"]
+    for name, public_type in public_types.items():
+        setattr(package, name, public_type)
+    package.__all__ = ["Other"] if mutation == "exports" else PUBLIC_EXPORTS
     runtime = ModuleType("troupe._runtime")
     runtime.__file__ = "/child/lib/python/site-packages/troupe/_runtime.abi3.so"
-    if mutation == "identity":
-        class OtherProduction(ProbeProduction):
-            pass
-
-        OtherProduction.__module__ = "troupe"
-        runtime.Production = OtherProduction
-    else:
-        runtime.Production = ProbeProduction
+    for name, public_type in public_types.items():
+        setattr(runtime, name, public_type)
+    if mutation is not None and mutation.startswith("identity-"):
+        setattr(runtime, mutation.removeprefix("identity-"), object())
     package._runtime = runtime
     dependency = ModuleType("troupe_smoke_dependency")
     dependency.__file__ = "/child/lib/python/site-packages/troupe_smoke_dependency.py"
@@ -1841,8 +2418,12 @@ def test_child_probe_executes_and_reports_every_required_check(
 @pytest.mark.parametrize(
     ("mutation", "error_type"),
     [
-        ("identity", AssertionError),
-        ("module", AssertionError),
+        *((f"identity-{name}", AssertionError) for name in PUBLIC_EXPORTS),
+        *((f"module-{name}", AssertionError) for name in PUBLIC_EXPORTS),
+        ("native-actor-construction-gate", AssertionError),
+        ("native-actor-handle-construction-gate", AssertionError),
+        ("native-cue-construction-gate", AssertionError),
+        ("native-effect-construction-gate", AssertionError),
         ("exports", AssertionError),
         ("gil", AssertionError),
         ("constructor", AssertionError),
@@ -1864,33 +2445,89 @@ def test_child_probe_fails_when_each_runtime_fact_is_wrong(
         _execute_child_probe(verifier, monkeypatch, mutation)
 
 
+def test_smoke_event_log_accepts_every_actor_and_cancellation_fact(tmp_path: Path) -> None:
+    verifier = _verifier()
+    path = tmp_path / "events.json"
+    raw_args = ["--events", str(path), "--value", "7", "input.txt"]
+    expected = _installed_smoke_events(raw_args)
+    path.write_text(json.dumps(expected), encoding="utf-8")
+    verifier._validate_smoke_events(path, raw_args)
+
+
 @pytest.mark.parametrize(
-    "events",
+    "mutation",
     [
-        [],
-        [["args", []], ["start"], ["scene", "dependency-ok", "module-ok", "resource-ok"], ["stop"]],
-        [["args", ["wrong"]], ["start"], ["scene", "dependency-ok", "module-ok", "resource-ok"], ["stop"]],
-        [["args", []], ["scene", "dependency-ok", "module-ok", "resource-ok"], ["stop"]],
-        [["args", []], ["start"], ["scene", "wrong", "module-ok", "resource-ok"], ["stop"]],
-        [["args", []], ["start"], ["scene", "dependency-ok", "module-ok", "resource-ok"], ["stop"], ["extra"]],
+        "empty",
+        "args",
+        "lifecycle",
+        "constructor",
+        "query",
+        "root-cue",
+        "downstream",
+        "effect",
+        "result",
+        "threads",
+        "admission",
+        "pending",
+        "other-progress",
+        "release-order",
+        "caller-outcome",
+        "successor-result",
+        "stop-not-last",
+        "extra",
     ],
 )
-def test_smoke_event_log_is_compared_as_one_exact_json_value(
+def test_smoke_event_log_rejects_each_wrong_semantic_group(
     tmp_path: Path,
-    events: list[list[object]],
+    mutation: str,
 ) -> None:
     verifier = _verifier()
     path = tmp_path / "events.json"
     raw_args = ["--events", str(path), "--value", "7", "input.txt"]
-    expected = [
-        ["args", raw_args],
-        ["start"],
-        ["scene", "dependency-ok", "module-ok", "resource-ok"],
-        ["stop"],
-    ]
-    path.write_text(json.dumps(expected), encoding="utf-8")
-    verifier._validate_smoke_events(path, raw_args)
-
+    expected = _installed_smoke_events(raw_args)
+    events = json.loads(json.dumps(expected))
+    actor = events[3][1]
+    cancellation = events[4][1]
+    assert isinstance(actor, dict)
+    assert isinstance(cancellation, dict)
+    if mutation == "empty":
+        events = []
+    elif mutation == "args":
+        events[0] = ["args", ["wrong"]]
+    elif mutation == "lifecycle":
+        events[2] = ["scene", "wrong", "module-ok", "resource-ok"]
+    elif mutation == "constructor":
+        actor["constructors"][0][2] = False
+    elif mutation == "query":
+        actor["queries"]["pattern"] = ["worker", "router"]
+    elif mutation == "root-cue":
+        actor["root_cue"]["id"] = "wrong-cue0"
+    elif mutation == "downstream":
+        actor["downstream_cue"]["source"] = "scene-source"
+    elif mutation == "effect":
+        actor["effect"]["owner"] = "router"
+    elif mutation == "result":
+        actor["result"]["type"] = "list"
+    elif mutation == "threads":
+        actor["threads"].append(4243)
+    elif mutation == "admission":
+        cancellation["admitted_snapshot"] = "after-release"
+    elif mutation == "pending":
+        cancellation["pre_release"]["successor_done"] = True
+    elif mutation == "other-progress":
+        cancellation["other_actor_result"] = ["wrong"]
+    elif mutation == "release-order":
+        cancellation["completion_saw_release"]["caller"] = False
+    elif mutation == "caller-outcome":
+        cancellation["caller_outcome"] = "success"
+    elif mutation == "successor-result":
+        cancellation["successor_result"] = ["wrong"]
+    elif mutation == "stop-not-last":
+        events[4], events[5] = events[5], events[4]
+    elif mutation == "extra":
+        events.append(["extra"])
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
     path.write_text(json.dumps(events), encoding="utf-8")
     with pytest.raises(verifier.VerificationError):
         verifier._validate_smoke_events(path, raw_args)
@@ -1906,6 +2543,225 @@ def test_smoke_event_log_rejects_missing_or_invalid_json(tmp_path: Path) -> None
         verifier._validate_smoke_events(path, [])
 
 
+def test_installed_smoke_event_producers_derive_the_validated_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production = _load_wheel_smoke_production(monkeypatch)
+    actor, cancellation = _producer_observations()
+    expected = _installed_smoke_events([])
+
+    assert production._actor_round_trip_event(**actor) == expected[3]
+    assert production._cancellation_event(**cancellation) == expected[4]
+
+
+def test_installed_smoke_event_producers_reject_each_wrong_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production = _load_wheel_smoke_production(monkeypatch)
+    actor_mutations = (
+        "router-handle",
+        "worker-handle",
+        "constructor",
+        "exact-query",
+        "pattern-query",
+        "root-cue",
+        "downstream-cue",
+        "effect",
+        "result-type",
+        "threads",
+    )
+    for mutation in actor_mutations:
+        actor, _ = _producer_observations()
+        if mutation == "router-handle":
+            actor["router"].name = "wrong"
+        elif mutation == "worker-handle":
+            actor["worker"].name = "wrong"
+        elif mutation == "constructor":
+            actor["constructors"][0][2] = False
+        elif mutation == "exact-query":
+            actor["exact"].name = "wrong"
+        elif mutation == "pattern-query":
+            actor["pattern"].reverse()
+        elif mutation == "root-cue":
+            actor["root_cue"].source = "wrong"
+        elif mutation == "downstream-cue":
+            actor["downstream_cue"].source = "wrong"
+        elif mutation == "effect":
+            actor["result"][0].owner = "router"
+        elif mutation == "result-type":
+            actor["result"] = list(actor["result"])
+        elif mutation == "threads":
+            actor["threads"].append(4243)
+        with pytest.raises(AssertionError):
+            production._actor_round_trip_event(**actor)
+
+    cancellation_mutations = (
+        "admission",
+        "caller-pending",
+        "successor-pending",
+        "successor-entry",
+        "other-progress",
+        "caller-release-order",
+        "successor-release-order",
+        "caller-outcome",
+        "successor-result",
+    )
+    for mutation in cancellation_mutations:
+        _, cancellation = _producer_observations()
+        if mutation == "admission":
+            cancellation["admitted_snapshot"] = "after-release"
+        elif mutation == "caller-pending":
+            cancellation["caller_done"] = True
+        elif mutation == "successor-pending":
+            cancellation["successor_done"] = True
+        elif mutation == "successor-entry":
+            cancellation["successor_entered"] = True
+        elif mutation == "other-progress":
+            cancellation["other_actor_result"] = ("wrong",)
+        elif mutation == "caller-release-order":
+            cancellation["caller_completion_saw_release"] = False
+        elif mutation == "successor-release-order":
+            cancellation["successor_completion_saw_release"] = False
+        elif mutation == "caller-outcome":
+            cancellation["caller_outcome"] = "success"
+        elif mutation == "successor-result":
+            cancellation["successor_result"] = ("wrong",)
+        with pytest.raises(AssertionError):
+            production._cancellation_event(**cancellation)
+
+
+def test_installed_smoke_fixture_uses_only_public_actor_api_and_bounded_waits() -> None:
+    fixture = (
+        ROOT
+        / "tests"
+        / "fixtures"
+        / "productions"
+        / "wheel_smoke_production"
+        / "production.py"
+    )
+    source = fixture.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    troupe_imports = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        and [(alias.name, alias.asname) for alias in node.names] == [("troupe", None)]
+    ]
+    assert len(troupe_imports) == 1
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not _is_module_path(alias.name, "tests")
+                assert not _is_module_path(alias.name, "time")
+                if _is_module_path(alias.name, "troupe"):
+                    assert alias.name == "troupe"
+        elif isinstance(node, ast.ImportFrom):
+            assert all(alias.name != "*" for alias in node.names)
+            module = node.module or ""
+            assert not _is_module_path(module, "tests")
+            assert not _is_module_path(module, "time")
+            assert not _is_module_path(module, "troupe")
+
+    allowed_asyncio = {
+        "asyncio.CancelledError",
+        "asyncio.Event",
+        "asyncio.create_task",
+        "asyncio.get_running_loop",
+        "asyncio.wait_for",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        dotted = _dotted_name(node)
+        if dotted is None:
+            continue
+        if dotted.startswith("troupe."):
+            public_name = dotted.split(".", 2)[1]
+            assert public_name in PUBLIC_EXPORTS
+        elif dotted.startswith("asyncio."):
+            assert dotted in allowed_asyncio
+        elif dotted.startswith("re."):
+            assert dotted == "re.compile"
+        elif dotted.startswith("threading."):
+            assert dotted == "threading.get_ident"
+
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    bases = [
+        _dotted_name(base)
+        for definition in classes
+        for base in definition.bases
+    ]
+    assert bases.count("troupe.Actor") >= 2
+    assert bases.count("troupe.Effect") >= 1
+    assert bases.count("troupe.Production") == 1
+    production_class = next(
+        definition
+        for definition in classes
+        if [_dotted_name(base) for base in definition.bases] == ["troupe.Production"]
+    )
+    assert any(
+        isinstance(node, ast.AsyncFunctionDef) and node.name == "scene"
+        for node in production_class.body
+    )
+    actor_classes = [
+        definition
+        for definition in classes
+        if [_dotted_name(base) for base in definition.bases] == ["troupe.Actor"]
+    ]
+    assert all(
+        any(
+            isinstance(node, ast.AsyncFunctionDef) and node.name == "cued"
+            for node in definition.body
+        )
+        for definition in actor_classes
+    )
+
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    call_names = [_dotted_name(call.func) for call in calls]
+    cast_calls = [
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "cast_actor"
+    ]
+    assert len(cast_calls) >= 2
+    for call in cast_calls:
+        assert call.args
+        assert {keyword.arg for keyword in call.keywords} == {
+            "name",
+            "actor_args",
+            "actor_kwargs",
+        }
+    assert sum(
+        isinstance(call.func, ast.Attribute) and call.func.attr == "get_actor"
+        for call in calls
+    ) >= 2
+    assert sum(
+        isinstance(call.func, ast.Attribute) and call.func.attr == "cue"
+        for call in calls
+    ) >= 3
+    assert any(
+        isinstance(call.func, ast.Attribute) and call.func.attr == "make_effect"
+        for call in calls
+    )
+    assert call_names.count("asyncio.create_task") >= 2
+    assert "re.compile" in call_names
+    assert "threading.get_ident" in call_names
+
+    wait_for_calls = [
+        call for call in calls if _dotted_name(call.func) == "asyncio.wait_for"
+    ]
+    assert wait_for_calls
+    assert all(
+        len(call.args) >= 2
+        or any(keyword.arg == "timeout" for keyword in call.keywords)
+        for call in wait_for_calls
+    )
+    assert not any(
+        _dotted_name(call.func) == "sleep"
+        or (_dotted_name(call.func) or "").endswith(".sleep")
+        for call in calls
+    )
 @pytest.mark.parametrize(
     ("uv_found", "wrong_troupe"),
     [
@@ -1955,11 +2811,45 @@ def test_run_rejects_a_forbidden_stderr_marker_even_on_zero_exit(
         )
 
 
+def test_run_wraps_a_bounded_smoke_timeout_after_subprocess_reaping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _verifier()
+    timeout_seconds = 7.5
+    timeout = subprocess.TimeoutExpired(["troupe"], timeout_seconds)
+    calls: list[dict[str, object]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def run(*_: object, **kwargs: object) -> Completed:
+        calls.append(dict(kwargs))
+        if kwargs.get("timeout") == timeout_seconds:
+            raise timeout
+        return Completed()
+
+    monkeypatch.setattr(verifier.subprocess, "run", run)
+
+    with pytest.raises(verifier.VerificationError, match="timed out"):
+        verifier._run(
+            ["troupe"],
+            cwd=tmp_path,
+            env={},
+            timeout=timeout_seconds,
+        )
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == timeout_seconds
+
+
 def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     verifier = _verifier()
+    assert 0 < verifier.SMOKE_TIMEOUT <= 60
     wheel = tmp_path / "troupe.whl"
     wheel.touch()
     workspace = tmp_path / "smoke-workspace"
@@ -1969,12 +2859,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     events_path = workspace / "events.json"
     fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
     raw_args = ["--events", str(events_path), "--value", "7", "input.txt"]
-    expected_events = [
-        ["args", raw_args],
-        ["start"],
-        ["scene", "dependency-ok", "module-ok", "resource-ok"],
-        ["stop"],
-    ]
+    expected_events = _installed_smoke_events(raw_args)
     managed_python = tmp_path / "managed" / "bin" / "python3.10"
     managed_python.parent.mkdir(parents=True)
     managed_python.touch()
@@ -2119,7 +3004,12 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
             "VIRTUAL_ENV",
         }.isdisjoint(env)
         assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-        assert kwargs == ({"forbidden_stderr": "troupe:"} if index in (3, 4) else {})
+        expected_kwargs: dict[str, object] = {}
+        if index in (2, 4):
+            expected_kwargs["timeout"] = verifier.SMOKE_TIMEOUT
+        if index in (3, 4):
+            expected_kwargs["forbidden_stderr"] = "troupe:"
+        assert kwargs == expected_kwargs
 
 
 @pytest.mark.parametrize("failure", ["os-error", "called-process-error", "abort"])

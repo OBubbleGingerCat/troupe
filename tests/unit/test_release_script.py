@@ -17,6 +17,8 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 VERSIONS = ["3.10", "3.11", "3.12", "3.13", "3.14"]
 QUALITY_VERSIONS = ["3.10", "3.14"]
+QUALITY_GROUP_SIZE = 9
+QUALITY_CALL_COUNT = 1 + len(QUALITY_VERSIONS) * QUALITY_GROUP_SIZE
 WHEEL_NAME = "troupe-0.1.0-cp310-abi3-manylinux_2_17_x86_64.whl"
 CALLER_LIBRARY_PATH = "/caller/lib-one:/caller/lib-two"
 CALLER_CONDA_PREFIX = "/caller/conda"
@@ -46,8 +48,10 @@ def _sandbox_script(tmp_path: Path) -> tuple[Path, Path]:
     sandbox = tmp_path / "repository"
     script = sandbox / "scripts" / SCRIPT.name
     script.parent.mkdir(parents=True)
+    (sandbox / "tests" / "fixtures" / "productions").mkdir(parents=True)
     shutil.copy2(SCRIPT, script)
     script.chmod(0o755)
+    subprocess.run(["git", "init", "-q", str(sandbox)], check=True)
     return sandbox, script
 
 
@@ -58,9 +62,12 @@ def _fake_tools(tmp_path: Path, sandbox: Path) -> tuple[dict[str, str], Path, Pa
     temporary.mkdir()
     (temporary / "caller-owned-sentinel").write_text("preserve\n", encoding="utf-8")
     log = tmp_path / "calls.bin"
+    timeline = tmp_path / "timeline.log"
+    checkout_uid = sandbox.stat().st_uid + 100_000
     implementation = """#!/usr/bin/env bash
 set -euo pipefail
 tool="$(basename "$0")"
+printf 'tool:%s:%s:%q\n' "$tool" "${UV_PYTHON-}" "$*" >> "$TROUPE_RELEASE_TEST_TIMELINE"
 env -u PYTHONHOME "$TROUPE_RELEASE_TEST_PYTHON" - "$TROUPE_RELEASE_TEST_LOG" "$tool" "${UV_PYTHON-}" "${UV_PROJECT_ENVIRONMENT-}" "${UV_PYTHON_PREFERENCE-}" "${PYO3_PYTHON-}" "${LD_LIBRARY_PATH-}" "${CONDA_PREFIX+x}" "${CONDA_PREFIX-}" "${PYTHONHOME+x}" "${PYTHONHOME-}" "$PWD" "$@" <<'PY'
 import json
 import sys
@@ -95,7 +102,9 @@ if [[ "$tool" == cargo && "${1-}" == test ]]; then
 fi
 if [[ "${TROUPE_RELEASE_FAIL_TOOL-}" == "$tool" \
       && "${TROUPE_RELEASE_FAIL_PYTHON-}" == "${UV_PYTHON-}" \
-      && "${TROUPE_RELEASE_FAIL_COMMAND-}" == "${1-}" ]]; then
+      && "${TROUPE_RELEASE_FAIL_COMMAND-}" == "${1-}" \
+      && ( -z "${TROUPE_RELEASE_FAIL_ARGUMENTS-}" \
+           || " $* " == *"${TROUPE_RELEASE_FAIL_ARGUMENTS}"* ) ]]; then
   exit "${TROUPE_RELEASE_FAIL_CODE:-23}"
 fi
 if [[ "$tool" == docker ]]; then
@@ -109,6 +118,51 @@ fi
         executable = tools / name
         executable.write_text(implementation, encoding="utf-8")
         executable.chmod(0o755)
+    find = tools / "find"
+    find.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'audit:find:%s\n' "$*" >> "$TROUPE_RELEASE_TEST_TIMELINE"
+if [[ "${TROUPE_RELEASE_AUDIT_FAILURE-}" == cache && " $* " == *" __pycache__ "* ]]; then
+  printf '%s\n' "$TROUPE_RELEASE_TEST_ROOT/tests/fixtures/productions/bad/__pycache__"
+  exit 0
+fi
+if [[ " $* " == *" ! -uid $TROUPE_RELEASE_TEST_ROOT_UID "* ]]; then
+  if [[ "${TROUPE_RELEASE_AUDIT_FAILURE-}" == owner ]]; then
+    printf '%s\n' "$TROUPE_RELEASE_TEST_ROOT/wrong-owner"
+  fi
+  exit 0
+fi
+exec /usr/bin/find "$@"
+""",
+        encoding="utf-8",
+    )
+    find.chmod(0o755)
+    git = tools / "git"
+    git.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'audit:git:%s\n' "$*" >> "$TROUPE_RELEASE_TEST_TIMELINE"
+exec /usr/bin/git "$@"
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    stat_tool = tools / "stat"
+    stat_tool.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'audit:stat:%s\n' "$*" >> "$TROUPE_RELEASE_TEST_TIMELINE"
+if [[ "$#" -eq 3 && "$1" == -c && "$2" == %u \
+      && "$3" == "$TROUPE_RELEASE_TEST_ROOT" ]]; then
+  printf '%s\n' "$TROUPE_RELEASE_TEST_ROOT_UID"
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+""",
+        encoding="utf-8",
+    )
+    stat_tool.chmod(0o755)
     env = dict(os.environ)
     for name in list(env):
         if name in {
@@ -125,8 +179,10 @@ fi
             "CONDA_PREFIX": CALLER_CONDA_PREFIX,
             "PYTHONHOME": CALLER_PYTHON_HOME,
             "TROUPE_RELEASE_TEST_LOG": str(log),
+            "TROUPE_RELEASE_TEST_TIMELINE": str(timeline),
             "TROUPE_RELEASE_TEST_PYTHON": sys.executable,
             "TROUPE_RELEASE_TEST_ROOT": str(sandbox),
+            "TROUPE_RELEASE_TEST_ROOT_UID": str(checkout_uid),
             "TROUPE_RELEASE_TEST_WHEEL": WHEEL_NAME,
             "TMPDIR": str(temporary),
         }
@@ -157,6 +213,11 @@ def _calls(log: Path) -> list[Call]:
             )
         )
     return calls
+
+
+def _timeline(env: dict[str, str]) -> list[str]:
+    path = Path(env["TROUPE_RELEASE_TEST_TIMELINE"])
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
 
 def _run(
@@ -241,6 +302,31 @@ def _assert_quality_command_group(
             ],
         ),
         ("uv", ["run", "--no-sync", "pytest", "-q"]),
+        (
+            "uv",
+            [
+                "run",
+                "--no-sync",
+                "python",
+                "-m",
+                "mypy",
+                "--strict",
+                "--show-error-codes",
+                "tests/typing/positive.py",
+            ],
+        ),
+        (
+            "uv",
+            [
+                "run",
+                "--no-sync",
+                "python",
+                "-m",
+                "mypy.stubtest",
+                "troupe",
+                "--concise",
+            ],
+        ),
         ("uv", ["run", "--no-sync", "python", "-m", "doctest", "README.md"]),
     ]
 
@@ -266,10 +352,12 @@ def _assert_quality_calls(
         "",
         ["python", "install", *QUALITY_VERSIONS],
     )
-    assert len(calls) == 15
+    assert len(calls) == QUALITY_CALL_COUNT
     environments: list[Path] = []
     for index, version in enumerate(QUALITY_VERSIONS):
-        group = calls[1 + index * 7 : 1 + (index + 1) * 7]
+        group = calls[
+            1 + index * QUALITY_GROUP_SIZE : 1 + (index + 1) * QUALITY_GROUP_SIZE
+        ]
         _assert_quality_command_group(group)
         assert {call.python for call in group} == {version}
         assert {call.preference for call in group} == {"only-managed"}
@@ -297,6 +385,8 @@ def _assert_quality_calls(
             "",
             "x",
             "x",
+            "x",
+            "x",
         ]
         assert [call.conda_prefix for call in group] == [
             CALLER_CONDA_PREFIX,
@@ -304,6 +394,8 @@ def _assert_quality_calls(
             CALLER_CONDA_PREFIX,
             CALLER_CONDA_PREFIX,
             "",
+            CALLER_CONDA_PREFIX,
+            CALLER_CONDA_PREFIX,
             CALLER_CONDA_PREFIX,
             CALLER_CONDA_PREFIX,
         ]
@@ -316,12 +408,16 @@ def _assert_quality_calls(
             caller_python_home_present,
             caller_python_home_present,
             caller_python_home_present,
+            caller_python_home_present,
+            caller_python_home_present,
         ]
         assert [call.python_home for call in group] == [
             caller_python_home_value,
             caller_python_home_value,
             caller_python_home_value,
             str(managed_home),
+            caller_python_home_value,
+            caller_python_home_value,
             caller_python_home_value,
             caller_python_home_value,
             caller_python_home_value,
@@ -410,6 +506,44 @@ def test_quality_mode_propagates_failure_without_running_later_commands(
     _assert_managed_pythons_preserved(env, ["3.10"])
 
 
+@pytest.mark.parametrize(
+    ("module", "argument_marker"),
+    [
+        ("mypy", "-m mypy --strict"),
+        ("mypy.stubtest", "-m mypy.stubtest troupe"),
+    ],
+)
+def test_quality_mode_runs_typing_commands_and_propagates_each_failure(
+    tmp_path: Path,
+    module: str,
+    argument_marker: str,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+    env.update(
+        {
+            "TROUPE_RELEASE_FAIL_TOOL": "uv",
+            "TROUPE_RELEASE_FAIL_PYTHON": "3.10",
+            "TROUPE_RELEASE_FAIL_COMMAND": "run",
+            "TROUPE_RELEASE_FAIL_ARGUMENTS": argument_marker,
+            "TROUPE_RELEASE_FAIL_CODE": "18",
+        }
+    )
+
+    completed = _run(script, ["quality"], cwd=tmp_path, env=env)
+
+    assert completed.returncode == 18
+    calls = _calls(log)
+    assert calls[-1].tool == "uv"
+    assert calls[-1].python == "3.10"
+    assert calls[-1].arguments[:4] == ["run", "--no-sync", "python", "-m"]
+    assert module in calls[-1].arguments
+    assert all(call.python != "3.14" for call in calls)
+    assert not any(call.arguments[-1:] == ["README.md"] for call in calls)
+    _assert_tmpdir_preserved(env)
+    _assert_managed_pythons_preserved(env, ["3.10"])
+
+
 def test_build_mode_executes_one_exact_fail_fast_manylinux_container(
     tmp_path: Path,
 ) -> None:
@@ -486,6 +620,65 @@ def test_build_mode_propagates_docker_failure_and_exposes_no_artifact(
     assert completed.returncode == 19
     assert [call.tool for call in _calls(log)] == ["docker"]
     assert not (sandbox / "wheel-artifact").exists()
+    _assert_tmpdir_preserved(env)
+
+
+@pytest.mark.parametrize("failure", ["diff", "cache", "owner"])
+def test_successful_mode_fails_when_the_checkout_audit_fails(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+    if failure == "diff":
+        tracked = sandbox / "tracked.txt"
+        tracked.write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(sandbox), "add", "tracked.txt"], check=True)
+        tracked.write_text("trailing whitespace \n", encoding="utf-8")
+    elif failure == "cache":
+        (sandbox / "tests" / "fixtures" / "productions" / "bad" / "__pycache__").mkdir(
+            parents=True
+        )
+    elif failure == "owner":
+        env["TROUPE_RELEASE_AUDIT_FAILURE"] = "owner"
+    else:
+        raise AssertionError(f"unknown audit failure: {failure}")
+
+    completed = _run(script, ["build"], cwd=tmp_path, env=env)
+
+    assert completed.returncode != 0
+    assert [call.tool for call in _calls(log)] == ["docker"]
+    timeline = _timeline(env)
+    assert timeline[0].startswith("tool:docker:")
+    assert all(entry.startswith("audit:") for entry in timeline[1:])
+    if failure == "owner":
+        assert f"audit:stat:-c %u {sandbox}" in timeline
+        assert any(
+            entry.startswith(f"audit:find:{sandbox} ")
+            and f"! -uid {env['TROUPE_RELEASE_TEST_ROOT_UID']}" in entry
+            for entry in timeline
+        )
+    _assert_tmpdir_preserved(env)
+
+
+@pytest.mark.parametrize("mode", ["quality", "compatibility", "all"])
+def test_every_release_mode_finishes_with_the_checkout_audit(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    if mode == "compatibility":
+        _make_artifact(sandbox)
+    env, _, _ = _fake_tools(tmp_path, sandbox)
+
+    completed = _run(script, [mode], cwd=tmp_path, env=env)
+
+    assert completed.returncode == 0, completed.stderr
+    timeline = _timeline(env)
+    first_audit = next(index for index, entry in enumerate(timeline) if entry.startswith("audit:"))
+    assert first_audit > 0
+    assert all(entry.startswith("tool:") for entry in timeline[:first_audit])
+    assert all(entry.startswith("audit:") for entry in timeline[first_audit:])
     _assert_tmpdir_preserved(env)
 
 
@@ -705,18 +898,30 @@ def test_all_and_default_modes_compose_each_boundary_once_in_order(
 
         assert completed.returncode == 0, completed.stderr
         calls = _calls(log)
-        _assert_quality_calls(calls[:15])
-        assert calls[15].tool == "docker"
-        assert calls[16].arguments == ["python", "install", *VERSIONS]
-        assert [call.python for call in calls[17::2]] == VERSIONS
-        assert [call.python for call in calls[18::2]] == VERSIONS
-        assert {call.pyo3_python for call in calls[15:]} == {""}
-        assert {call.library_path for call in calls[15:]} == {CALLER_LIBRARY_PATH}
-        assert {call.conda_present for call in calls[15:]} == {"x"}
-        assert {call.conda_prefix for call in calls[15:]} == {CALLER_CONDA_PREFIX}
-        assert {call.python_home_present for call in calls[15:]} == {"x"}
-        assert {call.python_home for call in calls[15:]} == {CALLER_PYTHON_HOME}
-        assert len(calls) == 27
+        _assert_quality_calls(calls[:QUALITY_CALL_COUNT])
+        assert calls[QUALITY_CALL_COUNT].tool == "docker"
+        assert calls[QUALITY_CALL_COUNT + 1].arguments == [
+            "python",
+            "install",
+            *VERSIONS,
+        ]
+        assert [call.python for call in calls[QUALITY_CALL_COUNT + 2 :: 2]] == VERSIONS
+        assert [call.python for call in calls[QUALITY_CALL_COUNT + 3 :: 2]] == VERSIONS
+        assert {call.pyo3_python for call in calls[QUALITY_CALL_COUNT:]} == {""}
+        assert {call.library_path for call in calls[QUALITY_CALL_COUNT:]} == {
+            CALLER_LIBRARY_PATH
+        }
+        assert {call.conda_present for call in calls[QUALITY_CALL_COUNT:]} == {"x"}
+        assert {call.conda_prefix for call in calls[QUALITY_CALL_COUNT:]} == {
+            CALLER_CONDA_PREFIX
+        }
+        assert {call.python_home_present for call in calls[QUALITY_CALL_COUNT:]} == {
+            "x"
+        }
+        assert {call.python_home for call in calls[QUALITY_CALL_COUNT:]} == {
+            CALLER_PYTHON_HOME
+        }
+        assert len(calls) == QUALITY_CALL_COUNT + 12
         _assert_tmpdir_preserved(env)
         _assert_managed_pythons_preserved(env, VERSIONS)
 
@@ -737,8 +942,8 @@ def test_all_mode_stops_before_compatibility_when_build_fails(tmp_path: Path) ->
 
     assert completed.returncode == 31
     calls = _calls(log)
-    _assert_quality_calls(calls[:15])
-    assert [call.tool for call in calls[15:]] == ["docker"]
+    _assert_quality_calls(calls[:QUALITY_CALL_COUNT])
+    assert [call.tool for call in calls[QUALITY_CALL_COUNT:]] == ["docker"]
     _assert_tmpdir_preserved(env)
 
 
@@ -784,9 +989,9 @@ def test_all_mode_propagates_compatibility_failure(tmp_path: Path) -> None:
 
     assert completed.returncode == 43
     calls = _calls(log)
-    _assert_quality_calls(calls[:15])
-    assert calls[15].tool == "docker"
-    assert [(call.python, call.arguments[0]) for call in calls[16:]] == [
+    _assert_quality_calls(calls[:QUALITY_CALL_COUNT])
+    assert calls[QUALITY_CALL_COUNT].tool == "docker"
+    assert [(call.python, call.arguments[0]) for call in calls[QUALITY_CALL_COUNT + 1 :]] == [
         ("", "python"),
         ("3.10", "sync"),
         ("3.10", "run"),

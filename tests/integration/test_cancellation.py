@@ -371,6 +371,192 @@ def test_runtime_cancels_only_the_top_level_scene_task() -> None:
     asyncio.run(scenario())
 
 
+def test_cancelling_run_future_keeps_internal_cleanup_restore_and_unbind_alive() -> None:
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        previous_factory = loop.get_task_factory()
+        loop_thread = threading.get_ident()
+        cancel_records: list[CancelRecord] = []
+        original_factory = _recording_task_factory(cancel_records)
+        loop.set_task_factory(original_factory)
+        actor_entered = asyncio.Event()
+        cleanup_entered = asyncio.Event()
+        cleanup_release = asyncio.Event()
+        stop_entered = asyncio.Event()
+        stop_release = asyncio.Event()
+        stop_finished = asyncio.Event()
+        root_finally = asyncio.Event()
+        queued_caller_done = asyncio.Event()
+        caller_errors: dict[str, BaseException] = {}
+        root_cleanup_errors: list[BaseException] = []
+        root_cues: list[troupe.Cue] = []
+        queued_done_before_release: list[bool] = []
+        running_cued_task: asyncio.Task[Any] | None = None
+        factories: dict[str, Any] = {}
+
+        class BlockingActor(troupe.Actor):
+            async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+                nonlocal running_cued_task
+                root_cues.append(cue)
+                if cue.instruction["phase"] != "running":
+                    return ()
+                running_cued_task = asyncio.current_task()
+                assert running_cued_task is not None
+                actor_entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    factories["cleanup"] = loop.get_task_factory()
+                    cleanup_entered.set()
+                    await cleanup_release.wait()
+                    raise
+
+        class RootCleanupActor(troupe.Actor):
+            async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+                root_cues.append(cue)
+                return ()
+
+        class CancelledOuterProduction(troupe.Production):
+            async def scene(self) -> None:
+                factories["runtime"] = loop.get_task_factory()
+                assert factories["runtime"] is not original_factory
+                handle = self.cast_actor(
+                    BlockingActor,
+                    name="outer-cancel",
+                    actor_args=(),
+                    actor_kwargs={},
+                )
+                cleanup_handle = self.cast_actor(
+                    RootCleanupActor,
+                    name="outer-cancel-root-cleanup",
+                    actor_args=(),
+                    actor_kwargs={},
+                )
+
+                async def consume(phase: str) -> None:
+                    try:
+                        await handle.cue({"phase": phase})
+                    except BaseException as error:
+                        caller_errors[phase] = error
+                    finally:
+                        if phase == "queued":
+                            queued_caller_done.set()
+
+                self.running_caller = asyncio.create_task(consume("running"))
+                await actor_entered.wait()
+                self.queued_caller = asyncio.create_task(consume("queued"))
+                queued_admitted = asyncio.Event()
+                loop.call_soon(queued_admitted.set)
+                await queued_admitted.wait()
+                self.scene_task = asyncio.current_task()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    factories["root-finally"] = loop.get_task_factory()
+                    try:
+                        assert await cleanup_handle.cue(
+                            {"phase": "root-finally"}
+                        ) == ()
+                    except BaseException as error:
+                        root_cleanup_errors.append(error)
+                    finally:
+                        root_finally.set()
+
+            async def stop(self) -> None:
+                assert loop.get_task_factory() is original_factory
+                stop_entered.set()
+                await stop_release.wait()
+                stop_finished.set()
+
+        production = CancelledOuterProduction([])
+        runtime = _native()._Runtime()
+        outer: Any | None = None
+        rebound: Any | None = None
+        try:
+            outer = runtime.run(production)
+            await _wait(actor_entered)
+            assert outer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await outer
+
+            await _wait(root_finally)
+            assert root_cleanup_errors == []
+            assert [cue.instruction["phase"] for cue in root_cues] == [
+                "running",
+                "root-finally",
+            ]
+            scene_source = root_cues[0].source
+            assert root_cues[1].source == scene_source
+            assert [cue.id for cue in root_cues] == [
+                f"{scene_source}-cue0",
+                f"{scene_source}-cue2",
+            ]
+            assert factories["root-finally"] is factories["runtime"]
+            scene_task = production.scene_task
+            assert scene_task is not None
+            assert _scene_cancel_records(cancel_records, scene_task) == [
+                (scene_task, loop_thread, None)
+            ]
+            await _wait(cleanup_entered)
+            await _wait(queued_caller_done)
+            queued_done_before_release.append(queued_caller_done.is_set())
+            assert not stop_entered.is_set()
+            assert factories["cleanup"] is factories["runtime"]
+            assert loop.get_task_factory() is factories["runtime"]
+            assert runtime.request_shutdown() is None
+            assert runtime.request_shutdown() is None
+            assert running_cued_task is not None
+            assert [
+                record for record in cancel_records if record[0] is running_cued_task
+            ] == [(running_cued_task, loop_thread, None)]
+            with pytest.raises(
+                RuntimeError,
+                match=r"^Production is already bound to an active runtime$",
+            ):
+                _native()._Runtime().run(production)
+
+            cleanup_release.set()
+            await _wait(stop_entered)
+            assert loop.get_task_factory() is original_factory
+            assert not stop_finished.is_set()
+            stop_release.set()
+            await _wait(stop_finished)
+
+            rebound_ready: asyncio.Future[None] = loop.create_future()
+
+            def try_rebind() -> None:
+                nonlocal rebound
+                if rebound_ready.done():
+                    return
+                candidate = _native()._Runtime()
+                candidate.request_shutdown()
+                try:
+                    rebound = candidate.run(production)
+                except RuntimeError as error:
+                    assert str(error) == "Production is already bound to an active runtime"
+                    loop.call_soon(try_rebind)
+                    return
+                rebound_ready.set_result(None)
+
+            loop.call_soon(try_rebind)
+            await asyncio.wait_for(rebound_ready, TIMEOUT)
+            assert rebound is not None
+            assert await _await_future(rebound) is None
+            assert queued_done_before_release == [True]
+            assert set(caller_errors) == {"running", "queued"}
+            assert isinstance(caller_errors["running"], asyncio.CancelledError)
+            assert isinstance(caller_errors["queued"], asyncio.CancelledError)
+        finally:
+            cleanup_release.set()
+            stop_release.set()
+            if rebound is not None and not rebound.done():
+                with contextlib.suppress(BaseException):
+                    await _await_future(rebound)
+            loop.set_task_factory(previous_factory)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "cancel_error",
     [

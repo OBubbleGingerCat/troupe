@@ -6,10 +6,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::TaskLocals;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::failure::lifecycle_result;
-use crate::python_task::{await_hook, create_scene_task};
+use crate::production::Production;
+use crate::python_task::{apply_task_factory_action, await_hook, create_scene_task};
+use crate::scene_context::{FACTORY_REPLACED_ERROR, RunBinding, TaskFactoryAction};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -106,6 +109,7 @@ pub(crate) async fn run_lifecycle(
     permit: RunPermit,
     locals: TaskLocals,
     production: Py<PyAny>,
+    binding: Arc<RunBinding>,
 ) -> PyResult<()> {
     let mut failures = Vec::with_capacity(2);
     if let Err(error) = await_hook(&locals, &production, "start").await {
@@ -113,27 +117,59 @@ pub(crate) async fn run_lifecycle(
         return lifecycle_result(failures);
     }
 
-    while !permit.core.shutdown_requested() {
+    if let Err(error) =
+        apply_task_factory_action(&locals, Arc::clone(&binding), TaskFactoryAction::Install).await
+    {
+        failures.push(("scene", error));
+    }
+
+    while failures.is_empty() && !permit.core.shutdown_requested() {
         let scene_result = async {
-            let task = create_scene_task(&locals, &production)
+            let task = create_scene_task(&locals, &production, Arc::clone(&binding))
                 .await
                 .map_err(SceneFailure::Completion)?;
-            let completion = task.wait(&locals);
-            tokio::pin!(completion);
-            tokio::select! {
+            let outcome = {
+                let completion = task.wait(&locals);
+                tokio::pin!(completion);
+                tokio::select! {
                 result = &mut completion => result.map_err(SceneFailure::Completion),
                 _ = permit.core.shutdown.cancelled() => {
                     let cancel_result = task.cancel(&locals).await;
                     await_after_cancel(cancel_result, completion.as_mut()).await
                 }
+                }
+            };
+            task.wait_scene_closed().await;
+            let terminal_check =
+                apply_task_factory_action(&locals, Arc::clone(&binding), TaskFactoryAction::Check)
+                    .await;
+            match outcome {
+                Err(SceneFailure::Completion(error)) if !is_cancelled_error(&error) => {
+                    Err(SceneFailure::Completion(error))
+                }
+                Err(SceneFailure::CancellationDispatch(error)) => {
+                    Err(SceneFailure::CancellationDispatch(error))
+                }
+                outcome => match terminal_check {
+                    Ok(()) => outcome,
+                    Err(error) => Err(SceneFailure::Completion(error)),
+                },
             }
         }
         .await;
+
+        let replacement = binding.factory_replaced();
         match scene_result {
+            Ok(()) if replacement => {
+                failures.push(("scene", PyRuntimeError::new_err(FACTORY_REPLACED_ERROR)));
+                break;
+            }
             Ok(()) => {}
             Err(SceneFailure::Completion(error)) => {
                 if !is_cancelled_error(&error) {
                     failures.push(("scene", error));
+                } else if replacement {
+                    failures.push(("scene", PyRuntimeError::new_err(FACTORY_REPLACED_ERROR)));
                 }
                 break;
             }
@@ -144,10 +180,31 @@ pub(crate) async fn run_lifecycle(
         }
     }
 
+    match apply_task_factory_action(&locals, Arc::clone(&binding), TaskFactoryAction::Restore).await
+    {
+        Err(error) if !failures.iter().any(|(phase, _)| *phase == "scene") => {
+            failures.push(("scene", error));
+        }
+        _ => {}
+    }
+
     if let Err(error) = await_hook(&locals, &production, "stop").await {
         failures.push(("stop", error));
     }
     lifecycle_result(failures)
+}
+
+struct OuterRunGuard {
+    core: Arc<RuntimeCore>,
+    completed: bool,
+}
+
+impl Drop for OuterRunGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.core.request_shutdown();
+        }
+    }
 }
 
 fn is_cancelled_error(error: &PyErr) -> bool {
@@ -183,9 +240,27 @@ impl Runtime {
             .map_err(|_| PyRuntimeError::new_err("Runtime.run() may only be called once"))?;
         let locals = TaskLocals::with_running_loop(py)?.copy_context(py)?;
         let lifecycle_locals = locals.clone();
+        let production_state = production.bind(py).cast::<Production>()?.borrow().state();
+        let event_loop = locals.event_loop(py);
+        let binding = RunBinding::new(py, &production_state, &event_loop)?;
+        production_state.bind(&binding)?;
+        let (sender, receiver) = oneshot::channel();
+        let core = Arc::clone(&self.core);
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            let result = run_lifecycle(permit, lifecycle_locals, production, binding).await;
+            let _ = sender.send(result);
+        });
 
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
-            run_lifecycle(permit, lifecycle_locals, production).await?;
+            let mut guard = OuterRunGuard {
+                core,
+                completed: false,
+            };
+            let result = receiver.await.map_err(|_| {
+                PyRuntimeError::new_err("Production lifecycle task did not return a result")
+            })?;
+            guard.completed = true;
+            result?;
             Python::attach(|py| Ok::<_, PyErr>(py.None()))
         })
     }

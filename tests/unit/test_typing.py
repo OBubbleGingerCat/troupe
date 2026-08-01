@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+NEGATIVE = ROOT / "tests" / "typing" / "negative.py"
 
 
 def _run(cache_dir: Path, module: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -58,14 +59,11 @@ def test_runtime_stub_and_typed_consumers(tmp_path: Path) -> None:
             )
         )
     )
-    assert diagnostics == Counter(
-        {
-            (5, "call-arg"): 1,
-            (9, "call-arg"): 1,
-            (13, "call-arg"): 1,
-            (17, "arg-type"): 1,
-            (21, "list-item"): 1,
-            (25, "attr-defined"): 1,
-            (29, "override"): 1,
-        }
-    ), negative.stdout + negative.stderr
+    expected = Counter()
+    for line_number, line in enumerate(
+        NEGATIVE.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if marker := re.search(r"# E: (?P<code>[a-z-]+)$", line):
+            expected[(line_number, marker.group("code"))] += 1
+    assert diagnostics == expected, negative.stdout + negative.stderr

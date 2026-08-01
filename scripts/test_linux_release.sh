@@ -44,6 +44,7 @@ _create_temporary_root() {
 }
 
 _quality_for_python() {
+  export PYTHONDONTWRITEBYTECODE=1
   uv sync --frozen --all-groups
 
   local resolved_python
@@ -64,6 +65,8 @@ _quality_for_python() {
   PYTHONHOME="$managed_prefix" cargo test --locked --manifest-path rust/Cargo.toml
   env -u CONDA_PREFIX uv run --no-sync maturin develop --uv --locked --manifest-path rust/Cargo.toml
   uv run --no-sync pytest -q
+  uv run --no-sync python -m mypy --strict --show-error-codes tests/typing/positive.py
+  uv run --no-sync python -m mypy.stubtest troupe --concise
   uv run --no-sync python -m doctest README.md
 }
 
@@ -143,6 +146,32 @@ compatibility() {
   done
 }
 
+_audit_checkout() {
+  local checkout_uid
+  local fixture_caches
+  local wrong_owners
+
+  git diff --check
+
+  fixture_caches="$(
+    find "$repository_root/tests/fixtures/productions" \
+      -type d -name __pycache__ -print
+  )"
+  if [[ -n "$fixture_caches" ]]; then
+    printf 'fixture checkout contains __pycache__ directories:\n%s\n' \
+      "$fixture_caches" >&2
+    return 1
+  fi
+
+  checkout_uid="$(stat -c %u "$repository_root")"
+  wrong_owners="$(find "$repository_root" ! -uid "$checkout_uid" -print)"
+  if [[ -n "$wrong_owners" ]]; then
+    printf 'checkout contains paths owned by another uid:\n%s\n' \
+      "$wrong_owners" >&2
+    return 1
+  fi
+}
+
 _usage() {
   printf 'usage: %s [quality|build|compatibility|all]\n' "${0##*/}" >&2
 }
@@ -173,6 +202,8 @@ main() {
       return 2
       ;;
   esac
+
+  _audit_checkout
 }
 
 main "$@"

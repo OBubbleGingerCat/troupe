@@ -29,22 +29,119 @@ from wheel.wheelfile import WheelError, WheelFile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PACKAGE = ROOT / "src" / "troupe"
 EXPECTED_WRAPPER = (
+    b"from ._runtime import Actor as Actor\n"
+    b"from ._runtime import ActorHandle as ActorHandle\n"
+    b"from ._runtime import Cue as Cue\n"
+    b"from ._runtime import CueContextError as CueContextError\n"
+    b"from ._runtime import Effect as Effect\n"
+    b"from ._runtime import EffectContextError as EffectContextError\n"
     b"from ._runtime import Production as Production\n"
     b"\n"
-    b'__all__ = ["Production"]\n'
+    b"__all__ = [\n"
+    b'    "Actor",\n'
+    b'    "ActorHandle",\n'
+    b'    "Cue",\n'
+    b'    "CueContextError",\n'
+    b'    "Effect",\n'
+    b'    "EffectContextError",\n'
+    b'    "Production",\n'
+    b"]\n"
 )
 EXPECTED_STUB = (
+    b"from __future__ import annotations\n"
+    b"\n"
+    b"from collections.abc import Mapping\n"
+    b"from re import Pattern\n"
+    b"from typing import Any, TypeVar, final, overload\n"
     b"from typing_extensions import disjoint_base\n"
+    b"\n"
+    b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Actor:\n"
+    b"    def __init__(self) -> None: ...\n"
+    b"    @property\n"
+    b"    def name(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def production(self) -> Production: ...\n"
+    b"    def make_effect(\n"
+    b"        self,\n"
+    b"        effect_type: type[_EffectT],\n"
+    b"        *,\n"
+    b"        effect_args: tuple[Any, ...],\n"
+    b"        effect_kwargs: dict[str, Any],\n"
+    b"    ) -> _EffectT: ...\n"
+    b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
+    b"\n"
+    b"@final\n"
+    b"class ActorHandle:\n"
+    b"    @property\n"
+    b"    def name(self) -> str: ...\n"
+    b"    async def cue(self, instruction: dict[Any, Any]) -> tuple[Effect, ...]: ...\n"
+    b"\n"
+    b"@final\n"
+    b"class Cue:\n"
+    b"    @property\n"
+    b"    def id(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def instruction(self) -> Mapping[Any, Any]: ...\n"
+    b"    @property\n"
+    b"    def source(self) -> str: ...\n"
+    b"\n"
+    b"class CueContextError(RuntimeError): ...\n"
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Effect:\n"
+    b"    @property\n"
+    b"    def id(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def owner(self) -> str: ...\n"
+    b"\n"
+    b"class EffectContextError(RuntimeError): ...\n"
     b"\n"
     b"@disjoint_base\n"
     b"class Production:\n"
     b"    def __new__(cls, args: list[str], /) -> Production: ...\n"
+    b"    def cast_actor(\n"
+    b"        self,\n"
+    b"        actor_type: type[Actor],\n"
+    b"        *,\n"
+    b"        name: str,\n"
+    b"        actor_args: tuple[Any, ...],\n"
+    b"        actor_kwargs: dict[str, Any],\n"
+    b"    ) -> ActorHandle: ...\n"
+    b"    @overload\n"
+    b"    def get_actor(self, name: str) -> ActorHandle | None: ...\n"
+    b"    @overload\n"
+    b"    def get_actor(self, pattern: Pattern[str]) -> list[ActorHandle]: ...\n"
+    b"    def get_actors(self) -> list[ActorHandle]: ...\n"
     b"    async def start(self) -> None: ...\n"
     b"    async def scene(self) -> None: ...\n"
     b"    async def stop(self) -> None: ...\n"
     b"\n"
-    b'__all__ = ["Production"]\n'
+    b"__all__ = [\n"
+    b'    "Actor",\n'
+    b'    "ActorHandle",\n'
+    b'    "Cue",\n'
+    b'    "CueContextError",\n'
+    b'    "Effect",\n'
+    b'    "EffectContextError",\n'
+    b'    "Production",\n'
+    b"]\n"
 )
+EXPECTED_PY_TYPED = b""
+PUBLIC_EXPORTS = [
+    "Actor",
+    "ActorHandle",
+    "Cue",
+    "CueContextError",
+    "Effect",
+    "EffectContextError",
+    "Production",
+]
+SMOKE_TIMEOUT = 10.0
+
+
 class VerificationError(Exception):
     pass
 
@@ -89,7 +186,7 @@ def _assert_thin_package(names: Sequence[str], prefix: str) -> None:
         raise VerificationError("py.typed is missing or ambiguous")
 
 
-def _validate_source(source_package: Path) -> tuple[bytes, bytes]:
+def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes]:
     try:
         files = [path for path in source_package.rglob("*") if path.is_file()]
         names = [path.relative_to(source_package).as_posix() for path in files]
@@ -107,11 +204,14 @@ def _validate_source(source_package: Path) -> tuple[bytes, bytes]:
 
         wrapper = (source_package / "__init__.py").read_bytes()
         stub = (source_package / "__init__.pyi").read_bytes()
+        py_typed = (source_package / "py.typed").read_bytes()
         if wrapper != EXPECTED_WRAPPER:
             raise VerificationError("source wrapper is not the approved thin wrapper")
         if stub != EXPECTED_STUB:
             raise VerificationError("source stub is not the approved public API")
-        return wrapper, stub
+        if py_typed != EXPECTED_PY_TYPED:
+            raise VerificationError("source py.typed marker is not exact")
+        return wrapper, stub, py_typed
     except VerificationError:
         raise
     except OSError as error:
@@ -143,9 +243,11 @@ def _validate_sdist(
     source_package: Path,
     sdist: Path,
     *,
-    expected: tuple[bytes, bytes] | None = None,
+    expected: tuple[bytes, bytes, bytes] | None = None,
 ) -> None:
-    wrapper, stub = expected if expected is not None else _validate_source(source_package)
+    wrapper, stub, py_typed = (
+        expected if expected is not None else _validate_source(source_package)
+    )
     try:
         with tarfile.open(sdist, "r:*") as archive:
             members = archive.getmembers()
@@ -170,10 +272,13 @@ def _validate_sdist(
 
             wrapper_member = archive.extractfile(f"{prefix}__init__.py")
             stub_member = archive.extractfile(f"{prefix}__init__.pyi")
+            py_typed_member = archive.extractfile(f"{prefix}py.typed")
             if wrapper_member is None or wrapper_member.read() != wrapper:
                 raise VerificationError("sdist wrapper differs from source")
             if stub_member is None or stub_member.read() != stub:
                 raise VerificationError("sdist stub differs from source")
+            if py_typed_member is None or py_typed_member.read() != py_typed:
+                raise VerificationError("sdist py.typed marker differs from source")
     except VerificationError:
         raise
     except (OSError, tarfile.TarError, KeyError) as error:
@@ -261,9 +366,11 @@ def _validate_wheel(
     wheel: Path,
     *,
     required_manylinux: str | None,
-    expected: tuple[bytes, bytes] | None = None,
+    expected: tuple[bytes, bytes, bytes] | None = None,
 ) -> None:
-    wrapper, stub = expected if expected is not None else _validate_source(source_package)
+    wrapper, stub, py_typed = (
+        expected if expected is not None else _validate_source(source_package)
+    )
     filename_tags, filename_platforms = _parse_wheel_filename(wheel)
     if required_manylinux is not None and not (
         set(filename_platforms) & _required_manylinux_platforms(required_manylinux)
@@ -315,6 +422,8 @@ def _validate_wheel(
                 raise VerificationError("wheel wrapper differs from source")
             if archive.read("troupe/__init__.pyi") != stub:
                 raise VerificationError("wheel stub differs from source")
+            if archive.read("troupe/py.typed") != py_typed:
+                raise VerificationError("wheel py.typed marker differs from source")
 
             metadata = _parse_metadata(archive.read(f"{dist_info}/METADATA"))
             if metadata.get("Name") != "troupe":
@@ -425,16 +534,23 @@ def _run(
     cwd: Path,
     env: Mapping[str, str],
     forbidden_stderr: str | None = None,
+    timeout: float | None = None,
 ) -> str:
+    options: dict[str, Any] = {
+        "cwd": cwd,
+        "env": dict(env),
+        "check": False,
+        "capture_output": True,
+        "text": True,
+    }
+    if timeout is not None:
+        options["timeout"] = timeout
     try:
-        completed = subprocess.run(
-            command,
-            cwd=cwd,
-            env=dict(env),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        completed = subprocess.run(command, **options)
+    except subprocess.TimeoutExpired as error:
+        raise VerificationError(
+            f"command timed out after {timeout} seconds: {command[0]}"
+        ) from error
     except OSError as error:
         raise VerificationError(f"could not execute {command[0]}: {error}") from error
     if completed.returncode != 0:
@@ -456,10 +572,35 @@ import troupe
 import troupe._runtime as runtime
 import troupe_smoke_dependency
 
+public_exports = [
+    "Actor",
+    "ActorHandle",
+    "Cue",
+    "CueContextError",
+    "Effect",
+    "EffectContextError",
+    "Production",
+]
+public_identities = all(
+    getattr(troupe, name) is getattr(runtime, name) for name in public_exports
+)
+public_modules = all(getattr(troupe, name).__module__ == "troupe" for name in public_exports)
 assert troupe.Production is runtime.Production
 assert troupe.Production.__module__ == "troupe"
-assert troupe.__all__ == ["Production"]
+assert troupe.__all__ == public_exports
+assert public_identities
+assert public_modules
 assert sysconfig.get_config_var("Py_GIL_DISABLED") != 1
+
+native_construction_gates = True
+for native_type in (troupe.Actor, troupe.ActorHandle, troupe.Cue, troupe.Effect):
+    try:
+        native_type()
+    except TypeError:
+        pass
+    else:
+        native_construction_gates = False
+assert native_construction_gates
 
 production_type = troupe.Production
 for args in ([], ["--value", "1"], ["\udcff"]):
@@ -528,6 +669,9 @@ print(json.dumps({
     "production_identity": troupe.Production is runtime.Production,
     "production_module": troupe.Production.__module__,
     "exports": troupe.__all__,
+    "public_identities": public_identities,
+    "public_modules": public_modules,
+    "native_construction_gates": native_construction_gates,
     "gil_disabled": sysconfig.get_config_var("Py_GIL_DISABLED") == 1,
     "surrogate_constructor": True,
     "default_hooks": True,
@@ -566,7 +710,10 @@ def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> 
     expected_values: dict[str, object] = {
         "production_identity": True,
         "production_module": "troupe",
-        "exports": ["Production"],
+        "exports": PUBLIC_EXPORTS,
+        "public_identities": True,
+        "public_modules": True,
+        "native_construction_gates": True,
         "gil_disabled": False,
         "surrogate_constructor": True,
         "default_hooks": True,
@@ -598,18 +745,96 @@ def _validate_smoke_tools(child_venv: Path, env: Mapping[str, str]) -> None:
 
 
 def _validate_smoke_events(path: Path, raw_args: list[str]) -> None:
-    expected = [
-        ["args", raw_args],
-        ["start"],
-        ["scene", "dependency-ok", "module-ok", "resource-ok"],
-        ["stop"],
-    ]
     try:
         actual = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise VerificationError("wheel smoke did not write a valid event log") from error
+
+    try:
+        if not isinstance(actual, list) or len(actual) != 6:
+            raise TypeError("event inventory is not exact")
+        actor = actual[3][1]
+        cancellation = actual[4][1]
+        if not isinstance(actor, dict) or not isinstance(cancellation, dict):
+            raise TypeError("event payloads must be objects")
+        root_cue = actor["root_cue"]
+        if not isinstance(root_cue, dict):
+            raise TypeError("root cue must be an object")
+        scene = root_cue["source"]
+        if not isinstance(scene, str) or re.fullmatch(
+            r"scene-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+            r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            scene,
+        ) is None:
+            raise TypeError("root cue source is not a scene UUID")
+        threads = actor["threads"]
+        if (
+            not isinstance(threads, list)
+            or len(threads) != 8
+            or any(type(thread_id) is not int for thread_id in threads)
+            or len(set(threads)) != 1
+        ):
+            raise TypeError("thread observations are not exact")
+        downstream_id = f"{scene}-cue1"
+        effect_id = f"{downstream_id}-effect0"
+        expected = [
+            ["args", raw_args],
+            ["start"],
+            ["scene", "dependency-ok", "module-ok", "resource-ok"],
+            [
+                "actor-round-trip",
+                {
+                    "constructors": [
+                        ["router", "router", True],
+                        ["worker", "worker", True],
+                    ],
+                    "queries": {
+                        "exact": "router",
+                        "pattern": ["router", "worker"],
+                    },
+                    "root_cue": {"id": f"{scene}-cue0", "source": scene},
+                    "downstream_cue": {
+                        "id": downstream_id,
+                        "source": "router",
+                    },
+                    "effect": {
+                        "id": effect_id,
+                        "owner": "worker",
+                        "value": "mutated",
+                    },
+                    "result": {
+                        "type": "tuple",
+                        "items": [[effect_id, "worker", "mutated"]],
+                    },
+                    "threads": [threads[0]] * 8,
+                },
+            ],
+            [
+                "cancellation",
+                {
+                    "admitted_snapshot": "before-release",
+                    "pre_release": {
+                        "caller_done": False,
+                        "successor_done": False,
+                        "successor_entered": False,
+                    },
+                    "other_actor_result": [],
+                    "completion_saw_release": {
+                        "caller": True,
+                        "successor": True,
+                    },
+                    "caller_outcome": "CancelledError",
+                    "successor_result": [],
+                },
+            ],
+            ["stop"],
+        ]
+    except (IndexError, KeyError, TypeError) as error:
+        raise VerificationError(
+            "wheel smoke event log differs from the actor contract"
+        ) from error
     if actual != expected:
-        raise VerificationError("wheel smoke event log differs from the lifecycle contract")
+        raise VerificationError("wheel smoke event log differs from the actor contract")
 
 
 def _smoke_wheel(wheel: Path, workspace: Path) -> None:
@@ -649,7 +874,12 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
         env=env,
     )
     _run([child_python, "-m", "pip", "check"], cwd=outside, env=env)
-    output = _run([child_python, "-c", SMOKE], cwd=outside, env=env)
+    output = _run(
+        [child_python, "-c", SMOKE],
+        cwd=outside,
+        env=env,
+        timeout=SMOKE_TIMEOUT,
+    )
     try:
         payload = json.loads(output)
     except (TypeError, json.JSONDecodeError) as error:
@@ -668,6 +898,7 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
         cwd=outside,
         env=env,
         forbidden_stderr="troupe:",
+        timeout=SMOKE_TIMEOUT,
     )
     _validate_smoke_events(events, raw_args)
 
@@ -709,8 +940,10 @@ def _stage_publication(wheel: Path, output: Path) -> Path:
         _write_sha256(staged_wheel, checksum)
         _validate_sha256(staged_wheel, checksum)
         return staging
-    except Exception as error:
+    except BaseException as error:
         _discard_staging(staging)
+        if not isinstance(error, Exception):
+            raise
         if isinstance(error, VerificationError):
             raise
         raise VerificationError(f"could not stage wheel publication: {error}") from error
@@ -732,8 +965,10 @@ def _commit_publication(staging: Path, output: Path) -> None:
         os.chown(checksum, parent.st_uid, parent.st_gid)
         os.chown(staging, parent.st_uid, parent.st_gid)
         os.rename(staging, output)
-    except Exception as error:
+    except BaseException as error:
         _discard_staging(staging)
+        if not isinstance(error, Exception):
+            raise
         if isinstance(error, VerificationError):
             raise
         raise VerificationError(f"could not publish wheel atomically: {error}") from error
@@ -802,7 +1037,7 @@ def _build_mode(arguments: argparse.Namespace) -> None:
             _smoke_wheel(wheel, workspace)
             if output is not None:
                 staging = _stage_publication(wheel, output)
-    except Exception:
+    except BaseException:
         _discard_staging(staging)
         raise
 
