@@ -169,6 +169,17 @@ PUBLIC_EXPORTS = [
     "EffectContextError",
     "Production",
 ]
+EXAMPLE_FILES = {
+    "README.md": b"# Troupe examples\n",
+    "actor_pipeline/__init__.py": b"",
+    "actor_pipeline/production.py": b"import troupe\n",
+    "cancellation_cleanup/__init__.py": b"",
+    "cancellation_cleanup/production.py": b"import troupe\n",
+    "cooperative_workers/__init__.py": b"",
+    "cooperative_workers/production.py": b"import troupe\n",
+    "hello_actor/__init__.py": b"",
+    "hello_actor/production.py": b"import troupe\n",
+}
 
 
 def _is_module_path(name: str, root: str) -> bool:
@@ -465,6 +476,11 @@ def _synthetic_artifacts(
     sdist_wrapper: bytes = EXPECTED_WRAPPER,
     sdist_stub: bytes | None = EXPECTED_STUB,
     sdist_py_typed: bytes | None = EXPECTED_PY_TYPED,
+    missing_source_example: str | None = None,
+    extra_source_example: bool = False,
+    missing_sdist_example: str | None = None,
+    changed_sdist_example: str | None = None,
+    extra_sdist_example: bool = False,
     sdist_unsafe: str | None = None,
     wheel_wrapper: bytes = EXPECTED_WRAPPER,
     wheel_stub: bytes | None = EXPECTED_STUB,
@@ -498,24 +514,54 @@ def _synthetic_artifacts(
     if extra_source_stub:
         (source / "helper.pyi").write_text("VALUE: int\n", encoding="utf-8")
 
+    source_examples = tmp_path / "examples"
+    for name, data in EXAMPLE_FILES.items():
+        if name == missing_source_example:
+            continue
+        path = source_examples / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    if extra_source_example:
+        (source_examples / "unexpected.txt").write_text(
+            "unexpected\n",
+            encoding="utf-8",
+        )
+
     sdist = tmp_path / "troupe-0.1.0.tar.gz"
-    sdist_root = "troupe-0.1.0/src/troupe"
+    sdist_root = "troupe-0.1.0"
+    sdist_package = f"{sdist_root}/src/troupe"
     with tarfile.open(sdist, "w:gz") as archive:
-        _add_tar_bytes(archive, f"{sdist_root}/__init__.py", sdist_wrapper)
+        _add_tar_bytes(archive, f"{sdist_package}/__init__.py", sdist_wrapper)
         if sdist_stub is not None:
-            _add_tar_bytes(archive, f"{sdist_root}/__init__.pyi", sdist_stub)
+            _add_tar_bytes(archive, f"{sdist_package}/__init__.pyi", sdist_stub)
         if sdist_py_typed is not None:
-            _add_tar_bytes(archive, f"{sdist_root}/py.typed", sdist_py_typed)
+            _add_tar_bytes(archive, f"{sdist_package}/py.typed", sdist_py_typed)
         if extra_sdist_python:
-            _add_tar_bytes(archive, f"{sdist_root}/nested/helper.py", b"VALUE = 1\n")
+            _add_tar_bytes(
+                archive,
+                f"{sdist_package}/nested/helper.py",
+                b"VALUE = 1\n",
+            )
         if extra_sdist_stub:
-            _add_tar_bytes(archive, f"{sdist_root}/helper.pyi", b"VALUE: int\n")
+            _add_tar_bytes(archive, f"{sdist_package}/helper.pyi", b"VALUE: int\n")
+        for name, data in EXAMPLE_FILES.items():
+            if name == missing_sdist_example:
+                continue
+            if name == changed_sdist_example:
+                data = b"changed\n"
+            _add_tar_bytes(archive, f"{sdist_root}/examples/{name}", data)
+        if extra_sdist_example:
+            _add_tar_bytes(
+                archive,
+                f"{sdist_root}/examples/unexpected.txt",
+                b"unexpected\n",
+            )
         if sdist_unsafe == "traversal":
             _add_tar_bytes(archive, "../escape.dat", b"unsafe\n")
         elif sdist_unsafe == "absolute":
             _add_tar_bytes(archive, "/escape.dat", b"unsafe\n")
         elif sdist_unsafe == "symlink":
-            link = tarfile.TarInfo(f"{sdist_root}/linked.dat")
+            link = tarfile.TarInfo(f"{sdist_package}/linked.dat")
             link.type = tarfile.SYMTYPE
             link.linkname = "/tmp/escape.dat"
             archive.addfile(link)
@@ -660,6 +706,7 @@ def test_python_project_metadata_and_build_configuration() -> None:
         "manifest-path": "rust/Cargo.toml",
         "module-name": "troupe._runtime",
         "locked": True,
+        "include": [{"path": "examples/**/*", "format": "sdist"}],
         "exclude": ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
         "sbom": {"rust": False},
     }
@@ -842,6 +889,10 @@ def test_verifier_accepts_pinned_maturin_entry_point_format(tmp_path: Path) -> N
         {"extra_source_stub": True},
         {"extra_sdist_python": True},
         {"extra_sdist_stub": True},
+        {"missing_source_example": "README.md"},
+        {"extra_source_example": True},
+        {"changed_sdist_example": "actor_pipeline/production.py"},
+        {"extra_sdist_example": True},
         {"extra_wheel_python": True},
         {"extra_package_python": True},
         {"forbidden_file": "helper.py"},
@@ -944,6 +995,21 @@ def test_verifier_rejects_invalid_artifacts(
 ) -> None:
     verifier = _verifier()
     source, sdist, wheel = _synthetic_artifacts(tmp_path, **changes)
+
+    with pytest.raises(verifier.VerificationError):
+        verifier._validate_artifacts(source, sdist, wheel)
+
+
+@pytest.mark.parametrize("missing_sdist_example", EXAMPLE_FILES)
+def test_verifier_rejects_each_missing_sdist_example(
+    tmp_path: Path,
+    missing_sdist_example: str,
+) -> None:
+    verifier = _verifier()
+    source, sdist, wheel = _synthetic_artifacts(
+        tmp_path,
+        missing_sdist_example=missing_sdist_example,
+    )
 
     with pytest.raises(verifier.VerificationError):
         verifier._validate_artifacts(source, sdist, wheel)

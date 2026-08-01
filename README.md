@@ -27,6 +27,13 @@ implemented in the Rust extension. The `troupe/__init__.pyi` stub describes
 the public `Production`, `Actor`, `ActorHandle`, `Cue`, `CueContextError`,
 `Effect`, and `EffectContextError` API.
 
+## Examples
+
+[Progressive examples](examples/README.md) cover a first Actor and Effect,
+Actor-to-Actor routing, cooperative workers with per-Actor FIFO execution, and
+structured cancellation cleanup. Every example is a production package that
+runs through the same `troupe --production` command used in deployment.
+
 ## Production API
 
 The constructor receives a `list[str]` equivalent to `sys.argv[1:]`: these are

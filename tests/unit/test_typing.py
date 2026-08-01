@@ -37,6 +37,10 @@ def test_runtime_stub_and_typed_consumers(tmp_path: Path) -> None:
         "--strict",
         "--show-error-codes",
         "tests/typing/positive.py",
+        "examples/hello_actor/production.py",
+        "examples/actor_pipeline/production.py",
+        "examples/cooperative_workers/production.py",
+        "examples/cancellation_cleanup/production.py",
     )
     assert positive.returncode == 0, positive.stdout + positive.stderr
 

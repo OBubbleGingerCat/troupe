@@ -139,6 +139,17 @@ PUBLIC_EXPORTS = [
     "EffectContextError",
     "Production",
 ]
+EXPECTED_EXAMPLE_FILES = (
+    "README.md",
+    "actor_pipeline/__init__.py",
+    "actor_pipeline/production.py",
+    "cancellation_cleanup/__init__.py",
+    "cancellation_cleanup/production.py",
+    "cooperative_workers/__init__.py",
+    "cooperative_workers/production.py",
+    "hello_actor/__init__.py",
+    "hello_actor/production.py",
+)
 SMOKE_TIMEOUT = 10.0
 
 
@@ -239,6 +250,27 @@ def _sdist_package_prefix(names: Sequence[str]) -> str:
     return matches[0]
 
 
+def _source_examples(source_package: Path) -> dict[str, bytes]:
+    examples = source_package.parent.parent / "examples"
+    try:
+        files: dict[str, bytes] = {}
+        for path in examples.rglob("*"):
+            if not path.is_file():
+                continue
+            name = path.relative_to(examples).as_posix()
+            parts = PurePosixPath(name).parts
+            if "__pycache__" in parts or path.suffix in (".pyc", ".pyo"):
+                continue
+            files[name] = path.read_bytes()
+        if tuple(sorted(files)) != EXPECTED_EXAMPLE_FILES:
+            raise VerificationError("source examples inventory is not exact")
+        return files
+    except VerificationError:
+        raise
+    except OSError as error:
+        raise VerificationError(f"could not inspect source examples: {error}") from error
+
+
 def _validate_sdist(
     source_package: Path,
     sdist: Path,
@@ -248,6 +280,7 @@ def _validate_sdist(
     wrapper, stub, py_typed = (
         expected if expected is not None else _validate_source(source_package)
     )
+    source_examples = _source_examples(source_package)
     try:
         with tarfile.open(sdist, "r:*") as archive:
             members = archive.getmembers()
@@ -270,6 +303,17 @@ def _validate_sdist(
             }:
                 raise VerificationError("sdist runtime package inventory is not exact")
 
+            distribution_prefix = prefix.removesuffix("src/troupe/")
+            examples_prefix = f"{distribution_prefix}examples/"
+            example_names = {
+                name for name in regular_names if name.startswith(examples_prefix)
+            }
+            expected_example_names = {
+                f"{examples_prefix}{name}" for name in source_examples
+            }
+            if example_names != expected_example_names:
+                raise VerificationError("sdist examples inventory is not exact")
+
             wrapper_member = archive.extractfile(f"{prefix}__init__.py")
             stub_member = archive.extractfile(f"{prefix}__init__.pyi")
             py_typed_member = archive.extractfile(f"{prefix}py.typed")
@@ -279,6 +323,12 @@ def _validate_sdist(
                 raise VerificationError("sdist stub differs from source")
             if py_typed_member is None or py_typed_member.read() != py_typed:
                 raise VerificationError("sdist py.typed marker differs from source")
+            for name, data in source_examples.items():
+                member = archive.extractfile(f"{examples_prefix}{name}")
+                if member is None or member.read() != data:
+                    raise VerificationError(
+                        f"sdist example differs from source: {name}"
+                    )
     except VerificationError:
         raise
     except (OSError, tarfile.TarError, KeyError) as error:
