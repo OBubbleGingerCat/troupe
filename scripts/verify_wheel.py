@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -29,17 +30,53 @@ from wheel.wheelfile import WheelError, WheelFile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PACKAGE = ROOT / "src" / "troupe"
 EXPECTED_WRAPPER = (
+    b"from dataclasses import dataclass as _dataclass\n"
+    b"from os import PathLike as _PathLike\n"
+    b"from typing import Literal as _Literal\n"
+    b"\n"
     b"from ._runtime import Actor as Actor\n"
     b"from ._runtime import ActorHandle as ActorHandle\n"
+    b"from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError\n"
+    b"from ._runtime import AgentError as AgentError\n"
+    b"from ._runtime import AgentSessionError as AgentSessionError\n"
+    b"from ._runtime import AgentSessionStartError as AgentSessionStartError\n"
     b"from ._runtime import Cue as Cue\n"
     b"from ._runtime import CueContextError as CueContextError\n"
     b"from ._runtime import Effect as Effect\n"
     b"from ._runtime import EffectContextError as EffectContextError\n"
     b"from ._runtime import Production as Production\n"
     b"\n"
+    b"\n"
+    b"@_dataclass(frozen=True, slots=True, kw_only=True)\n"
+    b"class AgentProfile:\n"
+    b'    agent: _Literal["codex", "claude", "kimi"]\n'
+    b"    workspace: str | _PathLike[str]\n"
+    b"    model: str\n"
+    b"    effort: str | None\n"
+    b"\n"
+    b"    def __post_init__(self) -> None:\n"
+    b"        if not isinstance(self.agent, str):\n"
+    b'            raise TypeError("agent must be a str")\n'
+    b'        if self.agent not in {"codex", "claude", "kimi"}:\n'
+    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi'\")\n"
+    b"        if not isinstance(self.model, str):\n"
+    b'            raise TypeError("model must be a str")\n'
+    b"        if not self.model:\n"
+    b'            raise ValueError("model must not be empty")\n'
+    b"        if self.effort is not None and not isinstance(self.effort, str):\n"
+    b'            raise TypeError("effort must be a str or None")\n'
+    b'        if self.effort == "":\n'
+    b'            raise ValueError("effort must not be empty")\n'
+    b"\n"
+    b"\n"
     b"__all__ = [\n"
     b'    "Actor",\n'
     b'    "ActorHandle",\n'
+    b'    "AgentAuthenticationRequiredError",\n'
+    b'    "AgentError",\n'
+    b'    "AgentProfile",\n'
+    b'    "AgentSessionError",\n'
+    b'    "AgentSessionStartError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
@@ -51,11 +88,31 @@ EXPECTED_STUB = (
     b"from __future__ import annotations\n"
     b"\n"
     b"from collections.abc import Mapping\n"
+    b"from dataclasses import dataclass\n"
+    b"from os import PathLike\n"
     b"from re import Pattern\n"
-    b"from typing import Any, TypeVar, final, overload\n"
+    b"from typing import Any, Literal, TypeVar, final, overload\n"
     b"from typing_extensions import disjoint_base\n"
     b"\n"
     b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b"\n"
+    b"class AgentError(RuntimeError):\n"
+    b"    code: str\n"
+    b"\n"
+    b"class AgentSessionError(AgentError): ...\n"
+    b"\n"
+    b"class AgentSessionStartError(AgentSessionError):\n"
+    b"    phase: str\n"
+    b"\n"
+    b"class AgentAuthenticationRequiredError(AgentSessionStartError): ...\n"
+    b"\n"
+    b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
+    b"class AgentProfile:\n"
+    b'    agent: Literal["codex", "claude", "kimi"]\n'
+    b"    workspace: str | PathLike[str]\n"
+    b"    model: str\n"
+    b"    effort: str | None\n"
+    b"    def __post_init__(self) -> None: ...\n"
     b"\n"
     b"@disjoint_base\n"
     b"class Actor:\n"
@@ -107,6 +164,7 @@ EXPECTED_STUB = (
     b"        actor_type: type[Actor],\n"
     b"        *,\n"
     b"        name: str,\n"
+    b"        agent_profile: AgentProfile,\n"
     b"        actor_args: tuple[Any, ...],\n"
     b"        actor_kwargs: dict[str, Any],\n"
     b"    ) -> ActorHandle: ...\n"
@@ -122,6 +180,11 @@ EXPECTED_STUB = (
     b"__all__ = [\n"
     b'    "Actor",\n'
     b'    "ActorHandle",\n'
+    b'    "AgentAuthenticationRequiredError",\n'
+    b'    "AgentError",\n'
+    b'    "AgentProfile",\n'
+    b'    "AgentSessionError",\n'
+    b'    "AgentSessionStartError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
@@ -133,6 +196,11 @@ EXPECTED_PY_TYPED = b""
 PUBLIC_EXPORTS = [
     "Actor",
     "ActorHandle",
+    "AgentAuthenticationRequiredError",
+    "AgentError",
+    "AgentProfile",
+    "AgentSessionError",
+    "AgentSessionStartError",
     "Cue",
     "CueContextError",
     "Effect",
@@ -615,6 +683,7 @@ def _run(
 
 SMOKE = r'''
 import asyncio
+import dataclasses
 import importlib.metadata
 import inspect
 import json
@@ -627,14 +696,20 @@ import troupe_smoke_dependency
 public_exports = [
     "Actor",
     "ActorHandle",
+    "AgentAuthenticationRequiredError",
+    "AgentError",
+    "AgentProfile",
+    "AgentSessionError",
+    "AgentSessionStartError",
     "Cue",
     "CueContextError",
     "Effect",
     "EffectContextError",
     "Production",
 ]
+native_exports = [name for name in public_exports if name != "AgentProfile"]
 public_identities = all(
-    getattr(troupe, name) is getattr(runtime, name) for name in public_exports
+    getattr(troupe, name) is getattr(runtime, name) for name in native_exports
 )
 public_modules = all(getattr(troupe, name).__module__ == "troupe" for name in public_exports)
 assert troupe.Production is runtime.Production
@@ -642,6 +717,61 @@ assert troupe.Production.__module__ == "troupe"
 assert troupe.__all__ == public_exports
 assert public_identities
 assert public_modules
+assert not hasattr(runtime, "AgentProfile")
+assert dataclasses.is_dataclass(troupe.AgentProfile)
+assert tuple(field.name for field in dataclasses.fields(troupe.AgentProfile)) == (
+    "agent",
+    "workspace",
+    "model",
+    "effort",
+)
+assert troupe.AgentProfile.__match_args__ == ()
+profile = troupe.AgentProfile(
+    agent="codex", workspace=".", model="gpt-5.6-sol", effort="max"
+)
+assert profile == troupe.AgentProfile(
+    agent="codex", workspace=".", model="gpt-5.6-sol", effort="max"
+)
+assert hash(profile) == hash(
+    troupe.AgentProfile(
+        agent="codex", workspace=".", model="gpt-5.6-sol", effort="max"
+    )
+)
+try:
+    profile.model = "other"
+except dataclasses.FrozenInstanceError:
+    pass
+else:
+    raise AssertionError("AgentProfile is mutable")
+agent_test_support_absent = not any(
+    hasattr(runtime, name)
+    for name in (
+        "_agent_launch_specs_for_test",
+        "_agent_test_set_launch",
+        "_agent_test_reset_launch",
+        "_agent_test_hold_opening",
+        "_agent_test_release_opening",
+        "_agent_test_hold_configuration_ready",
+        "_agent_test_release_configuration_ready",
+        "_agent_test_hold_mcp_ready",
+        "_agent_test_release_mcp_ready",
+        "_agent_test_readiness_gate_states",
+        "_agent_test_result_generation_isolation",
+    )
+) and not any(
+    hasattr(runtime.ActorHandle, name)
+    for name in (
+        "_agent_state_for_test",
+        "_agent_ready_for_test",
+    )
+) and not any(
+    hasattr(runtime.Production, name)
+    for name in (
+        "_agent_shutdown_for_test",
+        "_agent_is_shutting_down_for_test",
+    )
+)
+assert agent_test_support_absent
 assert sysconfig.get_config_var("Py_GIL_DISABLED") != 1
 
 native_construction_gates = True
@@ -723,6 +853,7 @@ print(json.dumps({
     "exports": troupe.__all__,
     "public_identities": public_identities,
     "public_modules": public_modules,
+    "agent_test_support_absent": agent_test_support_absent,
     "native_construction_gates": native_construction_gates,
     "gil_disabled": sysconfig.get_config_var("Py_GIL_DISABLED") == 1,
     "surrogate_constructor": True,
@@ -765,6 +896,7 @@ def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> 
         "exports": PUBLIC_EXPORTS,
         "public_identities": True,
         "public_modules": True,
+        "agent_test_support_absent": True,
         "native_construction_gates": True,
         "gil_disabled": False,
         "surrogate_constructor": True,
@@ -794,6 +926,31 @@ def _validate_smoke_tools(child_venv: Path, env: Mapping[str, str]) -> None:
         raise VerificationError("uv is visible inside the wheel smoke environment")
     if shutil.which("troupe", path=expected_path) != str(child_venv / "bin" / "troupe"):
         raise VerificationError("wheel smoke did not resolve the child venv troupe command")
+
+
+def _install_mock_agent_launcher(child_venv: Path, workspace: Path) -> None:
+    mock_agent = ROOT / "tests" / "support" / "mock_acp_agent.py"
+    child_python = child_venv / "bin" / "python"
+    launcher = child_venv / "bin" / "npx"
+    events = workspace / "agent-events.jsonl"
+    if not mock_agent.is_file() or not child_python.is_file():
+        raise VerificationError("wheel smoke mock agent inputs are unavailable")
+    command = " ".join(
+        shlex.quote(str(value))
+        for value in (
+            child_python,
+            mock_agent,
+            "--events",
+            events,
+            "--scenario",
+            "ready",
+        )
+    )
+    try:
+        launcher.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
+        launcher.chmod(0o755)
+    except OSError as error:
+        raise VerificationError("could not install wheel smoke mock launcher") from error
 
 
 def _validate_smoke_events(path: Path, raw_args: list[str]) -> None:
@@ -889,6 +1046,48 @@ def _validate_smoke_events(path: Path, raw_args: list[str]) -> None:
         raise VerificationError("wheel smoke event log differs from the actor contract")
 
 
+def _validate_mock_agent_cleanup(path: Path) -> None:
+    if not path.exists():
+        raise VerificationError("wheel smoke did not start the mock agent")
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        pids = {
+            row["pid"]
+            for row in rows
+            if isinstance(row, dict) and row.get("event") == "process_started"
+        }
+        if any(type(pid) is not int or pid <= 0 for pid in pids):
+            raise TypeError("invalid mock agent process id")
+        if len(pids) != 2:
+            raise TypeError("wheel smoke did not start exactly one process per Actor")
+        for pid in pids:
+            process_rows = [row for row in rows if row.get("pid") == pid]
+            events = [row.get("event") for row in process_rows]
+            if events.count("process_started") != 1:
+                raise TypeError("mock agent process inventory is invalid")
+            if events.count("session_new_received") != 1:
+                raise TypeError("mock agent did not receive exactly one session/new")
+            if events.count("mcp_tools_list") != 1:
+                raise TypeError("mock agent did not discover the result tool")
+            configured = [
+                row.get("config_id")
+                for row in process_rows
+                if row.get("event") == "config_applied"
+            ]
+            if configured != ["mode", "model"]:
+                raise TypeError("mock agent configuration sequence is invalid")
+    except (KeyError, OSError, TypeError, UnicodeError, json.JSONDecodeError) as error:
+        raise VerificationError("wheel smoke mock agent log is malformed") from error
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except OSError as error:
+            raise VerificationError("could not inspect wheel smoke mock agent") from error
+        raise VerificationError("wheel smoke left a mock agent process running")
+
+
 def _smoke_wheel(wheel: Path, workspace: Path) -> None:
     child_venv = workspace / "child-venv"
     outside = workspace / "outside-repository"
@@ -926,6 +1125,7 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
         env=env,
     )
     _run([child_python, "-m", "pip", "check"], cwd=outside, env=env)
+    _install_mock_agent_launcher(child_venv, workspace)
     output = _run(
         [child_python, "-c", SMOKE],
         cwd=outside,
@@ -953,6 +1153,7 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
         timeout=SMOKE_TIMEOUT,
     )
     _validate_smoke_events(events, raw_args)
+    _validate_mock_agent_cleanup(workspace / "agent-events.jsonl")
 
 
 def _write_sha256(wheel: Path, checksum: Path) -> None:

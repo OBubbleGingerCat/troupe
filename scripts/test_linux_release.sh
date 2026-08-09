@@ -63,7 +63,8 @@ _quality_for_python() {
   cargo fmt --check --manifest-path rust/Cargo.toml
   cargo clippy --locked --manifest-path rust/Cargo.toml --all-targets --all-features -- -D warnings
   PYTHONHOME="$managed_prefix" cargo test --locked --manifest-path rust/Cargo.toml
-  env -u CONDA_PREFIX uv run --no-sync maturin develop --uv --locked --manifest-path rust/Cargo.toml
+  env -u CONDA_PREFIX uv run --no-sync maturin develop --uv --locked \
+    --features agent-test-support --manifest-path rust/Cargo.toml
   uv run --no-sync pytest -q
   uv run --no-sync python -m mypy --strict --show-error-codes tests/typing/positive.py
   uv run --no-sync python -m mypy.stubtest troupe --concise

@@ -159,6 +159,7 @@ def test_readme_doctest_exercises_the_actual_native_base() -> None:
     ]
     assert len(troupe_imports) == 1
     public_names = {
+        "AgentProfile",
         "Actor",
         "ActorHandle",
         "Cue",
@@ -215,6 +216,7 @@ def test_readme_doctest_exercises_the_actual_native_base() -> None:
         assert call.args
         assert {keyword.arg for keyword in call.keywords} == {
             "name",
+            "agent_profile",
             "actor_args",
             "actor_kwargs",
         }

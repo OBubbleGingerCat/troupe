@@ -13,6 +13,7 @@ use crate::actor::{
 };
 use crate::actor_handle::ActorHandle;
 use crate::actor_registry::{NameKey, ProductionState};
+use crate::agent_profile::resolve_agent_profile;
 
 const ACTOR_TYPE_ERROR: &str = "actor_type must be a subclass of Actor";
 const ACTOR_RESULT_ERROR: &str = "actor_type did not construct the requested Actor instance";
@@ -92,11 +93,12 @@ impl Production {
         })
     }
 
-    #[pyo3(signature = (actor_type, *, name, actor_args, actor_kwargs))]
+    #[pyo3(signature = (actor_type, *, name, agent_profile, actor_args, actor_kwargs))]
     fn cast_actor(
         slf: PyRef<'_, Self>,
         actor_type: &Bound<'_, PyAny>,
         name: &Bound<'_, PyAny>,
+        agent_profile: &Bound<'_, PyAny>,
         actor_args: &Bound<'_, PyAny>,
         actor_kwargs: &Bound<'_, PyAny>,
     ) -> PyResult<Py<ActorHandle>> {
@@ -110,10 +112,17 @@ impl Production {
         let name = name.cast::<PyString>()?;
         let actor_args = actor_args.cast::<PyTuple>()?;
         let actor_kwargs = actor_kwargs.cast::<PyDict>()?;
+        let resolved_profile = Arc::new(resolve_agent_profile(agent_profile)?);
 
         let state = Arc::clone(&slf.state);
-        let production = Py::<Production>::from(slf).into_any();
+        let cast_permit = state
+            .begin_agent_cast()
+            .map_err(|failure| failure.to_pyerr(py))?;
         let reservation = state.reserve_name(name)?;
+        let agent_launch = state
+            .resolve_agent_launch(&resolved_profile)
+            .map_err(|failure| failure.to_pyerr(py))?;
+        let production = Py::<Production>::from(slf).into_any();
         let (construction, permit) = enter_actor_permit(
             actor_type,
             name,
@@ -124,6 +133,8 @@ impl Production {
         drop(permit);
         let actor = validate_actor_factory_result(class_result, &construction)?;
         let actor_object = actor.clone().unbind();
+        let agent_session =
+            state.start_agent_session(&cast_permit, Arc::clone(&resolved_profile), agent_launch);
         let capability = Arc::new(ActorCapability::new(
             actor_object,
             name,
@@ -131,12 +142,27 @@ impl Production {
             Arc::clone(reservation.identity()),
             Arc::downgrade(&state),
         ));
+        capability.attach_agent_session(agent_session);
         let capability_node = Py::new(py, ActorCapabilityNode::new(Arc::clone(&capability)))?;
         capability.attach_node(capability_node.bind(py))?;
         actor.borrow().attach_capability(&capability);
         let handle = Py::new(py, ActorHandle::from_node(capability_node))?;
         reservation.commit(&capability);
         Ok(handle)
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_shutdown_for_test<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let state = Arc::clone(&self.state);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            state.shutdown_agent_sessions().await;
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_is_shutting_down_for_test(&self) -> bool {
+        self.state.agent_sessions_are_shutting_down()
     }
 
     #[pyo3(

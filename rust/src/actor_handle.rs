@@ -97,6 +97,58 @@ impl ActorHandle {
         .into_any())
     }
 
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_state_for_test(&self, py: Python<'_>) -> PyResult<&'static str> {
+        self.capability(py)?
+            .agent_session()
+            .map(|session| session.state_name())
+            .ok_or_else(|| PyRuntimeError::new_err("Actor has no agent session"))
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_ready_for_test<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let session = self
+            .capability(py)?
+            .agent_session()
+            .ok_or_else(|| PyRuntimeError::new_err("Actor has no agent session"))?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let snapshot = session
+                .readiness()
+                .await
+                .map_err(|failure| Python::attach(|py| failure.to_pyerr(py)))?;
+            Python::attach(|py| {
+                let value = PyDict::new(py);
+                value.set_item("state", "ready")?;
+                value.set_item("pid", snapshot.pid)?;
+                value.set_item("session_id", &snapshot.session_id)?;
+                let agent_info = match &snapshot.agent_info {
+                    Some(agent_info) => {
+                        let info = PyDict::new(py);
+                        info.set_item("name", &agent_info.name)?;
+                        info.set_item("title", &agent_info.title)?;
+                        info.set_item("version", &agent_info.version)?;
+                        info.into_any()
+                    }
+                    None => py.None().into_bound(py),
+                };
+                value.set_item("agent_info", agent_info)?;
+                let capabilities = PyDict::new(py);
+                capabilities.set_item("load_session", snapshot.agent_capabilities.load_session)?;
+                capabilities.set_item(
+                    "mcp_http",
+                    snapshot.agent_capabilities.mcp_capabilities.http,
+                )?;
+                value.set_item("capabilities", capabilities)?;
+                value.set_item("generation", snapshot.generation)?;
+                value.set_item("server_name", &snapshot.server_name)?;
+                value.set_item("endpoint", &snapshot.endpoint)?;
+                value.set_item("model", &snapshot.effective_model)?;
+                value.set_item("effort", &snapshot.effective_effort)?;
+                Ok(value.into_any().unbind())
+            })
+        })
+    }
+
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&*lock(&self.capability))
     }

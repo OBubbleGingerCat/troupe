@@ -1,6 +1,6 @@
 import re
 
-from troupe import Actor, ActorHandle, Cue, Effect, Production
+from troupe import AgentProfile, Actor, ActorHandle, Cue, Effect, Production
 from typing_extensions import assert_type
 
 
@@ -71,15 +71,24 @@ async def exercise() -> None:
     await base.start()
     await base.stop()
 
+    profile = AgentProfile(
+        agent="codex",
+        workspace="/tmp",
+        model="test-model",
+        effort=None,
+    )
+
     positional: ActorHandle = production.cast_actor(
         ExampleActor,
         name="positional",
+        agent_profile=profile,
         actor_args=(1,),
         actor_kwargs={"label": "first"},
     )
     keyword: ActorHandle = production.cast_actor(
         actor_type=ExampleActor,
         name="keyword",
+        agent_profile=profile,
         actor_args=(2,),
         actor_kwargs={"label": "second"},
     )

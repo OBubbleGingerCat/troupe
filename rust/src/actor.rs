@@ -8,6 +8,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType, PyWeakrefReference};
 
 use crate::actor_registry::{NameKey, ProductionState};
+use crate::agent_session::AgentSessionSlot;
 use crate::cue::Cue;
 use crate::effect::{Effect, EffectContextError, construct_effect};
 use crate::mailbox::{
@@ -235,6 +236,7 @@ pub(crate) struct ActorCapability {
     production_state: Weak<ProductionState>,
     node: Mutex<Option<Py<PyWeakrefReference>>>,
     mailbox: Mutex<Mailbox>,
+    agent_session: Mutex<Option<Arc<AgentSessionSlot>>>,
 }
 
 impl ActorCapability {
@@ -253,7 +255,21 @@ impl ActorCapability {
             production_state,
             node: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
+            agent_session: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn attach_agent_session(&self, session: Arc<AgentSessionSlot>) {
+        let previous = lock(&self.agent_session).replace(session);
+        assert!(
+            previous.is_none(),
+            "an Actor agent session is attached once"
+        );
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn agent_session(&self) -> Option<Arc<AgentSessionSlot>> {
+        lock(&self.agent_session).as_ref().map(Arc::clone)
     }
 
     pub(crate) fn attach_node(&self, node: &Bound<'_, ActorCapabilityNode>) -> PyResult<()> {
@@ -459,6 +475,9 @@ impl ActorCapability {
 
 impl Drop for ActorCapability {
     fn drop(&mut self) {
+        if let Some(session) = lock(&self.agent_session).take() {
+            session.cancel();
+        }
         if let Some(state) = self.production_state.upgrade() {
             state.detach(&self.key, &self.identity);
         }

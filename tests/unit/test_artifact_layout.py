@@ -21,6 +21,7 @@ import tarfile
 import warnings
 import zipfile
 from collections.abc import Generator
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -40,6 +41,11 @@ EXPECTED_RUST_SOURCES = [
     "actor.rs",
     "actor_handle.rs",
     "actor_registry.rs",
+    "agent_error.rs",
+    "agent_launch.rs",
+    "agent_profile.rs",
+    "agent_session.rs",
+    "agent_supervisor.rs",
     "cli.rs",
     "cue.rs",
     "cue_future.rs",
@@ -52,23 +58,60 @@ EXPECTED_RUST_SOURCES = [
     "mailbox.rs",
     "production.rs",
     "python_task.rs",
+    "result_mcp.rs",
     "runtime.rs",
     "scene_context.rs",
     "signals.rs",
 ]
 
 EXPECTED_WRAPPER = (
+    b"from dataclasses import dataclass as _dataclass\n"
+    b"from os import PathLike as _PathLike\n"
+    b"from typing import Literal as _Literal\n"
+    b"\n"
     b"from ._runtime import Actor as Actor\n"
     b"from ._runtime import ActorHandle as ActorHandle\n"
+    b"from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError\n"
+    b"from ._runtime import AgentError as AgentError\n"
+    b"from ._runtime import AgentSessionError as AgentSessionError\n"
+    b"from ._runtime import AgentSessionStartError as AgentSessionStartError\n"
     b"from ._runtime import Cue as Cue\n"
     b"from ._runtime import CueContextError as CueContextError\n"
     b"from ._runtime import Effect as Effect\n"
     b"from ._runtime import EffectContextError as EffectContextError\n"
     b"from ._runtime import Production as Production\n"
     b"\n"
+    b"\n"
+    b"@_dataclass(frozen=True, slots=True, kw_only=True)\n"
+    b"class AgentProfile:\n"
+    b'    agent: _Literal["codex", "claude", "kimi"]\n'
+    b"    workspace: str | _PathLike[str]\n"
+    b"    model: str\n"
+    b"    effort: str | None\n"
+    b"\n"
+    b"    def __post_init__(self) -> None:\n"
+    b"        if not isinstance(self.agent, str):\n"
+    b'            raise TypeError("agent must be a str")\n'
+    b'        if self.agent not in {"codex", "claude", "kimi"}:\n'
+    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi'\")\n"
+    b"        if not isinstance(self.model, str):\n"
+    b'            raise TypeError("model must be a str")\n'
+    b"        if not self.model:\n"
+    b'            raise ValueError("model must not be empty")\n'
+    b"        if self.effort is not None and not isinstance(self.effort, str):\n"
+    b'            raise TypeError("effort must be a str or None")\n'
+    b'        if self.effort == "":\n'
+    b'            raise ValueError("effort must not be empty")\n'
+    b"\n"
+    b"\n"
     b"__all__ = [\n"
     b'    "Actor",\n'
     b'    "ActorHandle",\n'
+    b'    "AgentAuthenticationRequiredError",\n'
+    b'    "AgentError",\n'
+    b'    "AgentProfile",\n'
+    b'    "AgentSessionError",\n'
+    b'    "AgentSessionStartError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
@@ -80,11 +123,31 @@ EXPECTED_STUB = (
     b"from __future__ import annotations\n"
     b"\n"
     b"from collections.abc import Mapping\n"
+    b"from dataclasses import dataclass\n"
+    b"from os import PathLike\n"
     b"from re import Pattern\n"
-    b"from typing import Any, TypeVar, final, overload\n"
+    b"from typing import Any, Literal, TypeVar, final, overload\n"
     b"from typing_extensions import disjoint_base\n"
     b"\n"
     b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b"\n"
+    b"class AgentError(RuntimeError):\n"
+    b"    code: str\n"
+    b"\n"
+    b"class AgentSessionError(AgentError): ...\n"
+    b"\n"
+    b"class AgentSessionStartError(AgentSessionError):\n"
+    b"    phase: str\n"
+    b"\n"
+    b"class AgentAuthenticationRequiredError(AgentSessionStartError): ...\n"
+    b"\n"
+    b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
+    b"class AgentProfile:\n"
+    b'    agent: Literal["codex", "claude", "kimi"]\n'
+    b"    workspace: str | PathLike[str]\n"
+    b"    model: str\n"
+    b"    effort: str | None\n"
+    b"    def __post_init__(self) -> None: ...\n"
     b"\n"
     b"@disjoint_base\n"
     b"class Actor:\n"
@@ -136,6 +199,7 @@ EXPECTED_STUB = (
     b"        actor_type: type[Actor],\n"
     b"        *,\n"
     b"        name: str,\n"
+    b"        agent_profile: AgentProfile,\n"
     b"        actor_args: tuple[Any, ...],\n"
     b"        actor_kwargs: dict[str, Any],\n"
     b"    ) -> ActorHandle: ...\n"
@@ -151,6 +215,11 @@ EXPECTED_STUB = (
     b"__all__ = [\n"
     b'    "Actor",\n'
     b'    "ActorHandle",\n'
+    b'    "AgentAuthenticationRequiredError",\n'
+    b'    "AgentError",\n'
+    b'    "AgentProfile",\n'
+    b'    "AgentSessionError",\n'
+    b'    "AgentSessionStartError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
@@ -163,6 +232,11 @@ EXPECTED_ENTRY_POINTS = b"[console_scripts]\ntroupe = troupe._runtime:main\n"
 PUBLIC_EXPORTS = [
     "Actor",
     "ActorHandle",
+    "AgentAuthenticationRequiredError",
+    "AgentError",
+    "AgentProfile",
+    "AgentSessionError",
+    "AgentSessionStartError",
     "Cue",
     "CueContextError",
     "Effect",
@@ -399,6 +473,28 @@ def _verifier() -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_default_wheel_smoke_rejects_every_agent_test_support_surface() -> None:
+    smoke = _verifier().SMOKE
+    for name in (
+        "_agent_launch_specs_for_test",
+        "_agent_test_set_launch",
+        "_agent_test_reset_launch",
+        "_agent_test_hold_opening",
+        "_agent_test_release_opening",
+        "_agent_test_hold_configuration_ready",
+        "_agent_test_release_configuration_ready",
+        "_agent_test_hold_mcp_ready",
+        "_agent_test_release_mcp_ready",
+        "_agent_test_readiness_gate_states",
+        "_agent_test_result_generation_isolation",
+        "_agent_state_for_test",
+        "_agent_ready_for_test",
+        "_agent_shutdown_for_test",
+        "_agent_is_shutting_down_for_test",
+    ):
+        assert smoke.count(f'"{name}"') == 1
 
 
 def _add_tar_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
@@ -761,21 +857,45 @@ def test_python_project_metadata_and_build_configuration() -> None:
     } <= cache_files
 
 
-def test_rust_manifest_and_step_two_source_boundary() -> None:
+def test_rust_manifest_and_source_boundary() -> None:
     config = _toml(ROOT / "rust" / "Cargo.toml")
 
     assert config["lib"]["name"] == "_runtime"
     assert config["lib"]["crate-type"] == ["cdylib"]
+    assert config["features"] == {"default": [], "agent-test-support": []}
 
     dependencies = config["dependencies"]
     assert set(dependencies) == {
+        "agent-client-protocol",
+        "base64",
+        "bytes",
         "clap",
+        "getrandom",
+        "http-body-util",
+        "hyper",
+        "hyper-util",
+        "libc",
         "pyo3",
         "pyo3-async-runtimes",
+        "serde_json",
         "tokio",
         "tokio-util",
         "uuid",
     }
+    assert dependencies["agent-client-protocol"] == {"version": "=2.0.0"}
+    assert dependencies["base64"] == "0.22"
+    assert dependencies["bytes"] == "1"
+    assert dependencies["getrandom"] == "0.4"
+    assert dependencies["http-body-util"] == "0.1"
+    assert dependencies["hyper"] == {
+        "version": "1",
+        "features": ["http1", "server"],
+    }
+    assert dependencies["hyper-util"] == {
+        "version": "0.1",
+        "features": ["tokio"],
+    }
+    assert dependencies["libc"] == "0.2"
     assert dependencies["pyo3"] == {
         "version": "0.29.0",
         "features": ["abi3-py310", "experimental-async"],
@@ -786,12 +906,20 @@ def test_rust_manifest_and_step_two_source_boundary() -> None:
     }
     assert dependencies["tokio"] == {
         "version": "1",
-        "features": ["macros", "rt-multi-thread", "sync"],
+        "features": [
+            "io-util",
+            "macros",
+            "net",
+            "process",
+            "rt-multi-thread",
+            "sync",
+        ],
     }
     assert dependencies["tokio-util"] == {
         "version": "0.7",
-        "features": ["rt"],
+        "features": ["compat", "rt"],
     }
+    assert dependencies["serde_json"] == "1"
     assert dependencies["clap"] == {
         "version": "4",
         "features": ["derive"],
@@ -2176,6 +2304,7 @@ def _installed_smoke_payload(child: Path) -> dict[str, object]:
         "exports": PUBLIC_EXPORTS,
         "public_identities": True,
         "public_modules": True,
+        "agent_test_support_absent": True,
         "native_construction_gates": True,
         "gil_disabled": False,
         "surrogate_constructor": True,
@@ -2225,6 +2354,21 @@ def _installed_smoke_events(raw_args: list[str]) -> list[list[object]]:
         ],
         ["stop"],
     ]
+
+
+def _mock_agent_events(pids: tuple[int, int] = (101, 102)) -> str:
+    rows: list[dict[str, object]] = []
+    for pid in pids:
+        rows.extend(
+            [
+                {"event": "process_started", "pid": pid},
+                {"event": "session_new_received", "pid": pid},
+                {"event": "mcp_tools_list", "pid": pid},
+                {"event": "config_applied", "pid": pid, "config_id": "mode"},
+                {"event": "config_applied", "pid": pid, "config_id": "model"},
+            ]
+        )
+    return "".join(f"{json.dumps(row)}\n" for row in rows)
 
 
 def _load_wheel_smoke_production(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
@@ -2280,6 +2424,7 @@ def _producer_observations() -> tuple[dict[str, object], dict[str, object]]:
         ("exports", ["Other"]),
         ("public_identities", False),
         ("public_modules", False),
+        ("agent_test_support_absent", False),
         ("native_construction_gates", False),
         ("gil_disabled", True),
         ("surrogate_constructor", False),
@@ -2406,6 +2551,25 @@ def _execute_child_probe(
     class ProbeActorHandle(FactoryOnly):
         gate = "actor-handle"
 
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class ProbeAgentProfile:
+        agent: str
+        workspace: str
+        model: str
+        effort: str | None
+
+    class ProbeAgentError(RuntimeError):
+        pass
+
+    class ProbeAgentSessionError(ProbeAgentError):
+        pass
+
+    class ProbeAgentSessionStartError(ProbeAgentSessionError):
+        pass
+
+    class ProbeAgentAuthenticationRequiredError(ProbeAgentSessionStartError):
+        pass
+
     class ProbeCue(FactoryOnly):
         gate = "cue"
 
@@ -2421,6 +2585,11 @@ def _execute_child_probe(
     public_types = {
         "Actor": ProbeActor,
         "ActorHandle": ProbeActorHandle,
+        "AgentAuthenticationRequiredError": ProbeAgentAuthenticationRequiredError,
+        "AgentError": ProbeAgentError,
+        "AgentProfile": ProbeAgentProfile,
+        "AgentSessionError": ProbeAgentSessionError,
+        "AgentSessionStartError": ProbeAgentSessionStartError,
         "Cue": ProbeCue,
         "CueContextError": ProbeCueContextError,
         "Effect": ProbeEffect,
@@ -2441,7 +2610,10 @@ def _execute_child_probe(
     runtime = ModuleType("troupe._runtime")
     runtime.__file__ = "/child/lib/python/site-packages/troupe/_runtime.abi3.so"
     for name, public_type in public_types.items():
-        setattr(runtime, name, public_type)
+        if name != "AgentProfile":
+            setattr(runtime, name, public_type)
+    if mutation == "agent-test-support":
+        runtime._agent_test_set_launch = object()
     if mutation is not None and mutation.startswith("identity-"):
         setattr(runtime, mutation.removeprefix("identity-"), object())
     package._runtime = runtime
@@ -2488,6 +2660,7 @@ def test_child_probe_executes_and_reports_every_required_check(
     [
         *((f"identity-{name}", AssertionError) for name in PUBLIC_EXPORTS),
         *((f"module-{name}", AssertionError) for name in PUBLIC_EXPORTS),
+        ("agent-test-support", AssertionError),
         ("native-actor-construction-gate", AssertionError),
         ("native-actor-handle-construction-gate", AssertionError),
         ("native-cue-construction-gate", AssertionError),
@@ -2797,6 +2970,7 @@ def test_installed_smoke_fixture_uses_only_public_actor_api_and_bounded_waits() 
         assert call.args
         assert {keyword.arg for keyword in call.keywords} == {
             "name",
+            "agent_profile",
             "actor_args",
             "actor_kwargs",
         }
@@ -2877,6 +3051,33 @@ def test_run_rejects_a_forbidden_stderr_marker_even_on_zero_exit(
             env={},
             forbidden_stderr="troupe:",
         )
+
+
+def test_mock_agent_cleanup_requires_complete_sessions_and_reaped_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _verifier()
+    missing = tmp_path / "missing.jsonl"
+    with pytest.raises(verifier.VerificationError, match="did not start"):
+        verifier._validate_mock_agent_cleanup(missing)
+
+    events = tmp_path / "events.jsonl"
+    events.write_text(_mock_agent_events(), encoding="utf-8")
+    inspected: list[int] = []
+
+    def reaped(pid: int, signal: int) -> None:
+        assert signal == 0
+        inspected.append(pid)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(verifier.os, "kill", reaped)
+    verifier._validate_mock_agent_cleanup(events)
+    assert set(inspected) == {101, 102}
+
+    monkeypatch.setattr(verifier.os, "kill", lambda _pid, _signal: None)
+    with pytest.raises(verifier.VerificationError, match="left a mock agent"):
+        verifier._validate_mock_agent_cleanup(events)
 
 
 def test_run_wraps_a_bounded_smoke_timeout_after_subprocess_reaping(
@@ -3007,9 +3208,18 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
             return json.dumps(_installed_smoke_payload(child))
         if index == 4:
             events_path.write_text(json.dumps(expected_events), encoding="utf-8")
+            (workspace / "agent-events.jsonl").write_text(
+                _mock_agent_events(),
+                encoding="utf-8",
+            )
         return ""
 
     monkeypatch.setattr(verifier, "_run", run)
+    monkeypatch.setattr(
+        verifier.os,
+        "kill",
+        lambda _pid, _signal: (_ for _ in ()).throw(ProcessLookupError()),
+    )
     real_which = shutil.which
 
     def which(name: str, *, path: str) -> str | None:
@@ -3018,12 +3228,19 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         return real_which(name, path=path)
 
     monkeypatch.setattr(verifier.shutil, "which", which)
-    validations = {"tools": 0, "payload": 0, "paths": 0, "events": 0}
+    validations = {
+        "tools": 0,
+        "payload": 0,
+        "paths": 0,
+        "events": 0,
+        "agent_cleanup": 0,
+    }
     for name, key in (
         ("_validate_smoke_tools", "tools"),
         ("_validate_smoke_payload", "payload"),
         ("_validate_installed_paths", "paths"),
         ("_validate_smoke_events", "events"),
+        ("_validate_mock_agent_cleanup", "agent_cleanup"),
     ):
         real = getattr(verifier, name)
 
@@ -3045,10 +3262,21 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     assert builder_base_executables == [resolved_base_executable]
     assert post_create_base_executables == [original_base_executable]
     assert verifier.sys._base_executable == original_base_executable
+    launcher = child / "bin" / "npx"
+    assert launcher.stat().st_mode & 0o111
+    launcher_source = launcher.read_text(encoding="utf-8")
+    assert str(child / "bin" / "python") in launcher_source
+    assert str(ROOT / "tests" / "support" / "mock_acp_agent.py") in launcher_source
     assert len(calls) == 5
     expected_path = f"{child}/bin:/usr/bin:/bin"
     assert which_calls == [("uv", expected_path), ("troupe", expected_path)]
-    assert validations == {"tools": 1, "payload": 1, "paths": 1, "events": 1}
+    assert validations == {
+        "tools": 1,
+        "payload": 1,
+        "paths": 1,
+        "events": 1,
+        "agent_cleanup": 1,
+    }
     assert timeline == [
         "run-0",
         "run-1",
@@ -3061,6 +3289,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         "run-3",
         "run-4",
         "validate-events",
+        "validate-agent_cleanup",
     ]
     for index, (_, cwd, env, kwargs) in enumerate(calls):
         assert cwd == outside

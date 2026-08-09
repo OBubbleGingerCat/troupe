@@ -21,11 +21,13 @@ The direct command does not require `uv run`.
 `uv run troupe` only selects the project environment when its executable
 directory is not already on `PATH`.
 
-Troupe ships one thin `troupe/__init__.py` wrapper. Loading, lifecycle control,
-cancellation, signals, diagnostics, and the console command are
-implemented in the Rust extension. The `troupe/__init__.pyi` stub describes
-the public `Production`, `Actor`, `ActorHandle`, `Cue`, `CueContextError`,
-`Effect`, and `EffectContextError` API.
+Troupe ships one thin `troupe/__init__.py` wrapper containing the immutable
+`AgentProfile` dataclass. Loading, lifecycle control, cancellation, signals,
+diagnostics, and the console command are implemented in the Rust extension.
+The `troupe/__init__.pyi` stub describes
+the public `AgentProfile` and agent exceptions together with the `Production`,
+`Actor`, `ActorHandle`, `Cue`, `CueContextError`, `Effect`, and
+`EffectContextError` API.
 
 ## Examples
 
@@ -50,6 +52,7 @@ literal-console acceptance tests.
 ```python
 import json
 import os
+from pathlib import Path
 import troupe
 
 
@@ -72,15 +75,23 @@ class Production(troupe.Production):
     def __init__(self, args):
         self.fd = int(args[0])
         self.message = args[1]
+        profile = troupe.AgentProfile(
+            agent="codex",
+            workspace=Path.cwd(),
+            model="gpt-5.6-sol",
+            effort="medium",
+        )
         self.greeter = self.cast_actor(
             Greeter,
             name="greeter",
+            agent_profile=profile,
             actor_args=(),
             actor_kwargs={},
         )
         self.writer = self.cast_actor(
             Greeter,
             name="writer",
+            agent_profile=profile,
             actor_args=(),
             actor_kwargs={},
         )

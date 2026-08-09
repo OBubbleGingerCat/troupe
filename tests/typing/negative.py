@@ -1,6 +1,14 @@
 import re
 
-from troupe import Actor, ActorHandle, Cue, Effect, Production
+from troupe import AgentProfile, Actor, ActorHandle, Cue, Effect, Production
+
+
+PROFILE = AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 class ExampleActor(Actor):
@@ -49,6 +57,7 @@ def positional_name(production: Production) -> ActorHandle:
     return production.cast_actor(  # E: call-arg
         ExampleActor,
         "actor",
+        agent_profile=PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -57,6 +66,7 @@ def positional_name(production: Production) -> ActorHandle:
 def missing_actor_type(production: Production) -> ActorHandle:
     return production.cast_actor(  # E: call-arg
         name="actor",
+        agent_profile=PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -66,6 +76,7 @@ def wrong_actor_type(production: Production) -> ActorHandle:
     return production.cast_actor(
         Production,  # E: arg-type
         name="actor",
+        agent_profile=PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -75,6 +86,7 @@ def wrong_actor_args(production: Production) -> ActorHandle:
     return production.cast_actor(
         ExampleActor,
         name="actor",
+        agent_profile=PROFILE,
         actor_args=[],  # E: arg-type
         actor_kwargs={},
     )
@@ -84,8 +96,28 @@ def wrong_actor_kwargs(production: Production) -> ActorHandle:
     return production.cast_actor(
         ExampleActor,
         name="actor",
+        agent_profile=PROFILE,
         actor_args=(),
         actor_kwargs=[],  # E: arg-type
+    )
+
+
+def missing_agent_profile(production: Production) -> ActorHandle:
+    return production.cast_actor(  # E: call-arg
+        ExampleActor,
+        name="actor",
+        actor_args=(),
+        actor_kwargs={},
+    )
+
+
+def wrong_agent_profile(production: Production) -> ActorHandle:
+    return production.cast_actor(
+        ExampleActor,
+        name="actor",
+        agent_profile="codex",  # E: arg-type
+        actor_args=(),
+        actor_kwargs={},
     )
 
 

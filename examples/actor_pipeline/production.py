@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import re
 from typing import cast
 
@@ -35,15 +36,23 @@ class Router(troupe.Actor):
 class Production(troupe.Production):
     def __init__(self, args: list[str]) -> None:
         self.text = " ".join(args) or "hello troupe"
+        profile = troupe.AgentProfile(
+            agent="codex",
+            workspace=Path.cwd(),
+            model="gpt-5.6-sol",
+            effort="medium",
+        )
         self.formatter = self.cast_actor(
             Formatter,
             name="formatter",
+            agent_profile=profile,
             actor_args=(),
             actor_kwargs={},
         )
         self.router = self.cast_actor(
             Router,
             name="router",
+            agent_profile=profile,
             actor_args=(self.formatter,),
             actor_kwargs={},
         )

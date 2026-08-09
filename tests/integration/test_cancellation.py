@@ -13,6 +13,12 @@ from typing import Any, Callable, Coroutine
 import pytest
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -423,12 +429,14 @@ def test_cancelling_run_future_keeps_internal_cleanup_restore_and_unbind_alive()
                 handle = self.cast_actor(
                     BlockingActor,
                     name="outer-cancel",
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )
                 cleanup_handle = self.cast_actor(
                     RootCleanupActor,
                     name="outer-cancel-root-cleanup",
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )

@@ -9,6 +9,12 @@ from contextlib import contextmanager
 import pytest
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 ACTOR_DIRECT_ERROR = "Actor instances can only be created by Production.cast_actor()"
@@ -52,12 +58,14 @@ def test_cast_actor_signature_constructor_metadata_and_argument_identity() -> No
     first = production.cast_actor(
         RecordingActor,
         name="first",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(positional,),
         actor_kwargs={"option": keyword},
     )
     second = production.cast_actor(
         actor_type=RecordingActor,
         name="second",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(positional,),
         actor_kwargs={"option": keyword},
     )
@@ -86,12 +94,14 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         production.cast_actor(  # type: ignore[call-overload]
             troupe.Actor,
             "positional-name",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
     with pytest.raises(TypeError):
         production.cast_actor(  # type: ignore[call-overload]
             name="missing-type",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -99,12 +109,14 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         production.cast_actor(  # type: ignore[call-overload]
             troupe.Actor,
             name="missing-kwargs",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
         )
     with pytest.raises(TypeError):
         production.cast_actor(  # type: ignore[call-overload]
             troupe.Actor,
             name="extra",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
             extra=True,
@@ -115,6 +127,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
             production.cast_actor(
                 invalid,
                 name="invalid-type",
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -123,6 +136,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         production.cast_actor(
             object(),
             name=object(),  # type: ignore[arg-type]
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=[],  # type: ignore[arg-type]
             actor_kwargs=[],  # type: ignore[arg-type]
         )
@@ -132,6 +146,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
             production.cast_actor(
                 CountingActor,
                 name=invalid_name,  # type: ignore[arg-type]
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=[],  # type: ignore[arg-type]
                 actor_kwargs=[],  # type: ignore[arg-type]
             )
@@ -140,6 +155,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         production.cast_actor(
             CountingActor,
             name="bad-args",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=[],  # type: ignore[arg-type]
             actor_kwargs={},
         )
@@ -147,6 +163,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         production.cast_actor(
             CountingActor,
             name="bad-kwargs",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs=[],  # type: ignore[arg-type]
         )
@@ -154,6 +171,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         production.cast_actor(
             CountingActor,
             name="bad-key",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={1: "value"},  # type: ignore[dict-item]
         )
@@ -164,6 +182,7 @@ def test_cast_actor_binding_and_container_errors_have_no_reservation_side_effect
         replacement = production.cast_actor(
             CountingActor,
             name=name,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -221,6 +240,7 @@ def test_native_allocation_gates_and_step_one_context_errors_are_synchronous() -
     handle = troupe.Production([]).cast_actor(
         CapturingActor,
         name="captured",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -247,6 +267,7 @@ def test_nested_cast_uses_independent_construction_permits() -> None:
             self.child = self.production.cast_actor(
                 Child,
                 name="child",
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -255,6 +276,7 @@ def test_nested_cast_uses_independent_construction_permits() -> None:
     outer = production.cast_actor(
         Outer,
         name="outer",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -271,6 +293,7 @@ def test_exact_actor_layout_and_readonly_metadata_are_visible_through_gc_edge() 
     handle = production.cast_actor(
         troupe.Actor,
         name="exact-base",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -316,6 +339,7 @@ def test_duplicate_and_reentrant_same_name_do_not_call_second_constructor() -> N
                     self.production.cast_actor(
                         NamedActor,
                         name=self.name,
+                        agent_profile=TEST_AGENT_PROFILE,
                         actor_args=(),
                         actor_kwargs={},
                     )
@@ -325,6 +349,7 @@ def test_duplicate_and_reentrant_same_name_do_not_call_second_constructor() -> N
     handle = production.cast_actor(
         NamedActor,
         name="duplicate",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(True,),
         actor_kwargs={},
     )
@@ -337,6 +362,7 @@ def test_duplicate_and_reentrant_same_name_do_not_call_second_constructor() -> N
         production.cast_actor(
             NamedActor,
             name="duplicate",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -363,6 +389,7 @@ def test_constructor_failure_preserves_error_and_leaves_leaked_self_detached() -
         production.cast_actor(
             FailingActor,
             name="retry",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -377,6 +404,7 @@ def test_constructor_failure_preserves_error_and_leaves_leaked_self_detached() -
     replacement = production.cast_actor(
         troupe.Actor,
         name="retry",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -400,6 +428,7 @@ def test_custom_new_must_return_the_current_permitted_instance() -> None:
     existing_handle = production.cast_actor(
         Existing,
         name="existing",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -427,6 +456,7 @@ def test_custom_new_must_return_the_current_permitted_instance() -> None:
             production.cast_actor(
                 actor_type,
                 name=name,
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=actor_args,
                 actor_kwargs={},
             )
@@ -435,6 +465,7 @@ def test_custom_new_must_return_the_current_permitted_instance() -> None:
             production.cast_actor(
                 troupe.Actor,
                 name=name,
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -464,6 +495,7 @@ def test_custom_new_can_call_base_and_reenter_a_nested_cast() -> None:
                 owner.cast_actor(
                     Child,
                     name="new-child",
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )
@@ -476,6 +508,7 @@ def test_custom_new_can_call_base_and_reenter_a_nested_cast() -> None:
     handle = production.cast_actor(
         CustomNew,
         name="custom-new",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(production,),
         actor_kwargs={},
     )
@@ -511,6 +544,7 @@ def test_class_call_failures_before_base_preserve_original_error_and_roll_back()
             production.cast_actor(
                 actor_type,
                 name=name,
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -521,6 +555,7 @@ def test_class_call_failures_before_base_preserve_original_error_and_roll_back()
         replacement = production.cast_actor(
             troupe.Actor,
             name=name,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -545,6 +580,7 @@ def test_custom_new_failure_after_base_leaves_provisional_wrapper_detached() -> 
         production.cast_actor(
             FailingNew,
             name="new-retry",
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -558,6 +594,7 @@ def test_custom_new_failure_after_base_leaves_provisional_wrapper_detached() -> 
     successor = production.cast_actor(
         troupe.Actor,
         name="new-retry",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -578,6 +615,7 @@ def test_equal_but_distinct_python_strings_share_one_registry_key() -> None:
     handle = production.cast_actor(
         troupe.Actor,
         name=first_name,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -588,6 +626,7 @@ def test_equal_but_distinct_python_strings_share_one_registry_key() -> None:
         production.cast_actor(
             troupe.Actor,
             name=second_name,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -608,6 +647,7 @@ def test_str_subclass_name_never_dispatches_user_repr() -> None:
     handle = production.cast_actor(
         troupe.Actor,
         name=ordinary,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -618,6 +658,7 @@ def test_str_subclass_name_never_dispatches_user_repr() -> None:
         production.cast_actor(
             troupe.Actor,
             name=ordinary,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -631,6 +672,7 @@ def test_str_subclass_name_never_dispatches_user_repr() -> None:
         production.cast_actor(
             troupe.Actor,
             name=reserved,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -662,6 +704,7 @@ def test_canonical_scene_names_are_reserved_before_constructor(name: str) -> Non
         production.cast_actor(
             CountingActor,
             name=name,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -685,6 +728,7 @@ def test_near_miss_and_surrogate_names_are_ordinary_python_strings(name: str) ->
     handle = production.cast_actor(
         troupe.Actor,
         name=name,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -716,6 +760,7 @@ def test_same_name_concurrent_cast_reserves_before_user_constructor() -> None:
                 production.cast_actor(
                     BlockingActor,
                     name="contended",
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )
@@ -758,6 +803,7 @@ def test_different_names_can_construct_concurrently() -> None:
                 production.cast_actor(
                     ConcurrentActor,
                     name=name,
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )

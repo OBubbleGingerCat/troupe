@@ -7,6 +7,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 use crate::actor::{ActorCapability, ActorIdentity};
+use crate::agent_error::AgentStartupFailure;
+use crate::agent_launch::ResolvedLaunch;
+use crate::agent_profile::ResolvedAgentProfile;
+use crate::agent_session::AgentSessionSlot;
+use crate::agent_supervisor::{AgentCastPermit, AgentSupervisor};
 use crate::cue::CueContextError;
 use crate::scene_context::RunBinding;
 
@@ -212,6 +217,7 @@ impl<T> Drop for RegistryReservation<T> {
 
 pub(crate) struct ProductionState {
     registry: Arc<Mutex<ActorRegistry<ActorCapability>>>,
+    agent_supervisor: AgentSupervisor,
     pub(crate) active: Mutex<Weak<RunBinding>>,
     pub(crate) owner_pid: AtomicU32,
 }
@@ -220,6 +226,7 @@ impl ProductionState {
     pub(crate) fn new() -> Self {
         Self {
             registry: Arc::new(Mutex::new(ActorRegistry::default())),
+            agent_supervisor: AgentSupervisor::new(),
             active: Mutex::new(Weak::new()),
             owner_pid: AtomicU32::new(std::process::id()),
         }
@@ -259,6 +266,35 @@ impl ProductionState {
 
     pub(crate) fn detach(&self, key: &NameKey, identity: &Arc<ActorIdentity>) {
         lock(&self.registry).detach(key, identity);
+    }
+
+    pub(crate) fn resolve_agent_launch(
+        &self,
+        profile: &ResolvedAgentProfile,
+    ) -> Result<ResolvedLaunch, AgentStartupFailure> {
+        self.agent_supervisor.resolve(profile)
+    }
+
+    pub(crate) fn begin_agent_cast(&self) -> Result<AgentCastPermit, AgentStartupFailure> {
+        self.agent_supervisor.begin_cast()
+    }
+
+    pub(crate) fn start_agent_session(
+        &self,
+        permit: &AgentCastPermit,
+        profile: Arc<ResolvedAgentProfile>,
+        launch: ResolvedLaunch,
+    ) -> Arc<AgentSessionSlot> {
+        self.agent_supervisor.start(permit, profile, launch)
+    }
+
+    pub(crate) async fn shutdown_agent_sessions(&self) {
+        self.agent_supervisor.shutdown_and_wait().await;
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn agent_sessions_are_shutting_down(&self) -> bool {
+        self.agent_supervisor.is_shutting_down()
     }
 
     fn pid_matches(&self) -> bool {

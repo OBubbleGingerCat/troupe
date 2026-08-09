@@ -1,11 +1,31 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from os import PathLike
 from re import Pattern
-from typing import Any, TypeVar, final, overload
+from typing import Any, Literal, TypeVar, final, overload
 from typing_extensions import disjoint_base
 
 _EffectT = TypeVar("_EffectT", bound="Effect")
+
+class AgentError(RuntimeError):
+    code: str
+
+class AgentSessionError(AgentError): ...
+
+class AgentSessionStartError(AgentSessionError):
+    phase: str
+
+class AgentAuthenticationRequiredError(AgentSessionStartError): ...
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentProfile:
+    agent: Literal["codex", "claude", "kimi"]
+    workspace: str | PathLike[str]
+    model: str
+    effort: str | None
+    def __post_init__(self) -> None: ...
 
 @disjoint_base
 class Actor:
@@ -57,6 +77,7 @@ class Production:
         actor_type: type[Actor],
         *,
         name: str,
+        agent_profile: AgentProfile,
         actor_args: tuple[Any, ...],
         actor_kwargs: dict[str, Any],
     ) -> ActorHandle: ...
@@ -72,6 +93,11 @@ class Production:
 __all__ = [
     "Actor",
     "ActorHandle",
+    "AgentAuthenticationRequiredError",
+    "AgentError",
+    "AgentProfile",
+    "AgentSessionError",
+    "AgentSessionStartError",
     "Cue",
     "CueContextError",
     "Effect",

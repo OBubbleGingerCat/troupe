@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import cast
 
 import troupe
@@ -24,9 +25,16 @@ class Greeter(troupe.Actor):
 class Production(troupe.Production):
     def __init__(self, args: list[str]) -> None:
         self.person = " ".join(args) or "world"
+        profile = troupe.AgentProfile(
+            agent="codex",
+            workspace=Path.cwd(),
+            model="gpt-5.6-sol",
+            effort="medium",
+        )
         self.greeter = self.cast_actor(
             Greeter,
             name="greeter",
+            agent_profile=profile,
             actor_args=(),
             actor_kwargs={},
         )

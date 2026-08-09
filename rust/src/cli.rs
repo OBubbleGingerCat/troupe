@@ -9,6 +9,7 @@ use crate::diagnostics::{format_lifecycle_failure, format_load_failure, write_st
 use crate::failure::ProductionFailed;
 use crate::invocation::{InvocationError, parse_arguments};
 use crate::loader::{ProductionLoadError, load_production};
+use crate::production::Production;
 use crate::python_task::create_run_binding;
 use crate::runtime::{RuntimeCore, run_lifecycle};
 use crate::signals::SignalGuard;
@@ -69,10 +70,16 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
     let permit = core
         .begin()
         .expect("a new CLI runtime must accept its first run");
+    let production_state = production.bind(py).cast::<Production>()?.borrow().state();
     let run_result = pyo3_async_runtimes::tokio::run(py, async move {
         let locals = Python::attach(pyo3_async_runtimes::tokio::get_current_locals)?;
-        let binding = create_run_binding(&locals, &production).await?;
-        run_lifecycle(permit, locals, production, binding).await
+        let result = async {
+            let binding = create_run_binding(&locals, &production).await?;
+            run_lifecycle(permit, locals, production, binding).await
+        }
+        .await;
+        production_state.shutdown_agent_sessions().await;
+        result
     });
     let restore_result = guard.restore(py);
 

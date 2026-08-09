@@ -12,6 +12,12 @@ from typing import Any
 import pytest
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 TIMEOUT = 5.0
@@ -29,6 +35,7 @@ def _cast(
     return production.cast_actor(
         actor_type,
         name=name,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )

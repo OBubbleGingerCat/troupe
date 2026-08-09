@@ -67,6 +67,11 @@ def test_runtime_is_a_private_native_surface() -> None:
     assert troupe.__all__ == [
         "Actor",
         "ActorHandle",
+        "AgentAuthenticationRequiredError",
+        "AgentError",
+        "AgentProfile",
+        "AgentSessionError",
+        "AgentSessionStartError",
         "Cue",
         "CueContextError",
         "Effect",

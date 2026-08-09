@@ -15,6 +15,11 @@ pub(crate) fn initialize_python_for_test() -> std::sync::MutexGuard<'static, ()>
 mod actor;
 mod actor_handle;
 mod actor_registry;
+mod agent_error;
+mod agent_launch;
+mod agent_profile;
+mod agent_session;
+mod agent_supervisor;
 mod cli;
 mod cue;
 mod cue_future;
@@ -26,6 +31,7 @@ mod loader;
 mod mailbox;
 mod production;
 mod python_task;
+mod result_mcp;
 mod runtime;
 mod scene_context;
 mod signals;
@@ -38,6 +44,17 @@ mod _runtime {
     use crate::actor::Actor;
     #[pymodule_export]
     use crate::actor_handle::ActorHandle;
+    #[pymodule_export]
+    use crate::agent_error::{
+        AgentAuthenticationRequiredError, AgentError, AgentSessionError, AgentSessionStartError,
+    };
+    #[cfg(feature = "agent-test-support")]
+    #[pymodule_export]
+    use crate::agent_launch::{
+        hold_test_configuration_ready, hold_test_mcp_ready, hold_test_opening,
+        launch_specs_for_test, readiness_gate_states, release_test_configuration_ready,
+        release_test_mcp_ready, release_test_opening, reset_test_launch, set_test_launch,
+    };
     #[pymodule_export]
     use crate::cli::main;
     #[pymodule_export]
@@ -54,6 +71,9 @@ mod _runtime {
     use crate::loader::{ProductionLoadError, load_production};
     #[pymodule_export]
     use crate::production::Production;
+    #[cfg(feature = "agent-test-support")]
+    #[pymodule_export]
+    use crate::result_mcp::result_generation_isolation_for_test;
     #[pymodule_export]
     use crate::runtime::Runtime;
 
