@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from urllib.parse import urlsplit
 
 MCP_REVISION = "2025-11-25"
 RESULT_TOOL = "troupe_submit_result"
+MCP_BODY_MAX_BYTES = 8 * 1024 * 1024
+ACP_FRAME_MAX_BYTES = 16 * 1024 * 1024
 
 
 def _record(path: Path, event: str, **details: object) -> None:
@@ -29,7 +32,18 @@ def _record(path: Path, event: str, **details: object) -> None:
         os.close(descriptor)
 
 
-def _response(request_id: object, result: object) -> None:
+def _response(
+    request_id: object,
+    result: object,
+    *,
+    frame_depth: int | None = None,
+) -> None:
+    if frame_depth is not None:
+        assert isinstance(result, dict)
+        nested: object = None
+        for _ in range(frame_depth - 3):
+            nested = {"nested": nested}
+        result = {**result, "_meta": nested}
     print(
         json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "result": result},
@@ -39,18 +53,38 @@ def _response(request_id: object, result: object) -> None:
     )
 
 
-def _error(request_id: object, code: int, message: str) -> None:
+def _scenario_depth(scenario: str, prefix: str) -> int | None:
+    if not scenario.startswith(prefix):
+        return None
+    return int(scenario.removeprefix(prefix))
+
+
+def _error(
+    request_id: object,
+    code: int,
+    message: str,
+    *,
+    data: object | None = None,
+) -> None:
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
     print(
         json.dumps(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": code, "message": message},
+                "error": error,
             },
             separators=(",", ":"),
         ),
         flush=True,
     )
+
+
+def _write_oversized_acp_frame() -> None:
+    sys.stdout.buffer.write(b" " * (ACP_FRAME_MAX_BYTES + 1))
+    sys.stdout.buffer.flush()
 
 
 def _select_option(
@@ -273,6 +307,118 @@ def _discover_mcp(
         connection.close()
 
 
+def _submit_result(
+    server: dict[str, Any],
+    request_id: int,
+    value: object,
+) -> dict[str, Any]:
+    headers = {item["name"]: item["value"] for item in server["headers"]}
+    parsed = urlsplit(server["url"])
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port)
+    try:
+        status, body, _ = _mcp_post(
+            connection,
+            parsed.path or "/",
+            headers["Authorization"],
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {
+                    "name": RESULT_TOOL,
+                    "arguments": {"value": value},
+                },
+            },
+            initialized=True,
+        )
+    finally:
+        connection.close()
+    assert status == 200, (status, body)
+    return json.loads(body)
+
+
+def _submit_raw_tool_call(
+    server: dict[str, Any],
+    request_id: int,
+    *,
+    name: str = RESULT_TOOL,
+    arguments: object,
+    authorization: str | None = None,
+) -> tuple[int, dict[str, Any] | None]:
+    headers = {item["name"]: item["value"] for item in server["headers"]}
+    parsed = urlsplit(server["url"])
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port)
+    try:
+        status, body, _ = _mcp_post(
+            connection,
+            parsed.path or "/",
+            authorization or headers["Authorization"],
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+            initialized=True,
+        )
+    finally:
+        connection.close()
+    return status, json.loads(body) if body else None
+
+
+def _post_tool_body(
+    server: dict[str, Any],
+    body: bytes | list[bytes],
+    *,
+    chunked: bool = False,
+) -> tuple[int, bytes, str | None]:
+    headers = {item["name"]: item["value"] for item in server["headers"]}
+    parsed = urlsplit(server["url"])
+    request_headers = {
+        "Accept": "application/json, text/event-stream",
+        "Authorization": headers["Authorization"],
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": MCP_REVISION,
+    }
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port)
+    try:
+        connection.request(
+            "POST",
+            parsed.path or "/",
+            body=body,
+            headers=request_headers,
+            encode_chunked=chunked,
+        )
+        response = connection.getresponse()
+        return response.status, response.read(), response.getheader("Connection")
+    finally:
+        connection.close()
+
+
+def _post_declared_oversized_body(server: dict[str, Any], size: int) -> bytes:
+    headers = {item["name"]: item["value"] for item in server["headers"]}
+    parsed = urlsplit(server["url"])
+    request = (
+        f"POST {parsed.path or '/'} HTTP/1.1\r\n"
+        f"Host: {parsed.hostname}:{parsed.port}\r\n"
+        "Accept: application/json, text/event-stream\r\n"
+        f"Authorization: {headers['Authorization']}\r\n"
+        "Content-Type: application/json\r\n"
+        f"MCP-Protocol-Version: {MCP_REVISION}\r\n"
+        f"Content-Length: {size}\r\n"
+        "\r\n"
+    ).encode("ascii")
+    with socket.create_connection((parsed.hostname, parsed.port)) as connection:
+        connection.sendall(request)
+        response = b""
+        while True:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+    return response
+
+
 def _open_partial_route_request(server: dict[str, Any]) -> socket.socket:
     headers = {item["name"]: item["value"] for item in server["headers"]}
     parsed = urlsplit(server["url"])
@@ -311,6 +457,7 @@ def main() -> int:
     parser.add_argument("--events", type=Path, required=True)
     parser.add_argument("--scenario", default="ready")
     parser.add_argument("--release", type=Path)
+    parser.add_argument("--results-json")
     args = parser.parse_args()
 
     cwd_metadata = os.stat(".")
@@ -330,6 +477,10 @@ def main() -> int:
     partial_route_connection: socket.socket | None = None
     pending_mcp_server: dict[str, Any] | None = None
     pending_mcp_invocation = 0
+    current_mcp_server: dict[str, Any] | None = None
+    current_session_id: str | None = None
+    prompt_turn = 0
+    remembered_token: str | None = None
 
     for raw_line in sys.stdin:
         request = json.loads(raw_line)
@@ -339,6 +490,9 @@ def main() -> int:
         _record(args.events, "acp_request", method=method)
 
         if method == "initialize":
+            if args.scenario == "oversized_acp_frame":
+                _write_oversized_acp_frame()
+                continue
             if args.scenario == "hold_initialize":
                 assert args.release is not None
                 _record(args.events, "initialize_blocked")
@@ -363,12 +517,14 @@ def main() -> int:
                         "version": "1",
                     },
                 },
+                frame_depth=_scenario_depth(args.scenario, "opening_acp_depth_"),
             )
         elif method == "session/new":
             session_invocations += 1
             servers = params["mcpServers"]
             assert len(servers) == 1 and servers[0]["type"] == "http"
             server = servers[0]
+            current_mcp_server = server
             acp_cwd_metadata = os.stat(params["cwd"])
             _record(
                 args.events,
@@ -380,6 +536,10 @@ def main() -> int:
                 cwd_dev=acp_cwd_metadata.st_dev,
                 cwd_ino=acp_cwd_metadata.st_ino,
             )
+            if args.scenario == "oversized_acp_frame_session_new":
+                _record(args.events, "oversized_acp_frame_sent", phase="session_new")
+                _write_oversized_acp_frame()
+                continue
             if args.scenario == "http_10_before_discovery":
                 status = _mcp_http_10_initialize(server)
                 _record(args.events, "mcp_http_10_rejected", status=status)
@@ -430,6 +590,7 @@ def main() -> int:
                 while not args.release.exists():
                     time.sleep(0.01)
             session_id = f"mock-session-{os.getpid()}-{session_invocations}"
+            current_session_id = session_id
             _record(
                 args.events,
                 "session_new_responding",
@@ -472,6 +633,407 @@ def main() -> int:
                     pending_mcp_invocation,
                 )
                 pending_mcp_server = None
+        elif method == "session/prompt" and (
+            args.scenario in {
+                "act_accepted_non_end_turn",
+                "act_body_limits",
+                "act_custom_correction",
+                "act_callback_fault_then_request_error",
+                "act_digit_limit_integer",
+                "act_invalid_then_request_error",
+                "act_malformed_prompt_response",
+                "act_ninth_invalid_then_request_error",
+                "act_no_result",
+                "act_oversized_acp_frame",
+                "act_request_error_then_success",
+                "act_request_error_internal_collision_then_success",
+                "act_request_error_parse_collision_then_success",
+                "act_request_error_transport_collision_then_success",
+                "act_result_matrix",
+                "act_settle_during_callback",
+                "act_submit_results",
+                "act_submit_concurrent",
+                "act_two_turns",
+            }
+            or args.scenario.startswith("act_acp_depth_")
+        ):
+            assert current_mcp_server is not None
+            assert params["sessionId"] == current_session_id
+            prompt_turn += 1
+            prompt = params["prompt"]
+            assert len(prompt) == 1 and prompt[0]["type"] == "text"
+            prompt_text = prompt[0]["text"]
+            _record(
+                args.events,
+                "prompt_received",
+                turn=prompt_turn,
+                session_id=params["sessionId"],
+                prompt=prompt_text,
+            )
+            if args.scenario == "act_oversized_acp_frame":
+                _record(args.events, "oversized_acp_frame_sent")
+                _write_oversized_acp_frame()
+                continue
+            acp_depth = _scenario_depth(args.scenario, "act_acp_depth_")
+            if acp_depth is not None:
+                _record(args.events, "acp_depth_frame_sent", depth=acp_depth)
+                _response(
+                    request_id,
+                    {"stopReason": "end_turn"},
+                    frame_depth=acp_depth,
+                )
+                continue
+            if args.scenario == "act_malformed_prompt_response":
+                _record(args.events, "malformed_prompt_response_sent")
+                _response(request_id, {"stopReason": "unknown_stop_reason"})
+                continue
+            if args.scenario == "act_no_result":
+                _record(args.events, "turn_ended_without_result", turn=prompt_turn)
+                _response(request_id, {"stopReason": "end_turn"})
+                continue
+            request_error_scenarios = {
+                "act_callback_fault_then_request_error",
+                "act_invalid_then_request_error",
+                "act_ninth_invalid_then_request_error",
+                "act_request_error_then_success",
+                "act_request_error_internal_collision_then_success",
+                "act_request_error_parse_collision_then_success",
+                "act_request_error_transport_collision_then_success",
+            }
+            if args.scenario in request_error_scenarios and prompt_turn == 1:
+                if args.scenario in {
+                    "act_invalid_then_request_error",
+                    "act_ninth_invalid_then_request_error",
+                }:
+                    attempts = (
+                        9 if args.scenario == "act_ninth_invalid_then_request_error" else 1
+                    )
+                    for index in range(attempts):
+                        rejected = _submit_result(
+                            current_mcp_server,
+                            700 + index,
+                            {"value": "not-an-integer"},
+                        )
+                        assert rejected["result"]["isError"] is True, rejected
+                        _record(
+                            args.events,
+                            "tool_result_received",
+                            index=index,
+                            is_error=True,
+                            text=rejected["result"]["content"][0]["text"],
+                        )
+                elif args.scenario == "act_callback_fault_then_request_error":
+                    callback_failed = _submit_result(
+                        current_mcp_server,
+                        800,
+                        {"value": 2},
+                    )
+                    assert callback_failed["result"]["isError"] is True, callback_failed
+                    _record(
+                        args.events,
+                        "tool_result_received",
+                        is_error=True,
+                        text=callback_failed["result"]["content"][0]["text"],
+                    )
+                _record(args.events, "prompt_request_error_sent")
+                if args.scenario in {
+                    "act_invalid_then_request_error",
+                    "act_request_error_transport_collision_then_success",
+                }:
+                    _error(
+                        request_id,
+                        -32603,
+                        "Incoming transport closed",
+                        data={
+                            "reason": "incoming_transport_closed",
+                            "method": "session/prompt",
+                        },
+                    )
+                elif args.scenario in {
+                    "act_callback_fault_then_request_error",
+                    "act_request_error_parse_collision_then_success",
+                }:
+                    _error(
+                        request_id,
+                        -32700,
+                        "failed to deserialize response",
+                        data={"phase": "deserialization", "json": {}},
+                    )
+                elif args.scenario in {
+                    "act_ninth_invalid_then_request_error",
+                    "act_request_error_internal_collision_then_success",
+                }:
+                    _error(
+                        request_id,
+                        -32603,
+                        "mock prompt request failed",
+                        data="response to `session/prompt` never received: canceled",
+                    )
+                else:
+                    _error(request_id, -32603, "mock prompt request failed")
+                continue
+            if args.scenario == "act_settle_during_callback":
+                response: list[dict[str, Any] | None] = [None]
+
+                def submit_pending() -> None:
+                    response[0] = _submit_result(
+                        current_mcp_server,
+                        350,
+                        {"value": 2},
+                    )
+
+                submission = threading.Thread(target=submit_pending)
+                submission.start()
+                with Path("callback-started.fifo").open("rb", buffering=0) as signal:
+                    assert signal.read(1) == b"1"
+                _response(request_id, {"stopReason": "end_turn"})
+                submission.join()
+                assert response[0] is not None
+                _record(
+                    args.events,
+                    "tool_result_received",
+                    is_error=response[0]["result"]["isError"],
+                    text=response[0]["result"]["content"][0]["text"],
+                )
+                with Path("tool-result-finished.fifo").open("wb", buffering=0) as signal:
+                    signal.write(b"1")
+                continue
+            if args.scenario == "act_body_limits":
+                invalid_message = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 500,
+                        "method": "tools/call",
+                        "params": {
+                            "name": RESULT_TOOL,
+                            "arguments": {"value": {"decision": "maybe"}},
+                        },
+                    },
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                for index, size in enumerate(
+                    (MCP_BODY_MAX_BYTES - 1, MCP_BODY_MAX_BYTES),
+                    start=1,
+                ):
+                    body = invalid_message + b" " * (size - len(invalid_message))
+                    status, response_body, _ = _post_tool_body(
+                        current_mcp_server,
+                        body,
+                    )
+                    assert status == 200
+                    response = json.loads(response_body)
+                    assert f"invalid call {index}/8" in response["result"]["content"][
+                        0
+                    ]["text"]
+                oversized_response = _post_declared_oversized_body(
+                    current_mcp_server,
+                    MCP_BODY_MAX_BYTES + 1,
+                )
+                assert oversized_response.startswith(
+                    b"HTTP/1.1 413 Payload Too Large\r\n"
+                )
+                assert b"connection: close\r\n" in oversized_response.lower()
+                for index, size in enumerate(
+                    (
+                        MCP_BODY_MAX_BYTES - 1,
+                        MCP_BODY_MAX_BYTES,
+                        MCP_BODY_MAX_BYTES + 1,
+                    ),
+                    start=3,
+                ):
+                    chunked_message = invalid_message.replace(
+                        b'"id":500',
+                        f'"id":{500 + index}'.encode("ascii"),
+                    )
+                    body = chunked_message + b" " * (size - len(chunked_message))
+                    midpoint = len(body) // 2
+                    status, response_body, connection = _post_tool_body(
+                        current_mcp_server,
+                        [body[:midpoint], body[midpoint:]],
+                        chunked=True,
+                    )
+                    if size <= MCP_BODY_MAX_BYTES:
+                        assert status == 200
+                        chunked_response = json.loads(response_body)
+                        assert f"invalid call {index}/8" in chunked_response["result"][
+                            "content"
+                        ][0]["text"]
+                    else:
+                        assert status == 413
+                        assert connection is not None
+                        assert connection.lower() == "close"
+                value = {"decision": "approve"}
+                accepted = _submit_result(current_mcp_server, 502, value)
+                assert accepted["result"]["isError"] is False
+                _record(args.events, "body_limit_matrix_complete")
+            elif args.scenario == "act_result_matrix":
+                unauthorized_status, unauthorized = _submit_raw_tool_call(
+                    current_mcp_server,
+                    400,
+                    arguments={"value": {"decision": "approve"}},
+                    authorization="Bearer invalid-token",
+                )
+                assert unauthorized_status == 401 and unauthorized is None
+                status, wrong_tool = _submit_raw_tool_call(
+                    current_mcp_server,
+                    401,
+                    name="wrong_tool",
+                    arguments={"value": {"decision": "approve"}},
+                )
+                assert status == 200 and wrong_tool is not None
+                assert wrong_tool["error"]["code"] == -32602
+                status, wrong_arguments = _submit_raw_tool_call(
+                    current_mcp_server,
+                    402,
+                    arguments={
+                        "value": {"decision": "approve"},
+                        "extra": True,
+                    },
+                )
+                assert status == 200 and wrong_arguments is not None
+                assert wrong_arguments["error"]["code"] == -32602
+                for invalid_call in range(1, 9):
+                    invalid = _submit_result(
+                        current_mcp_server,
+                        410 + invalid_call,
+                        {"decision": "maybe"},
+                    )
+                    assert invalid["result"]["isError"] is True
+                    assert f"invalid call {invalid_call}/8" in invalid["result"][
+                        "content"
+                    ][0]["text"]
+                value = {"decision": "approve"}
+                accepted = _submit_result(current_mcp_server, 430, value)
+                assert accepted["result"]["isError"] is False
+                duplicate = _submit_result(
+                    current_mcp_server,
+                    431,
+                    {"decision": "reject"},
+                )
+                assert duplicate["result"]["isError"] is True
+                assert "already submitted" in duplicate["result"]["content"][0][
+                    "text"
+                ]
+                _record(
+                    args.events,
+                    "result_matrix_complete",
+                    unauthorized_status=unauthorized_status,
+                )
+            elif args.scenario == "act_digit_limit_integer":
+                positive_digits = "9" * 5_000
+                negative_digits = "-" + "9" * 5_001
+                body = (
+                    '{"jsonrpc":"2.0","id":440,"method":"tools/call",'
+                    f'"params":{{"name":"{RESULT_TOOL}","arguments":'
+                    '{"value":{"value":{"huge":'
+                    + positive_digits
+                    + ',"negative_huge":'
+                    + negative_digits
+                    + "}}}}}"
+                ).encode("ascii")
+                status, response_body, _ = _post_tool_body(
+                    current_mcp_server,
+                    body,
+                )
+                assert status == 200
+                response = json.loads(response_body)
+                assert response["result"]["isError"] is False, response
+                value = {"raw_integer_digits": [5_000, 5_001]}
+            elif args.scenario in {"act_submit_results", "act_submit_concurrent"}:
+                assert args.results_json is not None
+                values = json.loads(args.results_json)
+                assert isinstance(values, list) and values
+                responses: list[dict[str, Any] | None] = [None] * len(values)
+
+                def submit(index: int, value: object) -> None:
+                    responses[index] = _submit_result(
+                        current_mcp_server,
+                        300 + index,
+                        value,
+                    )
+
+                if args.scenario == "act_submit_concurrent":
+                    barrier = threading.Barrier(len(values))
+
+                    def submit_together(index: int, value: object) -> None:
+                        barrier.wait()
+                        submit(index, value)
+
+                    threads = [
+                        threading.Thread(target=submit_together, args=(index, value))
+                        for index, value in enumerate(values)
+                    ]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join()
+                else:
+                    for index, value in enumerate(values):
+                        submit(index, value)
+                for index, response in enumerate(responses):
+                    assert response is not None
+                    _record(
+                        args.events,
+                        "tool_result_received",
+                        index=index,
+                        is_error=response["result"]["isError"],
+                        text=response["result"]["content"][0]["text"],
+                    )
+                value = values[-1]
+            elif args.scenario == "act_custom_correction":
+                invalid = _submit_result(
+                    current_mcp_server,
+                    100 + prompt_turn,
+                    {"value": 3},
+                )
+                assert invalid["result"]["isError"] is True, invalid
+                value = {"value": 4}
+                accepted = _submit_result(
+                    current_mcp_server,
+                    200 + prompt_turn,
+                    value,
+                )
+                assert accepted["result"]["isError"] is False, accepted
+            elif args.scenario in {
+                "act_accepted_non_end_turn",
+                "act_request_error_then_success",
+                "act_request_error_internal_collision_then_success",
+                "act_request_error_parse_collision_then_success",
+                "act_request_error_transport_collision_then_success",
+            }:
+                value = {"value": 7}
+                accepted = _submit_result(
+                    current_mcp_server,
+                    600 + prompt_turn,
+                    value,
+                )
+                assert accepted["result"]["isError"] is False, accepted
+            elif prompt_turn == 1:
+                assert "alpha" in prompt_text
+                remembered_token = "alpha"
+                value = {"stored": remembered_token}
+            else:
+                assert prompt_turn == 2
+                assert remembered_token is not None
+                value = {"remembered": remembered_token}
+            if args.scenario == "act_two_turns":
+                tool_response = _submit_result(
+                    current_mcp_server,
+                    100 + prompt_turn,
+                    value,
+                )
+                assert tool_response["result"]["isError"] is False, tool_response
+            _record(args.events, "result_submitted", turn=prompt_turn, value=value)
+            _response(
+                request_id,
+                {
+                    "stopReason": (
+                        "max_tokens"
+                        if args.scenario == "act_accepted_non_end_turn"
+                        else "end_turn"
+                    )
+                },
+            )
         elif method == "session/set_mode":
             config["mode"] = params["modeId"]
             _record(
@@ -481,6 +1043,10 @@ def main() -> int:
             )
             _response(request_id, {})
         elif method == "session/set_config_option":
+            if args.scenario == "oversized_acp_frame_configure":
+                _record(args.events, "oversized_acp_frame_sent", phase="configure")
+                _write_oversized_acp_frame()
+                continue
             config_id = params["configId"]
             config[config_id] = params["value"]
             if args.scenario == "mode_drift_after_model" and config_id == "model":
@@ -505,6 +1071,17 @@ def main() -> int:
                     )
                 },
             )
+            if (
+                args.scenario == "oversized_acp_frame_mcp_ready"
+                and config_id == "reasoning_effort"
+            ):
+                assert args.release is not None
+                _record(args.events, "mcp_ready_frame_blocked")
+                while not args.release.exists():
+                    time.sleep(0.01)
+                _record(args.events, "oversized_acp_frame_sent", phase="mcp_ready")
+                _write_oversized_acp_frame()
+                continue
             discover_after = (
                 args.scenario == "mcp_between_configuration" and config_id == "mode"
             ) or (

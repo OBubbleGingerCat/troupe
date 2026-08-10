@@ -20,6 +20,7 @@ import sysconfig
 import tarfile
 import warnings
 import zipfile
+from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,8 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "troupe"
 EXPECTED_RUST_SOURCES = [
+    "act_call.rs",
+    "act_schema.rs",
     "actor.rs",
     "actor_handle.rs",
     "actor_registry.rs",
@@ -46,6 +49,7 @@ EXPECTED_RUST_SOURCES = [
     "agent_profile.rs",
     "agent_session.rs",
     "agent_supervisor.rs",
+    "agent_turn.rs",
     "cli.rs",
     "cue.rs",
     "cue_future.rs",
@@ -61,6 +65,7 @@ EXPECTED_RUST_SOURCES = [
     "result_mcp.rs",
     "runtime.rs",
     "scene_context.rs",
+    "schema_validation_bridge.rs",
     "signals.rs",
 ]
 
@@ -73,8 +78,15 @@ EXPECTED_WRAPPER = (
     b"from ._runtime import ActorHandle as ActorHandle\n"
     b"from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError\n"
     b"from ._runtime import AgentError as AgentError\n"
+    b"from ._runtime import AgentResultError as AgentResultError\n"
+    b"from ._runtime import AgentResultIssue as AgentResultIssue\n"
+    b"from ._runtime import AgentResultMissingError as AgentResultMissingError\n"
+    b"from ._runtime import AgentSessionBrokenError as AgentSessionBrokenError\n"
+    b"from ._runtime import AgentSessionBusyError as AgentSessionBusyError\n"
     b"from ._runtime import AgentSessionError as AgentSessionError\n"
     b"from ._runtime import AgentSessionStartError as AgentSessionStartError\n"
+    b"from ._runtime import AgentTurnError as AgentTurnError\n"
+    b"from ._runtime import act_schema as act_schema\n"
     b"from ._runtime import Cue as Cue\n"
     b"from ._runtime import CueContextError as CueContextError\n"
     b"from ._runtime import Effect as Effect\n"
@@ -110,13 +122,20 @@ EXPECTED_WRAPPER = (
     b'    "AgentAuthenticationRequiredError",\n'
     b'    "AgentError",\n'
     b'    "AgentProfile",\n'
+    b'    "AgentResultError",\n'
+    b'    "AgentResultIssue",\n'
+    b'    "AgentResultMissingError",\n'
+    b'    "AgentSessionBrokenError",\n'
+    b'    "AgentSessionBusyError",\n'
     b'    "AgentSessionError",\n'
     b'    "AgentSessionStartError",\n'
+    b'    "AgentTurnError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
     b'    "EffectContextError",\n'
     b'    "Production",\n'
+    b'    "act_schema",\n'
     b"]\n"
 )
 EXPECTED_STUB = (
@@ -126,13 +145,18 @@ EXPECTED_STUB = (
     b"from dataclasses import dataclass\n"
     b"from os import PathLike\n"
     b"from re import Pattern\n"
-    b"from typing import Any, Literal, TypeVar, final, overload\n"
+    b"from typing import Any, Literal, NoReturn, TypeVar, final, overload\n"
     b"from typing_extensions import disjoint_base\n"
     b"\n"
+    b"from . import act_schema as act_schema\n"
+    b"\n"
     b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b'_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]\n'
     b"\n"
     b"class AgentError(RuntimeError):\n"
     b"    code: str\n"
+    b"\n"
+    b"class AgentSessionBusyError(AgentError): ...\n"
     b"\n"
     b"class AgentSessionError(AgentError): ...\n"
     b"\n"
@@ -140,6 +164,27 @@ EXPECTED_STUB = (
     b"    phase: str\n"
     b"\n"
     b"class AgentAuthenticationRequiredError(AgentSessionStartError): ...\n"
+    b"\n"
+    b"class AgentSessionBrokenError(AgentSessionError): ...\n"
+    b"\n"
+    b"class AgentTurnError(AgentError): ...\n"
+    b"\n"
+    b"@final\n"
+    b"class AgentResultIssue:\n"
+    b"    def __new__(cls, _token: NoReturn, /) -> AgentResultIssue: ...\n"
+    b"    @property\n"
+    b"    def path(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def code(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def message(self) -> str: ...\n"
+    b"\n"
+    b"class AgentResultError(AgentTurnError):\n"
+    b"    issues: tuple[AgentResultIssue, ...]\n"
+    b"    invalid_calls: int\n"
+    b"    details_truncated: bool\n"
+    b"\n"
+    b"class AgentResultMissingError(AgentResultError): ...\n"
     b"\n"
     b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
     b"class AgentProfile:\n"
@@ -163,6 +208,12 @@ EXPECTED_STUB = (
     b"        effect_args: tuple[Any, ...],\n"
     b"        effect_kwargs: dict[str, Any],\n"
     b"    ) -> _EffectT: ...\n"
+    b"    async def act(\n"
+    b"        self,\n"
+    b"        *,\n"
+    b"        script: str,\n"
+    b"        output_schema: dict[str, act_schema.FieldSpec],\n"
+    b"    ) -> dict[str, _JsonValue]: ...\n"
     b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
     b"\n"
     b"@final\n"
@@ -218,15 +269,23 @@ EXPECTED_STUB = (
     b'    "AgentAuthenticationRequiredError",\n'
     b'    "AgentError",\n'
     b'    "AgentProfile",\n'
+    b'    "AgentResultError",\n'
+    b'    "AgentResultIssue",\n'
+    b'    "AgentResultMissingError",\n'
+    b'    "AgentSessionBrokenError",\n'
+    b'    "AgentSessionBusyError",\n'
     b'    "AgentSessionError",\n'
     b'    "AgentSessionStartError",\n'
+    b'    "AgentTurnError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
     b'    "EffectContextError",\n'
     b'    "Production",\n'
+    b'    "act_schema",\n'
     b"]\n"
 )
+EXPECTED_ACT_SCHEMA_STUB = (PACKAGE / "act_schema.pyi").read_bytes()
 EXPECTED_PY_TYPED = b""
 EXPECTED_ENTRY_POINTS = b"[console_scripts]\ntroupe = troupe._runtime:main\n"
 PUBLIC_EXPORTS = [
@@ -235,13 +294,34 @@ PUBLIC_EXPORTS = [
     "AgentAuthenticationRequiredError",
     "AgentError",
     "AgentProfile",
+    "AgentResultError",
+    "AgentResultIssue",
+    "AgentResultMissingError",
+    "AgentSessionBrokenError",
+    "AgentSessionBusyError",
     "AgentSessionError",
     "AgentSessionStartError",
+    "AgentTurnError",
     "Cue",
     "CueContextError",
     "Effect",
     "EffectContextError",
     "Production",
+    "act_schema",
+]
+PUBLIC_TYPE_EXPORTS = [name for name in PUBLIC_EXPORTS if name != "act_schema"]
+SCHEMA_EXPORTS = [
+    "BoolValue",
+    "Field",
+    "Float64Value",
+    "Int64Value",
+    "ListValue",
+    "NullableValue",
+    "ObjectValue",
+    "SchemaCallbackError",
+    "SchemaValue",
+    "StrValue",
+    "ValueRejected",
 ]
 EXAMPLE_FILES = {
     "README.md": b"# Troupe examples\n",
@@ -570,9 +650,11 @@ def _synthetic_artifacts(
     extra_package_python: bool = False,
     source_wrapper: bytes = EXPECTED_WRAPPER,
     source_stub: bytes | None = EXPECTED_STUB,
+    source_act_schema_stub: bytes | None = EXPECTED_ACT_SCHEMA_STUB,
     source_py_typed: bytes | None = EXPECTED_PY_TYPED,
     sdist_wrapper: bytes = EXPECTED_WRAPPER,
     sdist_stub: bytes | None = EXPECTED_STUB,
+    sdist_act_schema_stub: bytes | None = EXPECTED_ACT_SCHEMA_STUB,
     sdist_py_typed: bytes | None = EXPECTED_PY_TYPED,
     missing_source_example: str | None = None,
     extra_source_example: bool = False,
@@ -582,6 +664,7 @@ def _synthetic_artifacts(
     sdist_unsafe: str | None = None,
     wheel_wrapper: bytes = EXPECTED_WRAPPER,
     wheel_stub: bytes | None = EXPECTED_STUB,
+    wheel_act_schema_stub: bytes | None = EXPECTED_ACT_SCHEMA_STUB,
     wheel_py_typed: bytes | None = EXPECTED_PY_TYPED,
     native_count: int = 1,
     runtime_stem: str = "_runtime",
@@ -604,6 +687,8 @@ def _synthetic_artifacts(
     (source / "__init__.py").write_bytes(source_wrapper)
     if source_stub is not None:
         (source / "__init__.pyi").write_bytes(source_stub)
+    if source_act_schema_stub is not None:
+        (source / "act_schema.pyi").write_bytes(source_act_schema_stub)
     if source_py_typed is not None:
         (source / "py.typed").write_bytes(source_py_typed)
     if extra_source_python:
@@ -632,6 +717,12 @@ def _synthetic_artifacts(
         _add_tar_bytes(archive, f"{sdist_package}/__init__.py", sdist_wrapper)
         if sdist_stub is not None:
             _add_tar_bytes(archive, f"{sdist_package}/__init__.pyi", sdist_stub)
+        if sdist_act_schema_stub is not None:
+            _add_tar_bytes(
+                archive,
+                f"{sdist_package}/act_schema.pyi",
+                sdist_act_schema_stub,
+            )
         if sdist_py_typed is not None:
             _add_tar_bytes(archive, f"{sdist_package}/py.typed", sdist_py_typed)
         if extra_sdist_python:
@@ -690,6 +781,8 @@ def _synthetic_artifacts(
     }
     if wheel_stub is not None:
         wheel_files["troupe/__init__.pyi"] = wheel_stub
+    if wheel_act_schema_stub is not None:
+        wheel_files["troupe/act_schema.pyi"] = wheel_act_schema_stub
     if wheel_py_typed is not None:
         wheel_files["troupe/py.typed"] = wheel_py_typed
     if entry_points == "valid":
@@ -773,7 +866,7 @@ def test_runtime_package_has_exact_thin_sources() -> None:
     stub_files = sorted(path.relative_to(PACKAGE).as_posix() for path in PACKAGE.rglob("*.pyi"))
 
     assert python_files == ["__init__.py"]
-    assert stub_files == ["__init__.pyi"]
+    assert stub_files == ["__init__.pyi", "act_schema.pyi"]
     assert (PACKAGE / "__init__.py").read_bytes() == EXPECTED_WRAPPER
     assert (PACKAGE / "__init__.pyi").read_bytes() == EXPECTED_STUB
     assert (PACKAGE / "py.typed").read_bytes() == EXPECTED_PY_TYPED
@@ -808,6 +901,7 @@ def test_python_project_metadata_and_build_configuration() -> None:
         "exclude": ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
         "sbom": {"rust": False},
     }
+    assert "mypy" not in config["tool"]
 
     development = config["dependency-groups"]["dev"]
     assert set(development) == {
@@ -919,7 +1013,10 @@ def test_rust_manifest_and_source_boundary() -> None:
         "version": "0.7",
         "features": ["compat", "rt"],
     }
-    assert dependencies["serde_json"] == "1"
+    assert dependencies["serde_json"] == {
+        "version": "1",
+        "features": ["arbitrary_precision"],
+    }
     assert dependencies["clap"] == {
         "version": "4",
         "features": ["derive"],
@@ -1030,13 +1127,19 @@ def test_verifier_accepts_pinned_maturin_entry_point_format(tmp_path: Path) -> N
         {"forbidden_file": "other_package/helper.pyi"},
         {"forbidden_file": "other_package/native.so"},
         {"source_stub": None},
+        {"source_act_schema_stub": None},
+        {"source_act_schema_stub": b"wrong schema stub\n"},
         {"source_py_typed": None},
         {"source_py_typed": b"partial\n"},
         {"sdist_stub": None},
         {"sdist_stub": b"wrong stub\n"},
+        {"sdist_act_schema_stub": None},
+        {"sdist_act_schema_stub": b"wrong schema stub\n"},
         {"sdist_py_typed": None},
         {"sdist_py_typed": b"partial\n"},
         {"wheel_stub": None},
+        {"wheel_act_schema_stub": None},
+        {"wheel_act_schema_stub": b"wrong schema stub\n"},
         {"wheel_py_typed": None},
         {"wheel_py_typed": b"partial\n"},
         {"source_wrapper": b"wrong wrapper\n"},
@@ -2304,6 +2407,7 @@ def _installed_smoke_payload(child: Path) -> dict[str, object]:
         "exports": PUBLIC_EXPORTS,
         "public_identities": True,
         "public_modules": True,
+        "schema_contract": True,
         "agent_test_support_absent": True,
         "native_construction_gates": True,
         "gil_disabled": False,
@@ -2561,6 +2665,9 @@ def _execute_child_probe(
     class ProbeAgentError(RuntimeError):
         pass
 
+    class ProbeAgentSessionBusyError(ProbeAgentError):
+        pass
+
     class ProbeAgentSessionError(ProbeAgentError):
         pass
 
@@ -2568,6 +2675,21 @@ def _execute_child_probe(
         pass
 
     class ProbeAgentAuthenticationRequiredError(ProbeAgentSessionStartError):
+        pass
+
+    class ProbeAgentSessionBrokenError(ProbeAgentSessionError):
+        pass
+
+    class ProbeAgentTurnError(ProbeAgentError):
+        pass
+
+    class ProbeAgentResultError(ProbeAgentTurnError):
+        pass
+
+    class ProbeAgentResultMissingError(ProbeAgentResultError):
+        pass
+
+    class ProbeAgentResultIssue:
         pass
 
     class ProbeCue(FactoryOnly):
@@ -2582,14 +2704,46 @@ def _execute_child_probe(
     class ProbeEffectContextError(RuntimeError):
         pass
 
+    class ProbeSchemaValue(ABC):
+        @abstractmethod
+        def render_prompt(self) -> str:
+            raise NotImplementedError
+
+        @abstractmethod
+        def validate(self, value: object, /) -> None:
+            raise NotImplementedError
+
+    schema_types: dict[str, type[object]] = {
+        name: type(name, (), {}) for name in SCHEMA_EXPORTS
+    }
+    schema_types["SchemaValue"] = ProbeSchemaValue
+    schema_types["ValueRejected"] = type("ValueRejected", (ValueError,), {})
+    schema_types["SchemaCallbackError"] = type(
+        "SchemaCallbackError",
+        (RuntimeError,),
+        {},
+    )
+    for schema_type in schema_types.values():
+        schema_type.__module__ = "troupe.act_schema"
+    schema = ModuleType("troupe.act_schema")
+    for name, schema_type in schema_types.items():
+        setattr(schema, name, schema_type)
+    schema.__all__ = ["Other"] if mutation == "schema-exports" else SCHEMA_EXPORTS
+
     public_types = {
         "Actor": ProbeActor,
         "ActorHandle": ProbeActorHandle,
         "AgentAuthenticationRequiredError": ProbeAgentAuthenticationRequiredError,
         "AgentError": ProbeAgentError,
         "AgentProfile": ProbeAgentProfile,
+        "AgentResultError": ProbeAgentResultError,
+        "AgentResultIssue": ProbeAgentResultIssue,
+        "AgentResultMissingError": ProbeAgentResultMissingError,
+        "AgentSessionBrokenError": ProbeAgentSessionBrokenError,
+        "AgentSessionBusyError": ProbeAgentSessionBusyError,
         "AgentSessionError": ProbeAgentSessionError,
         "AgentSessionStartError": ProbeAgentSessionStartError,
+        "AgentTurnError": ProbeAgentTurnError,
         "Cue": ProbeCue,
         "CueContextError": ProbeCueContextError,
         "Effect": ProbeEffect,
@@ -2599,19 +2753,25 @@ def _execute_child_probe(
     for public_type in public_types.values():
         public_type.__module__ = "troupe"
     if mutation is not None and mutation.startswith("module-"):
-        public_types[mutation.removeprefix("module-")].__module__ = "troupe._runtime"
+        module_name = mutation.removeprefix("module-")
+        if module_name == "act_schema":
+            schema.__name__ = "troupe._runtime.act_schema"
+        else:
+            public_types[module_name].__module__ = "troupe._runtime"
 
     package = ModuleType("troupe")
     package.__path__ = []
     package.__file__ = "/child/lib/python/site-packages/troupe/__init__.py"
     for name, public_type in public_types.items():
         setattr(package, name, public_type)
+    package.act_schema = schema
     package.__all__ = ["Other"] if mutation == "exports" else PUBLIC_EXPORTS
     runtime = ModuleType("troupe._runtime")
     runtime.__file__ = "/child/lib/python/site-packages/troupe/_runtime.abi3.so"
     for name, public_type in public_types.items():
         if name != "AgentProfile":
             setattr(runtime, name, public_type)
+    runtime.act_schema = schema
     if mutation == "agent-test-support":
         runtime._agent_test_set_launch = object()
     if mutation is not None and mutation.startswith("identity-"):
@@ -2622,6 +2782,7 @@ def _execute_child_probe(
     dependency.VALUE = "dependency-ok"
     monkeypatch.setitem(sys.modules, "troupe", package)
     monkeypatch.setitem(sys.modules, "troupe._runtime", runtime)
+    monkeypatch.setitem(sys.modules, "troupe.act_schema", schema)
     monkeypatch.setitem(sys.modules, "troupe_smoke_dependency", dependency)
 
     class EntryPoint:
@@ -2660,6 +2821,7 @@ def test_child_probe_executes_and_reports_every_required_check(
     [
         *((f"identity-{name}", AssertionError) for name in PUBLIC_EXPORTS),
         *((f"module-{name}", AssertionError) for name in PUBLIC_EXPORTS),
+        ("schema-exports", AssertionError),
         ("agent-test-support", AssertionError),
         ("native-actor-construction-gate", AssertionError),
         ("native-actor-handle-construction-gate", AssertionError),

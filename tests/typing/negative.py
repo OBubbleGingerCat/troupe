@@ -1,6 +1,15 @@
 import re
 
-from troupe import AgentProfile, Actor, ActorHandle, Cue, Effect, Production
+from troupe import (
+    AgentProfile,
+    AgentResultIssue,
+    Actor,
+    ActorHandle,
+    Cue,
+    Effect,
+    Production,
+    act_schema,
+)
 
 
 PROFILE = AgentProfile(
@@ -22,6 +31,37 @@ class InvalidHandleSubclass(ActorHandle):  # E: misc
 
 class InvalidCueSubclass(Cue):  # E: misc
     pass
+
+
+class InvalidBuiltinSchemaSubclass(act_schema.StrValue):  # E: misc
+    pass
+
+
+class WrongSchemaValidateOverride(act_schema.SchemaValue[str]):
+    def render_prompt(self) -> str:
+        return "text"
+
+    def validate(self, value: int, /) -> None:  # E: override
+        _ = value
+
+
+def wrong_schema_choices() -> act_schema.StrValue:
+    return act_schema.StrValue(
+        description="choice",
+        choices=[1],  # E: list-item
+    )
+
+
+def wrong_field_required() -> act_schema.Field[str]:
+    return act_schema.Field(
+        act_schema.StrValue(description="value"),
+        required=1,  # E: arg-type
+    )
+
+
+def object_value_rejects_non_json_values() -> None:
+    value = act_schema.ObjectValue(description="object", fields={})
+    value.validate({"invalid": object()})  # E: dict-item
 
 
 def missing_argument() -> Production:
@@ -171,6 +211,44 @@ def wrong_effect_kwargs(actor: Actor) -> Effect:
 
 def positional_effect_arguments(actor: Actor) -> Effect:
     return actor.make_effect(Effect, (), {})  # E: call-arg
+
+
+async def positional_act_arguments(actor: Actor) -> object:
+    return await actor.act(  # E: call-arg
+        "script",
+        {"value": act_schema.StrValue(description="value")},
+    )
+
+
+async def wrong_act_script(actor: Actor) -> object:
+    return await actor.act(
+        script=1,  # E: arg-type
+        output_schema={"value": act_schema.StrValue(description="value")},
+    )
+
+
+async def wrong_act_schema_container(actor: Actor) -> object:
+    return await actor.act(
+        script="script",
+        output_schema=[],  # E: arg-type
+    )
+
+
+async def wrong_act_schema_value(actor: Actor) -> object:
+    return await actor.act(
+        script="script",
+        output_schema={"value": object()},  # E: dict-item
+    )
+
+
+def wrong_value_rejected_construction() -> None:
+    act_schema.ValueRejected()  # E: call-arg
+    act_schema.ValueRejected(1)  # E: arg-type
+    act_schema.ValueRejected("first", "second")  # E: call-arg
+
+
+def factory_only_result_issue() -> None:
+    AgentResultIssue()  # E: call-arg
 
 
 def wrong_pattern_keyword(production: Production) -> object:

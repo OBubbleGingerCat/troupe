@@ -4,13 +4,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from os import PathLike
 from re import Pattern
-from typing import Any, Literal, TypeVar, final, overload
+from typing import Any, Literal, NoReturn, TypeVar, final, overload
 from typing_extensions import disjoint_base
 
+from . import act_schema as act_schema
+
 _EffectT = TypeVar("_EffectT", bound="Effect")
+_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
 
 class AgentError(RuntimeError):
     code: str
+
+class AgentSessionBusyError(AgentError): ...
 
 class AgentSessionError(AgentError): ...
 
@@ -18,6 +23,27 @@ class AgentSessionStartError(AgentSessionError):
     phase: str
 
 class AgentAuthenticationRequiredError(AgentSessionStartError): ...
+
+class AgentSessionBrokenError(AgentSessionError): ...
+
+class AgentTurnError(AgentError): ...
+
+@final
+class AgentResultIssue:
+    def __new__(cls, _token: NoReturn, /) -> AgentResultIssue: ...
+    @property
+    def path(self) -> str: ...
+    @property
+    def code(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+
+class AgentResultError(AgentTurnError):
+    issues: tuple[AgentResultIssue, ...]
+    invalid_calls: int
+    details_truncated: bool
+
+class AgentResultMissingError(AgentResultError): ...
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentProfile:
@@ -41,6 +67,12 @@ class Actor:
         effect_args: tuple[Any, ...],
         effect_kwargs: dict[str, Any],
     ) -> _EffectT: ...
+    async def act(
+        self,
+        *,
+        script: str,
+        output_schema: dict[str, act_schema.FieldSpec],
+    ) -> dict[str, _JsonValue]: ...
     async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...
 
 @final
@@ -96,11 +128,18 @@ __all__ = [
     "AgentAuthenticationRequiredError",
     "AgentError",
     "AgentProfile",
+    "AgentResultError",
+    "AgentResultIssue",
+    "AgentResultMissingError",
+    "AgentSessionBrokenError",
+    "AgentSessionBusyError",
     "AgentSessionError",
     "AgentSessionStartError",
+    "AgentTurnError",
     "Cue",
     "CueContextError",
     "Effect",
     "EffectContextError",
     "Production",
+    "act_schema",
 ]

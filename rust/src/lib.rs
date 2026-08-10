@@ -12,6 +12,8 @@ pub(crate) fn initialize_python_for_test() -> std::sync::MutexGuard<'static, ()>
     guard
 }
 
+mod act_call;
+mod act_schema;
 mod actor;
 mod actor_handle;
 mod actor_registry;
@@ -20,6 +22,7 @@ mod agent_launch;
 mod agent_profile;
 mod agent_session;
 mod agent_supervisor;
+mod agent_turn;
 mod cli;
 mod cue;
 mod cue_future;
@@ -34,6 +37,7 @@ mod python_task;
 mod result_mcp;
 mod runtime;
 mod scene_context;
+mod schema_validation_bridge;
 mod signals;
 
 #[pymodule(gil_used = true)]
@@ -46,7 +50,9 @@ mod _runtime {
     use crate::actor_handle::ActorHandle;
     #[pymodule_export]
     use crate::agent_error::{
-        AgentAuthenticationRequiredError, AgentError, AgentSessionError, AgentSessionStartError,
+        AgentAuthenticationRequiredError, AgentError, AgentResultError, AgentResultIssue,
+        AgentResultMissingError, AgentSessionBrokenError, AgentSessionBusyError, AgentSessionError,
+        AgentSessionStartError, AgentTurnError,
     };
     #[cfg(feature = "agent-test-support")]
     #[pymodule_export]
@@ -79,6 +85,7 @@ mod _runtime {
 
     #[pymodule_init]
     fn init_private_coroutines(module: &Bound<'_, PyModule>) -> PyResult<()> {
+        crate::act_schema::install(module)?;
         let coroutine = module
             .py()
             .import("collections.abc")?
@@ -86,6 +93,10 @@ mod _runtime {
         coroutine.call_method1(
             "register",
             (module.py().get_type::<crate::cue_future::CueCall>(),),
+        )?;
+        coroutine.call_method1(
+            "register",
+            (module.py().get_type::<crate::act_call::ActCall>(),),
         )?;
         coroutine.call_method1(
             "register",

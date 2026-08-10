@@ -38,8 +38,15 @@ EXPECTED_WRAPPER = (
     b"from ._runtime import ActorHandle as ActorHandle\n"
     b"from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError\n"
     b"from ._runtime import AgentError as AgentError\n"
+    b"from ._runtime import AgentResultError as AgentResultError\n"
+    b"from ._runtime import AgentResultIssue as AgentResultIssue\n"
+    b"from ._runtime import AgentResultMissingError as AgentResultMissingError\n"
+    b"from ._runtime import AgentSessionBrokenError as AgentSessionBrokenError\n"
+    b"from ._runtime import AgentSessionBusyError as AgentSessionBusyError\n"
     b"from ._runtime import AgentSessionError as AgentSessionError\n"
     b"from ._runtime import AgentSessionStartError as AgentSessionStartError\n"
+    b"from ._runtime import AgentTurnError as AgentTurnError\n"
+    b"from ._runtime import act_schema as act_schema\n"
     b"from ._runtime import Cue as Cue\n"
     b"from ._runtime import CueContextError as CueContextError\n"
     b"from ._runtime import Effect as Effect\n"
@@ -75,13 +82,20 @@ EXPECTED_WRAPPER = (
     b'    "AgentAuthenticationRequiredError",\n'
     b'    "AgentError",\n'
     b'    "AgentProfile",\n'
+    b'    "AgentResultError",\n'
+    b'    "AgentResultIssue",\n'
+    b'    "AgentResultMissingError",\n'
+    b'    "AgentSessionBrokenError",\n'
+    b'    "AgentSessionBusyError",\n'
     b'    "AgentSessionError",\n'
     b'    "AgentSessionStartError",\n'
+    b'    "AgentTurnError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
     b'    "EffectContextError",\n'
     b'    "Production",\n'
+    b'    "act_schema",\n'
     b"]\n"
 )
 EXPECTED_STUB = (
@@ -91,13 +105,18 @@ EXPECTED_STUB = (
     b"from dataclasses import dataclass\n"
     b"from os import PathLike\n"
     b"from re import Pattern\n"
-    b"from typing import Any, Literal, TypeVar, final, overload\n"
+    b"from typing import Any, Literal, NoReturn, TypeVar, final, overload\n"
     b"from typing_extensions import disjoint_base\n"
     b"\n"
+    b"from . import act_schema as act_schema\n"
+    b"\n"
     b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b'_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]\n'
     b"\n"
     b"class AgentError(RuntimeError):\n"
     b"    code: str\n"
+    b"\n"
+    b"class AgentSessionBusyError(AgentError): ...\n"
     b"\n"
     b"class AgentSessionError(AgentError): ...\n"
     b"\n"
@@ -105,6 +124,27 @@ EXPECTED_STUB = (
     b"    phase: str\n"
     b"\n"
     b"class AgentAuthenticationRequiredError(AgentSessionStartError): ...\n"
+    b"\n"
+    b"class AgentSessionBrokenError(AgentSessionError): ...\n"
+    b"\n"
+    b"class AgentTurnError(AgentError): ...\n"
+    b"\n"
+    b"@final\n"
+    b"class AgentResultIssue:\n"
+    b"    def __new__(cls, _token: NoReturn, /) -> AgentResultIssue: ...\n"
+    b"    @property\n"
+    b"    def path(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def code(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def message(self) -> str: ...\n"
+    b"\n"
+    b"class AgentResultError(AgentTurnError):\n"
+    b"    issues: tuple[AgentResultIssue, ...]\n"
+    b"    invalid_calls: int\n"
+    b"    details_truncated: bool\n"
+    b"\n"
+    b"class AgentResultMissingError(AgentResultError): ...\n"
     b"\n"
     b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
     b"class AgentProfile:\n"
@@ -128,6 +168,12 @@ EXPECTED_STUB = (
     b"        effect_args: tuple[Any, ...],\n"
     b"        effect_kwargs: dict[str, Any],\n"
     b"    ) -> _EffectT: ...\n"
+    b"    async def act(\n"
+    b"        self,\n"
+    b"        *,\n"
+    b"        script: str,\n"
+    b"        output_schema: dict[str, act_schema.FieldSpec],\n"
+    b"    ) -> dict[str, _JsonValue]: ...\n"
     b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
     b"\n"
     b"@final\n"
@@ -183,14 +229,24 @@ EXPECTED_STUB = (
     b'    "AgentAuthenticationRequiredError",\n'
     b'    "AgentError",\n'
     b'    "AgentProfile",\n'
+    b'    "AgentResultError",\n'
+    b'    "AgentResultIssue",\n'
+    b'    "AgentResultMissingError",\n'
+    b'    "AgentSessionBrokenError",\n'
+    b'    "AgentSessionBusyError",\n'
     b'    "AgentSessionError",\n'
     b'    "AgentSessionStartError",\n'
+    b'    "AgentTurnError",\n'
     b'    "Cue",\n'
     b'    "CueContextError",\n'
     b'    "Effect",\n'
     b'    "EffectContextError",\n'
     b'    "Production",\n'
+    b'    "act_schema",\n'
     b"]\n"
+)
+EXPECTED_ACT_SCHEMA_STUB_SHA256 = (
+    "4f016e1b3076e02058e80baece6d1981bde4f6695b4ca3eb5110222aac9325f1"
 )
 EXPECTED_PY_TYPED = b""
 PUBLIC_EXPORTS = [
@@ -199,13 +255,20 @@ PUBLIC_EXPORTS = [
     "AgentAuthenticationRequiredError",
     "AgentError",
     "AgentProfile",
+    "AgentResultError",
+    "AgentResultIssue",
+    "AgentResultMissingError",
+    "AgentSessionBrokenError",
+    "AgentSessionBusyError",
     "AgentSessionError",
     "AgentSessionStartError",
+    "AgentTurnError",
     "Cue",
     "CueContextError",
     "Effect",
     "EffectContextError",
     "Production",
+    "act_schema",
 ]
 EXPECTED_EXAMPLE_FILES = (
     "README.md",
@@ -261,19 +324,19 @@ def _assert_thin_package(names: Sequence[str], prefix: str) -> None:
     stub_files = [name for name in relative if name.endswith(".pyi")]
     if python_files != ["__init__.py"]:
         raise VerificationError(f"unexpected Python package files: {python_files}")
-    if stub_files != ["__init__.pyi"]:
+    if stub_files != ["__init__.pyi", "act_schema.pyi"]:
         raise VerificationError(f"unexpected stub files: {stub_files}")
     if relative.count("py.typed") != 1:
         raise VerificationError("py.typed is missing or ambiguous")
 
 
-def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes]:
+def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes, bytes]:
     try:
         files = [path for path in source_package.rglob("*") if path.is_file()]
         names = [path.relative_to(source_package).as_posix() for path in files]
         _assert_thin_package(names, "")
 
-        allowed = {"__init__.py", "__init__.pyi", "py.typed"}
+        allowed = {"__init__.py", "__init__.pyi", "act_schema.pyi", "py.typed"}
         for name in names:
             if name in allowed:
                 continue
@@ -285,14 +348,17 @@ def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes]:
 
         wrapper = (source_package / "__init__.py").read_bytes()
         stub = (source_package / "__init__.pyi").read_bytes()
+        act_schema_stub = (source_package / "act_schema.pyi").read_bytes()
         py_typed = (source_package / "py.typed").read_bytes()
         if wrapper != EXPECTED_WRAPPER:
             raise VerificationError("source wrapper is not the approved thin wrapper")
         if stub != EXPECTED_STUB:
             raise VerificationError("source stub is not the approved public API")
+        if hashlib.sha256(act_schema_stub).hexdigest() != EXPECTED_ACT_SCHEMA_STUB_SHA256:
+            raise VerificationError("source act_schema stub is not the approved public API")
         if py_typed != EXPECTED_PY_TYPED:
             raise VerificationError("source py.typed marker is not exact")
-        return wrapper, stub, py_typed
+        return wrapper, stub, act_schema_stub, py_typed
     except VerificationError:
         raise
     except OSError as error:
@@ -345,9 +411,9 @@ def _validate_sdist(
     source_package: Path,
     sdist: Path,
     *,
-    expected: tuple[bytes, bytes, bytes] | None = None,
+    expected: tuple[bytes, bytes, bytes, bytes] | None = None,
 ) -> None:
-    wrapper, stub, py_typed = (
+    wrapper, stub, act_schema_stub, py_typed = (
         expected if expected is not None else _validate_source(source_package)
     )
     source_examples = _source_examples(source_package)
@@ -369,6 +435,7 @@ def _validate_sdist(
             if set(package_names) != {
                 f"{prefix}__init__.py",
                 f"{prefix}__init__.pyi",
+                f"{prefix}act_schema.pyi",
                 f"{prefix}py.typed",
             }:
                 raise VerificationError("sdist runtime package inventory is not exact")
@@ -386,11 +453,17 @@ def _validate_sdist(
 
             wrapper_member = archive.extractfile(f"{prefix}__init__.py")
             stub_member = archive.extractfile(f"{prefix}__init__.pyi")
+            act_schema_stub_member = archive.extractfile(f"{prefix}act_schema.pyi")
             py_typed_member = archive.extractfile(f"{prefix}py.typed")
             if wrapper_member is None or wrapper_member.read() != wrapper:
                 raise VerificationError("sdist wrapper differs from source")
             if stub_member is None or stub_member.read() != stub:
                 raise VerificationError("sdist stub differs from source")
+            if (
+                act_schema_stub_member is None
+                or act_schema_stub_member.read() != act_schema_stub
+            ):
+                raise VerificationError("sdist act_schema stub differs from source")
             if py_typed_member is None or py_typed_member.read() != py_typed:
                 raise VerificationError("sdist py.typed marker differs from source")
             for name, data in source_examples.items():
@@ -486,9 +559,9 @@ def _validate_wheel(
     wheel: Path,
     *,
     required_manylinux: str | None,
-    expected: tuple[bytes, bytes, bytes] | None = None,
+    expected: tuple[bytes, bytes, bytes, bytes] | None = None,
 ) -> None:
-    wrapper, stub, py_typed = (
+    wrapper, stub, act_schema_stub, py_typed = (
         expected if expected is not None else _validate_source(source_package)
     )
     filename_tags, filename_platforms = _parse_wheel_filename(wheel)
@@ -522,6 +595,7 @@ def _validate_wheel(
             expected_names = {
                 "troupe/__init__.py",
                 "troupe/__init__.pyi",
+                "troupe/act_schema.pyi",
                 "troupe/py.typed",
                 native_libraries[0],
                 f"{dist_info}/METADATA",
@@ -542,6 +616,8 @@ def _validate_wheel(
                 raise VerificationError("wheel wrapper differs from source")
             if archive.read("troupe/__init__.pyi") != stub:
                 raise VerificationError("wheel stub differs from source")
+            if archive.read("troupe/act_schema.pyi") != act_schema_stub:
+                raise VerificationError("wheel act_schema stub differs from source")
             if archive.read("troupe/py.typed") != py_typed:
                 raise VerificationError("wheel py.typed marker differs from source")
 
@@ -687,6 +763,7 @@ import dataclasses
 import importlib.metadata
 import inspect
 import json
+import sys
 import sysconfig
 
 import troupe
@@ -699,24 +776,59 @@ public_exports = [
     "AgentAuthenticationRequiredError",
     "AgentError",
     "AgentProfile",
+    "AgentResultError",
+    "AgentResultIssue",
+    "AgentResultMissingError",
+    "AgentSessionBrokenError",
+    "AgentSessionBusyError",
     "AgentSessionError",
     "AgentSessionStartError",
+    "AgentTurnError",
     "Cue",
     "CueContextError",
     "Effect",
     "EffectContextError",
     "Production",
+    "act_schema",
 ]
-native_exports = [name for name in public_exports if name != "AgentProfile"]
-public_identities = all(
+public_type_exports = [name for name in public_exports if name != "act_schema"]
+native_exports = [name for name in public_type_exports if name != "AgentProfile"]
+schema_exports = [
+    "BoolValue",
+    "Field",
+    "Float64Value",
+    "Int64Value",
+    "ListValue",
+    "NullableValue",
+    "ObjectValue",
+    "SchemaCallbackError",
+    "SchemaValue",
+    "StrValue",
+    "ValueRejected",
+]
+schema_contract = (
+    troupe.act_schema is runtime.act_schema
+    and sys.modules.get("troupe.act_schema") is troupe.act_schema
+    and troupe.act_schema.__name__ == "troupe.act_schema"
+    and troupe.act_schema.__all__ == schema_exports
+    and inspect.isabstract(troupe.act_schema.SchemaValue)
+    and all(
+        getattr(troupe.act_schema, name).__module__ == "troupe.act_schema"
+        for name in schema_exports
+    )
+)
+public_identities = troupe.act_schema is runtime.act_schema and all(
     getattr(troupe, name) is getattr(runtime, name) for name in native_exports
 )
-public_modules = all(getattr(troupe, name).__module__ == "troupe" for name in public_exports)
+public_modules = troupe.act_schema.__name__ == "troupe.act_schema" and all(
+    getattr(troupe, name).__module__ == "troupe" for name in public_type_exports
+)
 assert troupe.Production is runtime.Production
 assert troupe.Production.__module__ == "troupe"
 assert troupe.__all__ == public_exports
 assert public_identities
 assert public_modules
+assert schema_contract
 assert not hasattr(runtime, "AgentProfile")
 assert dataclasses.is_dataclass(troupe.AgentProfile)
 assert tuple(field.name for field in dataclasses.fields(troupe.AgentProfile)) == (
@@ -853,6 +965,7 @@ print(json.dumps({
     "exports": troupe.__all__,
     "public_identities": public_identities,
     "public_modules": public_modules,
+    "schema_contract": schema_contract,
     "agent_test_support_absent": agent_test_support_absent,
     "native_construction_gates": native_construction_gates,
     "gil_disabled": sysconfig.get_config_var("Py_GIL_DISABLED") == 1,
@@ -896,6 +1009,7 @@ def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> 
         "exports": PUBLIC_EXPORTS,
         "public_identities": True,
         "public_modules": True,
+        "schema_contract": True,
         "agent_test_support_absent": True,
         "native_construction_gates": True,
         "gil_disabled": False,

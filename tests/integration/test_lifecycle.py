@@ -70,13 +70,20 @@ def test_runtime_is_a_private_native_surface() -> None:
         "AgentAuthenticationRequiredError",
         "AgentError",
         "AgentProfile",
+        "AgentResultError",
+        "AgentResultIssue",
+        "AgentResultMissingError",
+        "AgentSessionBrokenError",
+        "AgentSessionBusyError",
         "AgentSessionError",
         "AgentSessionStartError",
+        "AgentTurnError",
         "Cue",
         "CueContextError",
         "Effect",
         "EffectContextError",
         "Production",
+        "act_schema",
     ]
 
 

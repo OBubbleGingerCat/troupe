@@ -4,7 +4,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt as _;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -12,24 +12,268 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, ClientCapabilities, ClientSessionCapabilities, ErrorCode, Implementation,
     InitializeRequest, McpCapabilities, NewSessionRequest, NewSessionResponse, SessionConfigKind,
     SessionConfigOption, SessionConfigOptionValue, SessionConfigSelect, SessionConfigSelectOptions,
-    SessionModeState, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SessionId, SessionModeState, SetSessionConfigOptionRequest, SetSessionModeRequest,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Dispatch, Handled};
 use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, Command};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent_error::AgentStartupFailure;
+use crate::act_schema::CompiledActSchema;
+use crate::agent_error::{AgentSessionFailure, AgentStartupFailure};
 use crate::agent_launch::{AgentLaunchSpec, ResolvedAgentCommand, ResolvedModeApplication};
 use crate::agent_profile::{ResolvedAgentProfile, WorkspaceLeaseV1};
+use crate::agent_turn::{
+    AgentTurnOutcome, AgentTurnRequest, PromptResponseProvenance, run_agent_turn_worker,
+};
 use crate::result_mcp::{ResultMcpService, ResultRoute};
+use crate::schema_validation_bridge::PythonSchemaValidationBridge;
+
+const ACP_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
+const ACP_JSON_MAX_DEPTH: usize = 64;
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum OpeningPhase {
+    Initialize,
+    SessionNew,
+    Configure,
+    McpReady,
+}
+
+impl OpeningPhase {
+    fn load(value: &AtomicU8) -> Self {
+        match value.load(Ordering::Acquire) {
+            value if value == Self::Initialize as u8 => Self::Initialize,
+            value if value == Self::SessionNew as u8 => Self::SessionNew,
+            value if value == Self::Configure as u8 => Self::Configure,
+            value if value == Self::McpReady as u8 => Self::McpReady,
+            _ => unreachable!("only OpeningPhase values are stored"),
+        }
+    }
+
+    fn store(self, value: &AtomicU8) {
+        value.store(self as u8, Ordering::Release);
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::SessionNew => "session_new",
+            Self::Configure => "configure",
+            Self::McpReady => "mcp_ready",
+        }
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct AcpFrameLimitedReader<R> {
+    inner: R,
+    frame_bytes: usize,
+    frame: Vec<u8>,
+    pending: Vec<u8>,
+    pending_offset: usize,
+    terminal_error: bool,
+    inner_eof: bool,
+    exceeded: Arc<AtomicBool>,
+    json_depth: usize,
+    in_json_string: bool,
+    escaped_json_byte: bool,
+}
+
+impl<R> AcpFrameLimitedReader<R> {
+    fn new(inner: R, exceeded: Arc<AtomicBool>) -> Self {
+        Self {
+            inner,
+            frame_bytes: 0,
+            frame: Vec::new(),
+            pending: Vec::new(),
+            pending_offset: 0,
+            terminal_error: false,
+            inner_eof: false,
+            exceeded,
+            json_depth: 0,
+            in_json_string: false,
+            escaped_json_byte: false,
+        }
+    }
+
+    fn reset_frame(&mut self) {
+        self.frame_bytes = 0;
+        self.json_depth = 0;
+        self.in_json_string = false;
+        self.escaped_json_byte = false;
+    }
+
+    fn parsed_frame_within_depth(&self) -> bool {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.frame) else {
+            return true;
+        };
+        let mut pending = vec![(&value, 1_usize)];
+        while let Some((value, depth)) = pending.pop() {
+            if depth > ACP_JSON_MAX_DEPTH {
+                return false;
+            }
+            match value {
+                serde_json::Value::Array(values) => {
+                    pending.extend(values.iter().map(|value| (value, depth + 1)));
+                }
+                serde_json::Value::Object(values) => {
+                    pending.extend(values.values().map(|value| (value, depth + 1)));
+                }
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
+            }
+        }
+        true
+    }
+
+    fn finish_frame(&mut self, newline: bool) -> bool {
+        if !self.parsed_frame_within_depth() {
+            return false;
+        }
+        self.pending.append(&mut self.frame);
+        if newline {
+            self.pending.push(b'\n');
+        }
+        self.reset_frame();
+        true
+    }
+
+    fn json_byte_within_limit(&mut self, byte: u8) -> bool {
+        if self.in_json_string {
+            if self.escaped_json_byte {
+                self.escaped_json_byte = false;
+            } else if byte == b'\\' {
+                self.escaped_json_byte = true;
+            } else if byte == b'"' {
+                self.in_json_string = false;
+            }
+            return true;
+        }
+        match byte {
+            b'"' => self.in_json_string = true,
+            b'{' | b'[' => {
+                self.json_depth += 1;
+                if self.json_depth > ACP_JSON_MAX_DEPTH {
+                    return false;
+                }
+            }
+            b'}' | b']' => self.json_depth = self.json_depth.saturating_sub(1),
+            _ => {}
+        }
+        true
+    }
+
+    fn copy_pending(&mut self, output: &mut tokio::io::ReadBuf<'_>) -> bool {
+        if self.pending_offset == self.pending.len() {
+            self.pending.clear();
+            self.pending_offset = 0;
+            return false;
+        }
+        let count = output
+            .remaining()
+            .min(self.pending.len() - self.pending_offset);
+        output.put_slice(&self.pending[self.pending_offset..self.pending_offset + count]);
+        self.pending_offset += count;
+        if self.pending_offset == self.pending.len() {
+            self.pending.clear();
+            self.pending_offset = 0;
+        }
+        count != 0
+    }
+
+    fn limit_error() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ACP frame exceeds ResourceLimitsV1",
+        )
+    }
+}
+
+impl<R> tokio::io::AsyncRead for AcpFrameLimitedReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        output: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        if output.remaining() == 0 || this.copy_pending(output) {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        if this.terminal_error {
+            return std::task::Poll::Ready(Err(Self::limit_error()));
+        }
+        if this.inner_eof {
+            return std::task::Poll::Ready(Ok(()));
+        }
+
+        loop {
+            let mut buffer = [0_u8; 8192];
+            let mut read = tokio::io::ReadBuf::new(&mut buffer);
+            match std::pin::Pin::new(&mut this.inner).poll_read(context, &mut read) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Ready(Ok(())) if read.filled().is_empty() => {
+                    this.inner_eof = true;
+                    if !this.frame.is_empty() && !this.finish_frame(false) {
+                        this.terminal_error = true;
+                        this.exceeded.store(true, Ordering::Release);
+                    }
+                    if this.copy_pending(output) {
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+                    return if this.terminal_error {
+                        std::task::Poll::Ready(Err(Self::limit_error()))
+                    } else {
+                        std::task::Poll::Ready(Ok(()))
+                    };
+                }
+                std::task::Poll::Ready(Ok(())) => {}
+            }
+
+            {
+                let input = read.filled();
+                for byte in input.iter().copied() {
+                    if byte == b'\n' {
+                        if !this.finish_frame(true) {
+                            this.terminal_error = true;
+                            this.exceeded.store(true, Ordering::Release);
+                            break;
+                        }
+                    } else if this.frame_bytes == ACP_FRAME_MAX_BYTES
+                        || !this.json_byte_within_limit(byte)
+                    {
+                        this.terminal_error = true;
+                        this.exceeded.store(true, Ordering::Release);
+                        break;
+                    } else {
+                        this.frame_bytes += 1;
+                        this.frame.push(byte);
+                    }
+                }
+                if this.copy_pending(output) {
+                    return std::task::Poll::Ready(Ok(()));
+                } else if this.terminal_error {
+                    return std::task::Poll::Ready(Err(Self::limit_error()));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,12 +289,18 @@ pub(crate) struct AgentReadySnapshot {
     pub(crate) effective_effort: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentReadySession {
+    snapshot: Arc<AgentReadySnapshot>,
+    route: Option<Arc<ResultRoute>>,
+}
+
 enum AgentSessionState {
     Opening,
-    Ready(Arc<AgentReadySnapshot>),
+    Ready(Arc<AgentReadySession>),
+    Active(Arc<AgentReadySession>),
     AuthRequired(AgentStartupFailure),
     StartFailed(AgentStartupFailure),
+    Broken(AgentSessionFailure),
     Closed,
 }
 
@@ -58,8 +308,30 @@ pub(crate) struct AgentSessionSlot {
     state: Mutex<AgentSessionState>,
     changed: Notify,
     cancellation: CancellationToken,
+    caller_admission: AtomicBool,
+    next_turn_index: AtomicU64,
+    turn_request: Mutex<Option<AgentTurnRequest>>,
+    turn_requested: Notify,
     cleanup_complete: AtomicBool,
     cleanup_changed: Notify,
+}
+
+pub(crate) struct ActAdmissionLease {
+    slot: Arc<AgentSessionSlot>,
+    claimed: bool,
+}
+
+pub(crate) struct SessionTurnLease {
+    slot: Arc<AgentSessionSlot>,
+    session: Arc<AgentReadySession>,
+    claimed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AgentActError {
+    Startup(AgentStartupFailure),
+    SessionBroken(AgentSessionFailure),
+    SessionClosed,
 }
 
 impl AgentSessionSlot {
@@ -68,6 +340,10 @@ impl AgentSessionSlot {
             state: Mutex::new(AgentSessionState::Opening),
             changed: Notify::new(),
             cancellation: CancellationToken::new(),
+            caller_admission: AtomicBool::new(false),
+            next_turn_index: AtomicU64::new(0),
+            turn_request: Mutex::new(None),
+            turn_requested: Notify::new(),
             cleanup_complete: AtomicBool::new(false),
             cleanup_changed: Notify::new(),
         })
@@ -76,17 +352,20 @@ impl AgentSessionSlot {
     #[cfg(feature = "agent-test-support")]
     pub(crate) fn inert(profile: &ResolvedAgentProfile) -> Arc<Self> {
         let slot = Self::new();
-        slot.commit_ready(AgentReadySnapshot {
-            pid: std::process::id(),
-            session_id: format!("inert-{}", profile.agent.name()),
-            agent_info: None,
-            agent_capabilities: AgentCapabilities::default(),
-            generation: 1,
-            server_name: "inert-result-route".to_owned(),
-            endpoint: "http://127.0.0.1:0/mcp".to_owned(),
-            effective_model: profile.requested_model.clone(),
-            effective_effort: profile.requested_effort.clone(),
-        });
+        slot.commit_ready(
+            AgentReadySnapshot {
+                pid: std::process::id(),
+                session_id: format!("inert-{}", profile.agent.name()),
+                agent_info: None,
+                agent_capabilities: AgentCapabilities::default(),
+                generation: 1,
+                server_name: "inert-result-route".to_owned(),
+                endpoint: "http://127.0.0.1:0/mcp".to_owned(),
+                effective_model: profile.requested_model.clone(),
+                effective_effort: profile.requested_effort.clone(),
+            },
+            None,
+        );
         slot.mark_cleanup_complete();
         slot
     }
@@ -95,16 +374,178 @@ impl AgentSessionSlot {
         self.cancellation.clone()
     }
 
+    pub(crate) fn try_claim_admission(self: &Arc<Self>) -> Option<ActAdmissionLease> {
+        self.caller_admission
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ActAdmissionLease {
+                slot: Arc::clone(self),
+                claimed: true,
+            })
+    }
+
+    pub(crate) async fn run_turn(
+        self: &Arc<Self>,
+        prompt: String,
+        schema: Arc<CompiledActSchema>,
+        validation_bridge: Option<Arc<PythonSchemaValidationBridge>>,
+    ) -> Result<AgentTurnOutcome, AgentActError> {
+        let (session, session_turn, turn_index) = self.claim_session_turn().await?;
+        let Some(route) = session.route.as_ref().map(Arc::clone) else {
+            return Err(AgentActError::SessionBroken(
+                self.mark_broken(AgentSessionFailure::result_channel_lost()),
+            ));
+        };
+        if route.generation != session.snapshot.generation
+            || route.server_name != session.snapshot.server_name
+        {
+            return Err(AgentActError::SessionBroken(
+                self.mark_broken(AgentSessionFailure::result_channel_lost()),
+            ));
+        }
+        let operation_id = uuid::Uuid::new_v4();
+        let armed_result =
+            match route.arm_result(operation_id, turn_index, schema, validation_bridge) {
+                Ok(armed_result) => armed_result,
+                Err(_) => {
+                    return Err(AgentActError::SessionBroken(
+                        self.mark_broken(AgentSessionFailure::result_channel_lost()),
+                    ));
+                }
+            };
+        debug_assert_eq!(armed_result.operation_id(), operation_id);
+        debug_assert_eq!(armed_result.turn_index(), turn_index);
+        let (response, outcome) = oneshot::channel();
+        let request = AgentTurnRequest::new(prompt, armed_result, session_turn, response);
+        {
+            let mut pending = lock(&self.turn_request);
+            if pending.is_some() {
+                drop(pending);
+                return Err(AgentActError::SessionBroken(
+                    self.mark_broken(AgentSessionFailure::protocol_violation()),
+                ));
+            }
+            *pending = Some(request);
+        }
+        self.turn_requested.notify_one();
+        outcome.await.map_err(|_| {
+            AgentActError::SessionBroken(self.mark_broken(AgentSessionFailure::transport_lost()))
+        })
+    }
+
+    async fn claim_session_turn(
+        self: &Arc<Self>,
+    ) -> Result<(Arc<AgentReadySession>, SessionTurnLease, u64), AgentActError> {
+        loop {
+            let changed = self.changed.notified();
+            let session = {
+                let mut state = lock(&self.state);
+                match &*state {
+                    AgentSessionState::Ready(session) => {
+                        let session = Arc::clone(session);
+                        *state = AgentSessionState::Active(Arc::clone(&session));
+                        Some(Ok(session))
+                    }
+                    AgentSessionState::Opening | AgentSessionState::Active(_) => None,
+                    AgentSessionState::AuthRequired(failure)
+                    | AgentSessionState::StartFailed(failure) => {
+                        Some(Err(AgentActError::Startup(failure.clone())))
+                    }
+                    AgentSessionState::Broken(failure) => {
+                        Some(Err(AgentActError::SessionBroken(failure.clone())))
+                    }
+                    AgentSessionState::Closed => Some(Err(AgentActError::SessionClosed)),
+                }
+            };
+            if let Some(session) = session {
+                let session = session?;
+                let turn_index = match self.next_turn_index.fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |value| value.checked_add(1),
+                ) {
+                    Ok(previous) => previous + 1,
+                    Err(_) => {
+                        return Err(AgentActError::SessionBroken(
+                            self.mark_broken(AgentSessionFailure::protocol_violation()),
+                        ));
+                    }
+                };
+                let session_turn = SessionTurnLease {
+                    slot: Arc::clone(self),
+                    session: Arc::clone(&session),
+                    claimed: true,
+                };
+                return Ok((session, session_turn, turn_index));
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) async fn next_turn(&self) -> Option<AgentTurnRequest> {
+        loop {
+            let requested = self.turn_requested.notified();
+            if let Some(request) = lock(&self.turn_request).take() {
+                return Some(request);
+            }
+            tokio::select! {
+                () = requested => {}
+                () = self.cancellation.cancelled() => return None,
+            }
+        }
+    }
+
+    pub(crate) fn mark_broken(&self, failure: AgentSessionFailure) -> AgentSessionFailure {
+        let mut state = lock(&self.state);
+        match &*state {
+            AgentSessionState::Broken(existing) => existing.clone(),
+            AgentSessionState::Ready(_) | AgentSessionState::Active(_) => {
+                *state = AgentSessionState::Broken(failure.clone());
+                self.changed.notify_waiters();
+                failure
+            }
+            AgentSessionState::Opening
+            | AgentSessionState::AuthRequired(_)
+            | AgentSessionState::StartFailed(_)
+            | AgentSessionState::Closed => failure,
+        }
+    }
+
+    fn mark_acp_resource_limit(&self, phase: &'static str) {
+        let mut state = lock(&self.state);
+        match &*state {
+            AgentSessionState::Opening => {
+                *state = AgentSessionState::StartFailed(AgentStartupFailure::start(
+                    "resource_limit",
+                    phase,
+                    "agent sent an ACP frame above ResourceLimitsV1",
+                ));
+                self.changed.notify_waiters();
+            }
+            AgentSessionState::Ready(_) | AgentSessionState::Active(_) => {
+                *state = AgentSessionState::Broken(AgentSessionFailure::resource_limit());
+                self.changed.notify_waiters();
+            }
+            AgentSessionState::AuthRequired(_)
+            | AgentSessionState::StartFailed(_)
+            | AgentSessionState::Broken(_)
+            | AgentSessionState::Closed => {}
+        }
+    }
+
     pub(crate) fn cancel(&self) {
         self.cancellation.cancel();
         let mut state = lock(&self.state);
         if matches!(
             *state,
-            AgentSessionState::Opening | AgentSessionState::Ready(_)
+            AgentSessionState::Opening | AgentSessionState::Ready(_) | AgentSessionState::Active(_)
         ) {
             *state = AgentSessionState::Closed;
             self.changed.notify_waiters();
         }
+        drop(state);
+        lock(&self.turn_request).take();
+        self.turn_requested.notify_waiters();
     }
 
     #[cfg(feature = "agent-test-support")]
@@ -113,9 +554,18 @@ impl AgentSessionSlot {
             let changed = self.changed.notified();
             match &*lock(&self.state) {
                 AgentSessionState::Opening => {}
-                AgentSessionState::Ready(snapshot) => return Ok(Arc::clone(snapshot)),
+                AgentSessionState::Ready(session) | AgentSessionState::Active(session) => {
+                    return Ok(Arc::clone(&session.snapshot));
+                }
                 AgentSessionState::AuthRequired(failure)
                 | AgentSessionState::StartFailed(failure) => return Err(failure.clone()),
+                AgentSessionState::Broken(failure) => {
+                    return Err(AgentStartupFailure::start(
+                        failure.code,
+                        "initialize",
+                        failure.message,
+                    ));
+                }
                 AgentSessionState::Closed => {
                     return Err(AgentStartupFailure::start(
                         "preparation_failed",
@@ -133,8 +583,10 @@ impl AgentSessionSlot {
         match &*lock(&self.state) {
             AgentSessionState::Opening => "opening",
             AgentSessionState::Ready(_) => "ready",
+            AgentSessionState::Active(_) => "active",
             AgentSessionState::AuthRequired(_) => "auth_required",
             AgentSessionState::StartFailed(_) => "start_failed",
+            AgentSessionState::Broken(_) => "broken",
             AgentSessionState::Closed => "closed",
         }
     }
@@ -158,10 +610,13 @@ impl AgentSessionSlot {
         self.cleanup_changed.notify_waiters();
     }
 
-    fn commit_ready(&self, snapshot: AgentReadySnapshot) {
+    fn commit_ready(&self, snapshot: AgentReadySnapshot, route: Option<Arc<ResultRoute>>) {
         let mut state = lock(&self.state);
         if matches!(*state, AgentSessionState::Opening) {
-            *state = AgentSessionState::Ready(Arc::new(snapshot));
+            *state = AgentSessionState::Ready(Arc::new(AgentReadySession {
+                snapshot: Arc::new(snapshot),
+                route,
+            }));
             self.changed.notify_waiters();
         }
     }
@@ -176,6 +631,49 @@ impl AgentSessionSlot {
             };
             self.changed.notify_waiters();
         }
+    }
+}
+
+impl ActAdmissionLease {
+    fn release(&mut self) {
+        if self.claimed {
+            let previous = self.slot.caller_admission.swap(false, Ordering::AcqRel);
+            assert!(previous, "an act admission lease is released once");
+            self.claimed = false;
+        }
+    }
+}
+
+impl Drop for ActAdmissionLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl SessionTurnLease {
+    pub(crate) fn release(mut self) {
+        self.release_inner();
+    }
+
+    fn release_inner(&mut self) {
+        if !self.claimed {
+            return;
+        }
+        let mut state = lock(&self.slot.state);
+        if matches!(
+            &*state,
+            AgentSessionState::Active(current) if Arc::ptr_eq(current, &self.session)
+        ) {
+            *state = AgentSessionState::Ready(Arc::clone(&self.session));
+            self.slot.changed.notify_waiters();
+        }
+        self.claimed = false;
+    }
+}
+
+impl Drop for SessionTurnLease {
+    fn drop(&mut self) {
+        self.release_inner();
     }
 }
 
@@ -264,30 +762,77 @@ async fn open_agent_session(
     let service_for_connection = Arc::clone(&result_service);
     let cancellation_for_connection = cancellation.clone();
     let command_for_connection = command.clone();
+    let frame_limit_exceeded = Arc::new(AtomicBool::new(false));
+    let frame_limit_for_connection = Arc::clone(&frame_limit_exceeded);
+    let opening_phase = Arc::new(AtomicU8::new(OpeningPhase::Initialize as u8));
+    let opening_phase_for_connection = Arc::clone(&opening_phase);
+    let prompt_response_provenance = Arc::new(PromptResponseProvenance::default());
+    let provenance_for_handler = Arc::clone(&prompt_response_provenance);
+    let stdout = AcpFrameLimitedReader::new(stdout, Arc::clone(&frame_limit_exceeded));
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
-    let connection = Client.builder().name("troupe").connect_with(
-        transport,
-        move |connection: ConnectionTo<Agent>| async move {
-            let result = open_handshake(
-                &connection,
-                &slot_for_connection,
-                &profile_for_connection,
-                spec,
-                &command_for_connection,
-                &service_for_connection,
-                &route_for_connection,
-                pid,
-                &endpoint,
-                &cancellation_for_connection,
-            )
-            .await;
-            match result {
-                Ok(()) => cancellation_for_connection.cancelled().await,
-                Err(failure) => commit_failure(&slot_for_connection, failure),
-            }
-            Ok(())
-        },
-    );
+    let connection = Client
+        .builder()
+        .name("troupe")
+        .on_receive_dispatch(
+            async move |dispatch: Dispatch, _connection: ConnectionTo<Agent>| match dispatch {
+                Dispatch::Response(result, router) => {
+                    if router.method() == "session/prompt" && result.is_err() {
+                        provenance_for_handler.record_remote_error(router.id().clone());
+                    }
+                    router.route_with_result(result)?;
+                    Ok(Handled::Yes)
+                }
+                message => Ok(Handled::No {
+                    message,
+                    retry: false,
+                }),
+            },
+            agent_client_protocol::on_receive_dispatch!(),
+        )
+        .connect_with(
+            transport,
+            move |connection: ConnectionTo<Agent>| async move {
+                let result = open_handshake(
+                    &connection,
+                    &slot_for_connection,
+                    &profile_for_connection,
+                    spec,
+                    &command_for_connection,
+                    &service_for_connection,
+                    &route_for_connection,
+                    pid,
+                    &endpoint,
+                    &cancellation_for_connection,
+                    &opening_phase_for_connection,
+                )
+                .await;
+                match result {
+                    Ok(session_id) => {
+                        if let Some(slot) = slot_for_connection.upgrade() {
+                            run_agent_turn_worker(
+                                &connection,
+                                slot,
+                                session_id,
+                                &prompt_response_provenance,
+                                &cancellation_for_connection,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(failure) => {
+                        if frame_limit_for_connection.load(Ordering::Acquire) {
+                            commit_acp_resource_limit(
+                                &slot_for_connection,
+                                OpeningPhase::load(&opening_phase_for_connection).name(),
+                            );
+                        } else {
+                            commit_failure(&slot_for_connection, failure);
+                        }
+                    }
+                }
+                Ok(())
+            },
+        );
     tokio::pin!(connection);
 
     enum Completion {
@@ -305,14 +850,18 @@ async fn open_agent_session(
         }
     };
     if !matches!(completion, Completion::Cancelled) {
-        commit_failure(
-            &slot,
-            AgentStartupFailure::start(
-                "spawn_failed",
-                "spawn",
-                "agent process exited during startup",
-            ),
-        );
+        if frame_limit_exceeded.load(Ordering::Acquire) {
+            commit_acp_resource_limit(&slot, OpeningPhase::load(&opening_phase).name());
+        } else {
+            commit_failure(
+                &slot,
+                AgentStartupFailure::start(
+                    "spawn_failed",
+                    "spawn",
+                    "agent process exited during startup",
+                ),
+            );
+        }
     }
     let route = { lock(&current_route).take() };
     if let Some(route) = route {
@@ -334,7 +883,8 @@ async fn open_handshake(
     pid: u32,
     endpoint: &str,
     cancellation: &CancellationToken,
-) -> Result<(), AgentStartupFailure> {
+    opening_phase: &AtomicU8,
+) -> Result<SessionId, AgentStartupFailure> {
     if !spec.supports_step1_opening(profile.agent) {
         return Err(AgentStartupFailure::start(
             "protocol_incompatible",
@@ -375,6 +925,7 @@ async fn open_handshake(
     )?;
     *lock(current_route) = Some(Arc::clone(&route));
     revalidate_workspace(&profile.workspace, "session_new")?;
+    OpeningPhase::SessionNew.store(opening_phase);
     let session = send_new_session(connection, profile, &route).await;
     if session
         .as_ref()
@@ -397,6 +948,7 @@ async fn open_handshake(
     })?;
     revalidate_workspace(&profile.workspace, "session_new")?;
 
+    OpeningPhase::Configure.store(opening_phase);
     let (effective_model, effective_effort) = configure_session(
         connection,
         spec,
@@ -413,30 +965,38 @@ async fn open_handshake(
             () = cancellation.cancelled() => {
                 return Err(AgentStartupFailure::start(
                     "result_channel_unavailable",
-                    "configuration",
+                    "configure",
                     "agent session was closed before configuration readiness",
                 ));
             }
         }
+    }
+    OpeningPhase::McpReady.store(opening_phase);
+    #[cfg(feature = "agent-test-support")]
+    if let Some(gate) = &command.configuration_ready_gate {
         gate.mark_completed();
     }
     route.wait_ready(cancellation).await?;
     revalidate_workspace(&profile.workspace, "session_new")?;
     let Some(slot) = slot.upgrade() else {
-        return Ok(());
+        return Ok(session.session_id);
     };
-    slot.commit_ready(AgentReadySnapshot {
-        pid,
-        session_id: session.session_id.to_string(),
-        agent_info,
-        agent_capabilities,
-        generation: route.generation,
-        server_name: route.server_name.clone(),
-        endpoint: endpoint.to_owned(),
-        effective_model,
-        effective_effort,
-    });
-    Ok(())
+    let session_id = session.session_id.clone();
+    slot.commit_ready(
+        AgentReadySnapshot {
+            pid,
+            session_id: session.session_id.to_string(),
+            agent_info,
+            agent_capabilities,
+            generation: route.generation,
+            server_name: route.server_name.clone(),
+            endpoint: endpoint.to_owned(),
+            effective_model,
+            effective_effort,
+        },
+        Some(Arc::clone(&route)),
+    );
+    Ok(session_id)
 }
 
 fn supports_http_mcp(capabilities: &McpCapabilities) -> bool {
@@ -743,8 +1303,15 @@ fn commit_failure(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
     }
 }
 
+fn commit_acp_resource_limit(slot: &Weak<AgentSessionSlot>, phase: &'static str) {
+    if let Some(slot) = slot.upgrade() {
+        slot.mark_acp_resource_limit(phase);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncReadExt as _;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -766,5 +1333,101 @@ mod tests {
             .expect("stderr drain receiver remains live");
 
         cleanup.await.expect("cleanup task completes");
+    }
+
+    #[tokio::test]
+    async fn acp_frame_reader_enforces_the_exact_sixteen_mibibyte_boundary() {
+        async fn read_frame(size: usize) -> (std::io::Result<Vec<u8>>, bool) {
+            let mut wire = vec![b' '; size];
+            wire.push(b'\n');
+            let exceeded = Arc::new(AtomicBool::new(false));
+            let mut reader = AcpFrameLimitedReader::new(wire.as_slice(), Arc::clone(&exceeded));
+            let mut output = Vec::new();
+            let result = reader.read_to_end(&mut output).await.map(|_| output);
+            (result, exceeded.load(Ordering::Acquire))
+        }
+
+        for size in [ACP_FRAME_MAX_BYTES - 1, ACP_FRAME_MAX_BYTES] {
+            let (result, exceeded) = read_frame(size).await;
+            assert_eq!(result.unwrap().len(), size + 1);
+            assert!(!exceeded);
+        }
+        let (result, exceeded) = read_frame(ACP_FRAME_MAX_BYTES + 1).await;
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert!(exceeded);
+
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let mut reader =
+            AcpFrameLimitedReader::new(b"first\nsecond\n".as_slice(), Arc::clone(&exceeded));
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"first\nsecond\n");
+        assert!(!exceeded.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn acp_frame_reader_enforces_protocol_depth_63_64_65() {
+        let nested_frame = |depth: usize| {
+            let mut value = serde_json::json!(null);
+            for _ in 1..depth {
+                value = serde_json::json!({"nested": value});
+            }
+            let mut frame = serde_json::to_vec(&value).unwrap();
+            frame.push(b'\n');
+            frame
+        };
+
+        for depth in [63, 64] {
+            let exceeded = Arc::new(AtomicBool::new(false));
+            let frame = nested_frame(depth);
+            let mut reader = AcpFrameLimitedReader::new(frame.as_slice(), Arc::clone(&exceeded));
+            let mut output = Vec::new();
+            reader.read_to_end(&mut output).await.unwrap();
+            assert_eq!(output, frame);
+            assert!(!exceeded.load(Ordering::Acquire));
+        }
+
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let frame = nested_frame(65);
+        let mut reader = AcpFrameLimitedReader::new(frame.as_slice(), Arc::clone(&exceeded));
+        let mut output = Vec::new();
+        assert_eq!(
+            reader.read_to_end(&mut output).await.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+        );
+        assert!(exceeded.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn turn_index_overflow_is_internalized_as_protocol_violation() {
+        let slot = AgentSessionSlot::new();
+        slot.commit_ready(
+            AgentReadySnapshot {
+                pid: std::process::id(),
+                session_id: "overflow-test".to_owned(),
+                agent_info: None,
+                agent_capabilities: AgentCapabilities::default(),
+                generation: 1,
+                server_name: "overflow-test".to_owned(),
+                endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+                effective_model: "test-model".to_owned(),
+                effective_effort: None,
+            },
+            None,
+        );
+        slot.next_turn_index.store(u64::MAX, Ordering::Release);
+
+        let error = match slot.claim_session_turn().await {
+            Ok(_) => panic!("an exhausted internal turn index was reused"),
+            Err(error) => error,
+        };
+        let AgentActError::SessionBroken(failure) = error else {
+            panic!("turn index overflow escaped through an unplanned public branch");
+        };
+        assert_eq!(failure.code, "protocol_violation");
+        assert!(matches!(
+            &*lock(&slot.state),
+            AgentSessionState::Broken(stored) if stored.code == "protocol_violation"
+        ));
     }
 }

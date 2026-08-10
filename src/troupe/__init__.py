@@ -6,8 +6,15 @@ from ._runtime import Actor as Actor
 from ._runtime import ActorHandle as ActorHandle
 from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError
 from ._runtime import AgentError as AgentError
+from ._runtime import AgentResultError as AgentResultError
+from ._runtime import AgentResultIssue as AgentResultIssue
+from ._runtime import AgentResultMissingError as AgentResultMissingError
+from ._runtime import AgentSessionBrokenError as AgentSessionBrokenError
+from ._runtime import AgentSessionBusyError as AgentSessionBusyError
 from ._runtime import AgentSessionError as AgentSessionError
 from ._runtime import AgentSessionStartError as AgentSessionStartError
+from ._runtime import AgentTurnError as AgentTurnError
+from ._runtime import act_schema as act_schema
 from ._runtime import Cue as Cue
 from ._runtime import CueContextError as CueContextError
 from ._runtime import Effect as Effect
@@ -43,11 +50,18 @@ __all__ = [
     "AgentAuthenticationRequiredError",
     "AgentError",
     "AgentProfile",
+    "AgentResultError",
+    "AgentResultIssue",
+    "AgentResultMissingError",
+    "AgentSessionBrokenError",
+    "AgentSessionBusyError",
     "AgentSessionError",
     "AgentSessionStartError",
+    "AgentTurnError",
     "Cue",
     "CueContextError",
     "Effect",
     "EffectContextError",
     "Production",
+    "act_schema",
 ]

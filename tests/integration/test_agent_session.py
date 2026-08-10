@@ -527,6 +527,9 @@ def test_auth_required_closes_an_accepted_route_connection_before_publication(
 @pytest.mark.parametrize(
     ("scenario_name", "expected_code", "expected_phase"),
     [
+        ("oversized_acp_frame", "resource_limit", "initialize"),
+        ("oversized_acp_frame_session_new", "resource_limit", "session_new"),
+        ("oversized_acp_frame_configure", "resource_limit", "configure"),
         ("no_http_mcp", "protocol_incompatible", "initialize"),
         ("session_new_error", "protocol_incompatible", "session_new"),
         ("configuration_invalid", "configuration_invalid", "configure"),
@@ -555,6 +558,65 @@ def test_opening_failure_is_latched_with_its_startup_code_and_phase(
             assert type(raised.value) is troupe.AgentSessionStartError
             assert raised.value.code == expected_code
             assert raised.value.phase == expected_phase
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_opening_acp_resource_limit_uses_mcp_ready_phase_after_configuration(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        release = tmp_path / "release-mcp-ready-frame"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(
+            events,
+            scenario="oversized_acp_frame_mcp_ready",
+            release=release,
+        )
+        _native()._agent_test_hold_configuration_ready()
+        _native()._agent_test_hold_mcp_ready()
+
+        handle = _cast(troupe.Production([]), workspace, "mcp-ready-resource")
+        await _wait_for_event(events, "mcp_ready_frame_blocked")
+        await _wait_for_readiness_gate("configuration", "arrived")
+        await _wait_for_readiness_gate("mcp", "arrived")
+        _native()._agent_test_release_configuration_ready()
+        await _wait_for_readiness_gate("configuration", "completed")
+        release.touch()
+
+        for _ in range(2):
+            with pytest.raises(troupe.AgentSessionStartError) as raised:
+                await _ready(handle)
+            assert raised.value.code == "resource_limit"
+            assert raised.value.phase == "mcp_ready"
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+@pytest.mark.parametrize("depth", [63, 64, 65])
+def test_opening_acp_protocol_depth_has_exact_resource_boundary(
+    tmp_path: Path,
+    depth: int,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(events, scenario=f"opening_acp_depth_{depth}")
+
+        handle = _cast(troupe.Production([]), workspace, f"opening-depth-{depth}")
+        if depth <= 64:
+            ready = await _ready(handle)
+            assert ready["state"] == "ready"
+            assert handle._agent_state_for_test() == "ready"  # type: ignore[attr-defined]
+        else:
+            with pytest.raises(troupe.AgentSessionStartError) as raised:
+                await _ready(handle)
+            assert raised.value.code == "resource_limit"
+            assert raised.value.phase == "initialize"
+            assert handle._agent_state_for_test() == "start_failed"  # type: ignore[attr-defined]
 
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
 
