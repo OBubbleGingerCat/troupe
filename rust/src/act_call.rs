@@ -11,7 +11,9 @@ use crate::agent_error::{
     session_broken_error, turn_error,
 };
 use crate::agent_session::{AgentActError, AgentSessionSlot};
-use crate::agent_turn::{AgentTurnOutcome, AgentTurnStop};
+use crate::agent_turn::{
+    AgentTurnCancelDecision, AgentTurnControl, AgentTurnOutcome, AgentTurnStop,
+};
 use crate::cue::CueContextError;
 use crate::result_mcp::MAX_REPAIRABLE_INVALID_CALLS;
 use crate::scene_context::{CuedScope, RunBinding};
@@ -35,6 +37,8 @@ pub(crate) struct ActCall {
     schema: Option<Arc<CompiledActSchema>>,
     binding: Weak<RunBinding>,
     cued: Weak<CuedScope>,
+    control: Option<Arc<AgentTurnControl>>,
+    signal: Option<Py<PyAny>>,
     driver: Option<Py<PyAny>>,
     phase: ActCallPhase,
 }
@@ -47,12 +51,15 @@ impl ActCall {
         binding: &Arc<RunBinding>,
         cued: &Arc<CuedScope>,
     ) -> Self {
+        let control = AgentTurnControl::new(Arc::clone(&session));
         Self {
             session: Some(session),
             prompt: Some(prompt),
             schema: Some(schema),
             binding: Arc::downgrade(binding),
             cued: Arc::downgrade(cued),
+            control: Some(control),
+            signal: None,
             driver: None,
             phase: ActCallPhase::Created,
         }
@@ -80,6 +87,18 @@ impl ActCall {
 
     fn start_driver(&mut self, py: Python<'_>) -> PyResult<()> {
         self.validate_context(py)?;
+        let cued = self
+            .cued
+            .upgrade()
+            .ok_or_else(|| CueContextError::new_err(ACT_CONTEXT_ERROR))?;
+        let control = self
+            .control
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| PyRuntimeError::new_err(REUSE_ERROR))?;
+        if !cued.register_agent_turn(&control) {
+            return Err(CueContextError::new_err(ACT_CONTEXT_ERROR));
+        }
         let session = self
             .session
             .take()
@@ -95,21 +114,63 @@ impl ActCall {
         let admission = session
             .try_claim_admission()
             .ok_or_else(|| busy_error(py))?;
+        if !control.install_admission(admission) {
+            return Err(cancelled_error(py));
+        }
         let validation_bridge = match schema.validation_mode() {
             SchemaValidationMode::NativeOnly => None,
             SchemaValidationMode::Hybrid => Some(PythonSchemaValidationBridge::new(py)?),
         };
         let future = pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _admission = admission;
             let outcome = session
-                .run_turn(prompt, schema, validation_bridge)
+                .run_turn(prompt, schema, validation_bridge, control)
                 .await
                 .map_err(|error| Python::attach(|py| act_error(py, error)))?;
             Python::attach(|py| turn_outcome(py, outcome))
         })?;
-        self.driver = Some(future.call_method0("__await__")?.unbind());
+        let signal = future.unbind();
+        self.driver = Some(Self::fresh_waiter(py, &signal)?);
+        self.signal = Some(signal);
         self.phase = ActCallPhase::Running;
         Ok(())
+    }
+
+    fn fresh_waiter(py: Python<'_>, signal: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+        py.import("asyncio")?
+            .call_method1("shield", (signal.bind(py),))?
+            .call_method0("__await__")
+            .map(Bound::unbind)
+    }
+
+    fn replace_shield_and_wait(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let signal = self
+            .signal
+            .as_ref()
+            .map(|signal| signal.clone_ref(py))
+            .ok_or_else(|| PyRuntimeError::new_err(REUSE_ERROR))?;
+        let waiter = Self::fresh_waiter(py, &signal)?;
+        let previous = self.driver.replace(waiter);
+        drop(previous);
+        let none = py.None();
+        self.drive(py, "send", none.bind(py))
+    }
+
+    fn is_cancelled_error(py: Python<'_>, exc: &Bound<'_, PyAny>) -> PyResult<bool> {
+        exc.is_instance(&py.import("asyncio")?.getattr("CancelledError")?)
+    }
+
+    fn request_cancel(&self) -> AgentTurnCancelDecision {
+        self.control
+            .as_ref()
+            .map_or(AgentTurnCancelDecision::Accepted, |control| {
+                control.request_cancel()
+            })
+    }
+
+    fn cancel_signal(&self, py: Python<'_>) {
+        if let Some(signal) = &self.signal {
+            let _ = signal.bind(py).call_method0("cancel");
+        }
     }
 
     fn drive(
@@ -133,10 +194,16 @@ impl ActCall {
     }
 
     fn finish(&mut self) {
+        if let Some(control) = &self.control {
+            control.request_cancel();
+            control.finish_caller();
+        }
         self.phase = ActCallPhase::Done;
         self.session = None;
         self.prompt = None;
         self.schema = None;
+        self.control = None;
+        self.signal = None;
         self.driver = None;
     }
 }
@@ -148,7 +215,15 @@ fn act_error(py: Python<'_>, error: AgentActError) -> PyErr {
         AgentActError::SessionClosed => {
             session_broken_error(py, &AgentSessionFailure::transport_lost())
         }
+        AgentActError::CallerCancelled => cancelled_error(py),
     }
+}
+
+fn cancelled_error(py: Python<'_>) -> PyErr {
+    py.import("asyncio")
+        .and_then(|module| module.getattr("CancelledError"))
+        .and_then(|error_type| error_type.call0())
+        .map_or_else(|error| error, PyErr::from_value)
 }
 
 fn turn_outcome(py: Python<'_>, outcome: AgentTurnOutcome) -> PyResult<Py<PyAny>> {
@@ -229,12 +304,22 @@ impl ActCall {
                 self.finish();
                 Err(PyErr::from_value(exc.into_bound(py)))
             }
+            ActCallPhase::Running if Self::is_cancelled_error(py, exc.bind(py))? => {
+                if self.request_cancel() == AgentTurnCancelDecision::Rejected {
+                    return self.replace_shield_and_wait(py);
+                }
+                self.cancel_signal(py);
+                self.finish();
+                Err(PyErr::from_value(exc.into_bound(py)))
+            }
             ActCallPhase::Running => self.drive(py, "throw", exc.bind(py)),
             ActCallPhase::Done => Err(PyRuntimeError::new_err(REUSE_ERROR)),
         }
     }
 
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.request_cancel();
+        self.cancel_signal(py);
         let result = self
             .driver
             .as_ref()
@@ -258,6 +343,7 @@ impl ActCall {
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.signal)?;
         visit.call(&self.driver)?;
         if let Some(schema) = &self.schema {
             schema.traverse(&visit)?;

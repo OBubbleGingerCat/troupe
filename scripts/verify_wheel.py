@@ -868,12 +868,27 @@ agent_test_support_absent = not any(
         "_agent_test_hold_mcp_ready",
         "_agent_test_release_mcp_ready",
         "_agent_test_readiness_gate_states",
+        "_agent_test_hold_turn_registration",
+        "_agent_test_release_turn_registration",
+        "_agent_test_hold_turn_intake",
+        "_agent_test_release_turn_intake",
+        "_agent_test_hold_turn_submission",
+        "_agent_test_release_turn_submission",
+        "_agent_test_hold_turn_settlement",
+        "_agent_test_release_turn_settlement",
+        "_agent_test_hold_turn_terminal_delivery",
+        "_agent_test_release_turn_terminal_delivery",
+        "_agent_test_hold_turn_outcome",
+        "_agent_test_release_turn_outcome",
+        "_agent_test_turn_gate_states",
         "_agent_test_result_generation_isolation",
     )
 ) and not any(
     hasattr(runtime.ActorHandle, name)
     for name in (
         "_agent_state_for_test",
+        "_agent_has_queued_turn_for_test",
+        "_agent_fail_transport_for_test",
         "_agent_ready_for_test",
     )
 ) and not any(

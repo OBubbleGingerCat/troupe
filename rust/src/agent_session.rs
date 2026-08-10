@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, ClientCapabilities, ClientSessionCapabilities, ErrorCode, Implementation,
-    InitializeRequest, McpCapabilities, NewSessionRequest, NewSessionResponse, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionValue, SessionConfigSelect, SessionConfigSelectOptions,
-    SessionId, SessionModeState, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    InitializeRequest, McpCapabilities, NewSessionRequest, NewSessionResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelect,
+    SessionConfigSelectOptions, SessionId, SessionModeState, SetSessionConfigOptionRequest,
+    SetSessionModeRequest,
 };
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Dispatch, Handled};
 use tokio::io::AsyncReadExt as _;
@@ -23,10 +25,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::act_schema::CompiledActSchema;
 use crate::agent_error::{AgentSessionFailure, AgentStartupFailure};
+#[cfg(feature = "agent-test-support")]
+use crate::agent_launch::TestOpeningGate;
 use crate::agent_launch::{AgentLaunchSpec, ResolvedAgentCommand, ResolvedModeApplication};
 use crate::agent_profile::{ResolvedAgentProfile, WorkspaceLeaseV1};
 use crate::agent_turn::{
-    AgentTurnOutcome, AgentTurnRequest, PromptResponseProvenance, run_agent_turn_worker,
+    AgentTurnControl, AgentTurnOutcome, AgentTurnRequest, PromptResponseProvenance,
+    run_agent_turn_worker,
 };
 use crate::result_mcp::{ResultMcpService, ResultRoute};
 use crate::schema_validation_bridge::PythonSchemaValidationBridge;
@@ -298,6 +303,7 @@ enum AgentSessionState {
     Opening,
     Ready(Arc<AgentReadySession>),
     Active(Arc<AgentReadySession>),
+    Cancelling(Arc<AgentReadySession>),
     AuthRequired(AgentStartupFailure),
     StartFailed(AgentStartupFailure),
     Broken(AgentSessionFailure),
@@ -310,10 +316,25 @@ pub(crate) struct AgentSessionSlot {
     cancellation: CancellationToken,
     caller_admission: AtomicBool,
     next_turn_index: AtomicU64,
-    turn_request: Mutex<Option<AgentTurnRequest>>,
+    turn_registry: Mutex<AgentTurnRegistry>,
     turn_requested: Notify,
+    #[cfg(feature = "agent-test-support")]
+    turn_registration_gate: Mutex<Option<Arc<TestOpeningGate>>>,
+    #[cfg(all(feature = "agent-test-support", test))]
+    turn_cancellation_delivery_gate: Mutex<Option<Arc<TestOpeningGate>>>,
+    #[cfg(feature = "agent-test-support")]
+    turn_terminal_delivery_gate: Mutex<Option<Arc<TestOpeningGate>>>,
     cleanup_complete: AtomicBool,
     cleanup_changed: Notify,
+}
+
+enum AgentTurnRegistry {
+    Open {
+        request: Option<AgentTurnRequest>,
+        control: Option<Weak<AgentTurnControl>>,
+        submitted_session: Option<SessionId>,
+    },
+    Terminal(AgentSessionFailure),
 }
 
 pub(crate) struct ActAdmissionLease {
@@ -327,11 +348,17 @@ pub(crate) struct SessionTurnLease {
     claimed: bool,
 }
 
+pub(crate) struct SessionTurnMarker {
+    slot: Arc<AgentSessionSlot>,
+    session: Arc<AgentReadySession>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AgentActError {
     Startup(AgentStartupFailure),
     SessionBroken(AgentSessionFailure),
     SessionClosed,
+    CallerCancelled,
 }
 
 impl AgentSessionSlot {
@@ -342,8 +369,18 @@ impl AgentSessionSlot {
             cancellation: CancellationToken::new(),
             caller_admission: AtomicBool::new(false),
             next_turn_index: AtomicU64::new(0),
-            turn_request: Mutex::new(None),
+            turn_registry: Mutex::new(AgentTurnRegistry::Open {
+                request: None,
+                control: None,
+                submitted_session: None,
+            }),
             turn_requested: Notify::new(),
+            #[cfg(feature = "agent-test-support")]
+            turn_registration_gate: Mutex::new(None),
+            #[cfg(all(feature = "agent-test-support", test))]
+            turn_cancellation_delivery_gate: Mutex::new(None),
+            #[cfg(feature = "agent-test-support")]
+            turn_terminal_delivery_gate: Mutex::new(None),
             cleanup_complete: AtomicBool::new(false),
             cleanup_changed: Notify::new(),
         })
@@ -374,6 +411,50 @@ impl AgentSessionSlot {
         self.cancellation.clone()
     }
 
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn install_test_turn_registration_gate(&self, gate: Option<Arc<TestOpeningGate>>) {
+        *lock(&self.turn_registration_gate) = gate;
+    }
+
+    #[cfg(all(feature = "agent-test-support", test))]
+    pub(crate) fn install_test_turn_cancellation_delivery_gate(
+        &self,
+        gate: Option<Arc<TestOpeningGate>>,
+    ) {
+        *lock(&self.turn_cancellation_delivery_gate) = gate;
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn install_test_turn_terminal_delivery_gate(
+        &self,
+        gate: Option<Arc<TestOpeningGate>>,
+    ) {
+        *lock(&self.turn_terminal_delivery_gate) = gate;
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    async fn wait_test_turn_registration(&self, cancellation: &CancellationToken) -> bool {
+        let gate = lock(&self.turn_registration_gate).clone();
+        let Some(gate) = gate else {
+            return true;
+        };
+        tokio::select! {
+            () = gate.wait() => {
+                gate.mark_completed();
+                true
+            }
+            () = cancellation.cancelled() => false,
+        }
+    }
+
+    #[cfg(all(feature = "agent-test-support", test))]
+    pub(crate) fn wait_test_turn_cancellation_delivery(&self) {
+        if let Some(gate) = lock(&self.turn_cancellation_delivery_gate).clone() {
+            gate.wait_blocking();
+            gate.mark_completed();
+        }
+    }
+
     pub(crate) fn try_claim_admission(self: &Arc<Self>) -> Option<ActAdmissionLease> {
         self.caller_admission
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -389,8 +470,15 @@ impl AgentSessionSlot {
         prompt: String,
         schema: Arc<CompiledActSchema>,
         validation_bridge: Option<Arc<PythonSchemaValidationBridge>>,
+        control: Arc<AgentTurnControl>,
     ) -> Result<AgentTurnOutcome, AgentActError> {
-        let (session, session_turn, turn_index) = self.claim_session_turn().await?;
+        let caller_cancellation = control.caller_cancellation();
+        let (session, session_turn, turn_index) = tokio::select! {
+            turn = self.claim_session_turn() => turn?,
+            () = caller_cancellation.cancelled() => {
+                return Err(AgentActError::CallerCancelled);
+            }
+        };
         let Some(route) = session.route.as_ref().map(Arc::clone) else {
             return Err(AgentActError::SessionBroken(
                 self.mark_broken(AgentSessionFailure::result_channel_lost()),
@@ -415,22 +503,37 @@ impl AgentSessionSlot {
             };
         debug_assert_eq!(armed_result.operation_id(), operation_id);
         debug_assert_eq!(armed_result.turn_index(), turn_index);
+        let result_failure = armed_result.failure_notification();
         let (response, outcome) = oneshot::channel();
-        let request = AgentTurnRequest::new(prompt, armed_result, session_turn, response);
-        {
-            let mut pending = lock(&self.turn_request);
-            if pending.is_some() {
-                drop(pending);
-                return Err(AgentActError::SessionBroken(
-                    self.mark_broken(AgentSessionFailure::protocol_violation()),
-                ));
-            }
-            *pending = Some(request);
+        if !control.install_armed(armed_result, session_turn, response) {
+            return Err(AgentActError::CallerCancelled);
         }
-        self.turn_requested.notify_one();
-        outcome.await.map_err(|_| {
-            AgentActError::SessionBroken(self.mark_broken(AgentSessionFailure::transport_lost()))
-        })
+        #[cfg(feature = "agent-test-support")]
+        if !self.wait_test_turn_registration(&caller_cancellation).await {
+            return Err(AgentActError::CallerCancelled);
+        }
+        let request = AgentTurnRequest::new(prompt, Arc::clone(&control), result_failure);
+        match control.queue_if_armed(request) {
+            Ok(true) => {}
+            Ok(false) => return Err(AgentActError::CallerCancelled),
+            Err(failure) => {
+                control.fail_terminal(failure.clone());
+                return Err(AgentActError::SessionBroken(failure));
+            }
+        }
+        tokio::select! {
+            biased;
+            outcome = outcome => outcome.map_err(|_| {
+                if caller_cancellation.is_cancelled() {
+                    AgentActError::CallerCancelled
+                } else {
+                    AgentActError::SessionBroken(
+                        self.mark_broken(AgentSessionFailure::transport_lost())
+                    )
+                }
+            }),
+            () = caller_cancellation.cancelled() => Err(AgentActError::CallerCancelled),
+        }
     }
 
     async fn claim_session_turn(
@@ -446,7 +549,9 @@ impl AgentSessionSlot {
                         *state = AgentSessionState::Active(Arc::clone(&session));
                         Some(Ok(session))
                     }
-                    AgentSessionState::Opening | AgentSessionState::Active(_) => None,
+                    AgentSessionState::Opening
+                    | AgentSessionState::Active(_)
+                    | AgentSessionState::Cancelling(_) => None,
                     AgentSessionState::AuthRequired(failure)
                     | AgentSessionState::StartFailed(failure) => {
                         Some(Err(AgentActError::Startup(failure.clone())))
@@ -485,8 +590,15 @@ impl AgentSessionSlot {
     pub(crate) async fn next_turn(&self) -> Option<AgentTurnRequest> {
         loop {
             let requested = self.turn_requested.notified();
-            if let Some(request) = lock(&self.turn_request).take() {
-                return Some(request);
+            let next = {
+                let mut registry = lock(&self.turn_registry);
+                match &mut *registry {
+                    AgentTurnRegistry::Open { request, .. } => request.take().map(Some),
+                    AgentTurnRegistry::Terminal(_) => Some(None),
+                }
+            };
+            if let Some(request) = next {
+                return request;
             }
             tokio::select! {
                 () = requested => {}
@@ -495,11 +607,112 @@ impl AgentSessionSlot {
         }
     }
 
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn has_queued_turn_for_test(&self) -> bool {
+        matches!(
+            &*lock(&self.turn_registry),
+            AgentTurnRegistry::Open {
+                request: Some(_),
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn queue_turn(
+        &self,
+        request: AgentTurnRequest,
+        control: &Arc<AgentTurnControl>,
+    ) -> Result<(), AgentSessionFailure> {
+        let queued = {
+            let mut registry = lock(&self.turn_registry);
+            match &mut *registry {
+                AgentTurnRegistry::Open {
+                    request: pending,
+                    control: active,
+                    submitted_session,
+                } if pending.is_none()
+                    && active.as_ref().and_then(Weak::upgrade).is_none()
+                    && submitted_session.is_none() =>
+                {
+                    *active = Some(Arc::downgrade(control));
+                    *pending = Some(request);
+                    Ok(())
+                }
+                AgentTurnRegistry::Open { .. } => Err(AgentSessionFailure::protocol_violation()),
+                AgentTurnRegistry::Terminal(failure) => Err(failure.clone()),
+            }
+        };
+        if queued.is_ok() {
+            self.turn_requested.notify_one();
+        }
+        queued
+    }
+
+    pub(crate) fn register_submitted_turn(
+        &self,
+        session_id: &SessionId,
+        control: &Arc<AgentTurnControl>,
+    ) -> Result<(), AgentSessionFailure> {
+        let mut registry = lock(&self.turn_registry);
+        match &mut *registry {
+            AgentTurnRegistry::Open {
+                request,
+                control: active,
+                submitted_session,
+            } if request.is_none()
+                && active
+                    .as_ref()
+                    .is_some_and(|current| Weak::ptr_eq(current, &Arc::downgrade(control)))
+                && submitted_session.is_none() =>
+            {
+                *submitted_session = Some(session_id.clone());
+                Ok(())
+            }
+            AgentTurnRegistry::Open { .. } => Err(AgentSessionFailure::protocol_violation()),
+            AgentTurnRegistry::Terminal(failure) => Err(failure.clone()),
+        }
+    }
+
+    pub(crate) fn clear_turn_control(&self, control: &AgentTurnControl) {
+        let mut registry = lock(&self.turn_registry);
+        if let AgentTurnRegistry::Open {
+            request,
+            control: active,
+            submitted_session,
+        } = &mut *registry
+            && active
+                .as_ref()
+                .is_some_and(|current| std::ptr::eq(current.as_ptr(), control))
+        {
+            *request = None;
+            *active = None;
+            *submitted_session = None;
+        }
+    }
+
+    fn submitted_turn(&self, session_id: &SessionId) -> Option<Arc<AgentTurnControl>> {
+        let registry = lock(&self.turn_registry);
+        let AgentTurnRegistry::Open {
+            control,
+            submitted_session,
+            ..
+        } = &*registry
+        else {
+            return None;
+        };
+        submitted_session
+            .as_ref()
+            .filter(|current| *current == session_id)
+            .and_then(|_| control.as_ref().and_then(Weak::upgrade))
+    }
+
     pub(crate) fn mark_broken(&self, failure: AgentSessionFailure) -> AgentSessionFailure {
         let mut state = lock(&self.state);
         match &*state {
             AgentSessionState::Broken(existing) => existing.clone(),
-            AgentSessionState::Ready(_) | AgentSessionState::Active(_) => {
+            AgentSessionState::Ready(_)
+            | AgentSessionState::Active(_)
+            | AgentSessionState::Cancelling(_) => {
                 *state = AgentSessionState::Broken(failure.clone());
                 self.changed.notify_waiters();
                 failure
@@ -511,26 +724,39 @@ impl AgentSessionSlot {
         }
     }
 
-    fn mark_acp_resource_limit(&self, phase: &'static str) {
+    pub(crate) fn commit_turn_transition<R>(
+        &self,
+        transition: impl FnOnce(Option<AgentSessionFailure>) -> (R, Option<AgentSessionFailure>),
+    ) -> R {
         let mut state = lock(&self.state);
-        match &*state {
-            AgentSessionState::Opening => {
-                *state = AgentSessionState::StartFailed(AgentStartupFailure::start(
-                    "resource_limit",
-                    phase,
-                    "agent sent an ACP frame above ResourceLimitsV1",
-                ));
-                self.changed.notify_waiters();
-            }
-            AgentSessionState::Ready(_) | AgentSessionState::Active(_) => {
-                *state = AgentSessionState::Broken(AgentSessionFailure::resource_limit());
-                self.changed.notify_waiters();
-            }
-            AgentSessionState::AuthRequired(_)
-            | AgentSessionState::StartFailed(_)
-            | AgentSessionState::Broken(_)
-            | AgentSessionState::Closed => {}
+        let existing = match &*state {
+            AgentSessionState::Broken(failure) => Some(failure.clone()),
+            _ => None,
+        };
+        let (result, proposed_failure) = transition(existing.clone());
+        let failure = existing.or(proposed_failure);
+        if matches!(
+            *state,
+            AgentSessionState::Ready(_)
+                | AgentSessionState::Active(_)
+                | AgentSessionState::Cancelling(_)
+        ) && let Some(failure) = &failure
+        {
+            *state = AgentSessionState::Broken(failure.clone());
+            self.changed.notify_waiters();
         }
+        result
+    }
+
+    fn mark_acp_resource_limit(&self, phase: &'static str) {
+        self.commit_terminal_failure(
+            AgentStartupFailure::start(
+                "resource_limit",
+                phase,
+                "agent sent an ACP frame above ResourceLimitsV1",
+            ),
+            AgentSessionFailure::resource_limit(),
+        );
     }
 
     pub(crate) fn cancel(&self) {
@@ -538,13 +764,25 @@ impl AgentSessionSlot {
         let mut state = lock(&self.state);
         if matches!(
             *state,
-            AgentSessionState::Opening | AgentSessionState::Ready(_) | AgentSessionState::Active(_)
+            AgentSessionState::Opening
+                | AgentSessionState::Ready(_)
+                | AgentSessionState::Active(_)
+                | AgentSessionState::Cancelling(_)
         ) {
             *state = AgentSessionState::Closed;
             self.changed.notify_waiters();
         }
         drop(state);
-        lock(&self.turn_request).take();
+        if let AgentTurnRegistry::Open {
+            request,
+            control,
+            submitted_session,
+        } = &mut *lock(&self.turn_registry)
+        {
+            *request = None;
+            *control = None;
+            *submitted_session = None;
+        }
         self.turn_requested.notify_waiters();
     }
 
@@ -557,6 +795,7 @@ impl AgentSessionSlot {
                 AgentSessionState::Ready(session) | AgentSessionState::Active(session) => {
                     return Ok(Arc::clone(&session.snapshot));
                 }
+                AgentSessionState::Cancelling(_) => {}
                 AgentSessionState::AuthRequired(failure)
                 | AgentSessionState::StartFailed(failure) => return Err(failure.clone()),
                 AgentSessionState::Broken(failure) => {
@@ -584,6 +823,7 @@ impl AgentSessionSlot {
             AgentSessionState::Opening => "opening",
             AgentSessionState::Ready(_) => "ready",
             AgentSessionState::Active(_) => "active",
+            AgentSessionState::Cancelling(_) => "cancelling",
             AgentSessionState::AuthRequired(_) => "auth_required",
             AgentSessionState::StartFailed(_) => "start_failed",
             AgentSessionState::Broken(_) => "broken",
@@ -632,6 +872,80 @@ impl AgentSessionSlot {
             self.changed.notify_waiters();
         }
     }
+
+    fn commit_connection_loss(&self, startup_failure: AgentStartupFailure) {
+        self.commit_terminal_failure(startup_failure, AgentSessionFailure::transport_lost());
+    }
+
+    fn commit_terminal_failure(
+        &self,
+        startup_failure: AgentStartupFailure,
+        failure: AgentSessionFailure,
+    ) {
+        let delivery = {
+            let mut state = lock(&self.state);
+            let failure = match &*state {
+                AgentSessionState::Opening => {
+                    *state = AgentSessionState::StartFailed(startup_failure);
+                    self.changed.notify_waiters();
+                    return;
+                }
+                AgentSessionState::Ready(_)
+                | AgentSessionState::Active(_)
+                | AgentSessionState::Cancelling(_) => failure,
+                AgentSessionState::AuthRequired(_)
+                | AgentSessionState::StartFailed(_)
+                | AgentSessionState::Closed => return,
+                AgentSessionState::Broken(existing) => existing.clone(),
+            };
+            let (failure, control) = self.freeze_turn_registry(failure);
+            let delivery = control.map(|control| {
+                let cleanup = control.prepare_terminal_delivery(failure.clone());
+                (control, cleanup)
+            });
+            *state = AgentSessionState::Broken(failure.clone());
+            self.changed.notify_waiters();
+            delivery
+        };
+        self.turn_requested.notify_waiters();
+        #[cfg(feature = "agent-test-support")]
+        if delivery.is_some()
+            && let Some(gate) = lock(&self.turn_terminal_delivery_gate).clone()
+        {
+            gate.wait_blocking();
+            gate.mark_completed();
+        }
+        if let Some((control, cleanup)) = delivery {
+            control.finish_terminal_delivery(cleanup);
+        }
+    }
+
+    fn freeze_turn_registry(
+        &self,
+        failure: AgentSessionFailure,
+    ) -> (AgentSessionFailure, Option<Arc<AgentTurnControl>>) {
+        let mut registry = lock(&self.turn_registry);
+        match &mut *registry {
+            AgentTurnRegistry::Terminal(existing) => (existing.clone(), None),
+            AgentTurnRegistry::Open {
+                request, control, ..
+            } => {
+                let queued = request.take().map(AgentTurnRequest::into_control);
+                let active = control.take().and_then(|control| control.upgrade());
+                let active = queued.or(active);
+                *registry = AgentTurnRegistry::Terminal(failure.clone());
+                (failure, active)
+            }
+        }
+    }
+
+    pub(crate) fn commit_transport_loss(&self) {
+        self.commit_connection_loss(AgentStartupFailure::start(
+            "spawn_failed",
+            "spawn",
+            "agent connection closed",
+        ));
+    }
 }
 
 impl ActAdmissionLease {
@@ -651,6 +965,13 @@ impl Drop for ActAdmissionLease {
 }
 
 impl SessionTurnLease {
+    pub(crate) fn cancelling_marker(&self) -> SessionTurnMarker {
+        SessionTurnMarker {
+            slot: Arc::clone(&self.slot),
+            session: Arc::clone(&self.session),
+        }
+    }
+
     pub(crate) fn release(mut self) {
         self.release_inner();
     }
@@ -662,12 +983,26 @@ impl SessionTurnLease {
         let mut state = lock(&self.slot.state);
         if matches!(
             &*state,
-            AgentSessionState::Active(current) if Arc::ptr_eq(current, &self.session)
+            AgentSessionState::Active(current) | AgentSessionState::Cancelling(current)
+                if Arc::ptr_eq(current, &self.session)
         ) {
             *state = AgentSessionState::Ready(Arc::clone(&self.session));
             self.slot.changed.notify_waiters();
         }
         self.claimed = false;
+    }
+}
+
+impl SessionTurnMarker {
+    pub(crate) fn mark_cancelling(self) {
+        let mut state = lock(&self.slot.state);
+        if matches!(
+            &*state,
+            AgentSessionState::Active(current) if Arc::ptr_eq(current, &self.session)
+        ) {
+            *state = AgentSessionState::Cancelling(Arc::clone(&self.session));
+            self.slot.changed.notify_waiters();
+        }
     }
 }
 
@@ -768,11 +1103,28 @@ async fn open_agent_session(
     let opening_phase_for_connection = Arc::clone(&opening_phase);
     let prompt_response_provenance = Arc::new(PromptResponseProvenance::default());
     let provenance_for_handler = Arc::clone(&prompt_response_provenance);
+    let slot_for_permissions = slot.clone();
     let stdout = AcpFrameLimitedReader::new(stdout, Arc::clone(&frame_limit_exceeded));
     let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
     let connection = Client
         .builder()
         .name("troupe")
+        .on_receive_request(
+            async move |request: RequestPermissionRequest, responder, _connection| {
+                let Some(slot) = slot_for_permissions.upgrade() else {
+                    return responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ));
+                };
+                let Some(control) = slot.submitted_turn(&request.session_id) else {
+                    return responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ));
+                };
+                control.respond_permission(&request, responder)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .on_receive_dispatch(
             async move |dispatch: Dispatch, _connection: ConnectionTo<Agent>| match dispatch {
                 Dispatch::Response(result, router) => {
@@ -815,6 +1167,8 @@ async fn open_agent_session(
                                 session_id,
                                 &prompt_response_provenance,
                                 &cancellation_for_connection,
+                                #[cfg(feature = "agent-test-support")]
+                                command_for_connection.turn_gates.clone(),
                             )
                             .await;
                         }
@@ -853,7 +1207,7 @@ async fn open_agent_session(
         if frame_limit_exceeded.load(Ordering::Acquire) {
             commit_acp_resource_limit(&slot, OpeningPhase::load(&opening_phase).name());
         } else {
-            commit_failure(
+            commit_connection_loss(
                 &slot,
                 AgentStartupFailure::start(
                     "spawn_failed",
@@ -1300,6 +1654,12 @@ async fn wait_for_stderr_drain(stderr_drain: Option<tokio::task::JoinHandle<()>>
 fn commit_failure(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
     if let Some(slot) = slot.upgrade() {
         slot.commit_failure(failure);
+    }
+}
+
+fn commit_connection_loss(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
+    if let Some(slot) = slot.upgrade() {
+        slot.commit_connection_loss(failure);
     }
 }
 

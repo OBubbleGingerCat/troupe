@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "agent-test-support")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "agent-test-support")]
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 #[cfg(feature = "agent-test-support")]
 use tokio::sync::Notify;
 
@@ -311,6 +311,8 @@ pub(crate) struct ResolvedAgentCommand {
     pub(crate) configuration_ready_gate: Option<Arc<TestOpeningGate>>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) mcp_ready_gate: Option<Arc<TestOpeningGate>>,
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) turn_gates: TestTurnGates,
 }
 
 #[derive(Clone, Debug)]
@@ -396,6 +398,8 @@ fn production_command(
         configuration_ready_gate: None,
         #[cfg(feature = "agent-test-support")]
         mcp_ready_gate: None,
+        #[cfg(feature = "agent-test-support")]
+        turn_gates: TestTurnGates::default(),
     })
 }
 
@@ -407,7 +411,19 @@ struct TestLaunch {
     opening_gate: Option<Arc<TestOpeningGate>>,
     configuration_ready_gate: Option<Arc<TestOpeningGate>>,
     mcp_ready_gate: Option<Arc<TestOpeningGate>>,
+    turn_gates: TestTurnGates,
     legacy_mode_id: Option<String>,
+}
+
+#[cfg(feature = "agent-test-support")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TestTurnGates {
+    pub(crate) registration: Option<Arc<TestOpeningGate>>,
+    pub(crate) intake: Option<Arc<TestOpeningGate>>,
+    pub(crate) submission: Option<Arc<TestOpeningGate>>,
+    pub(crate) settlement: Option<Arc<TestOpeningGate>>,
+    pub(crate) terminal_delivery: Option<Arc<TestOpeningGate>>,
+    pub(crate) outcome: Option<Arc<TestOpeningGate>>,
 }
 
 #[cfg(feature = "agent-test-support")]
@@ -417,16 +433,20 @@ pub(crate) struct TestOpeningGate {
     released: AtomicBool,
     completed: AtomicBool,
     changed: Notify,
+    blocking_lock: Mutex<()>,
+    blocking_changed: Condvar,
 }
 
 #[cfg(feature = "agent-test-support")]
 impl TestOpeningGate {
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             arrived: AtomicBool::new(false),
             released: AtomicBool::new(false),
             completed: AtomicBool::new(false),
             changed: Notify::new(),
+            blocking_lock: Mutex::new(()),
+            blocking_changed: Condvar::new(),
         })
     }
 
@@ -444,13 +464,25 @@ impl TestOpeningGate {
     pub(crate) fn release(&self) {
         self.released.store(true, Ordering::Release);
         self.changed.notify_waiters();
+        self.blocking_changed.notify_all();
+    }
+
+    pub(crate) fn wait_blocking(&self) {
+        self.arrived.store(true, Ordering::Release);
+        let mut guard = lock(&self.blocking_lock);
+        while !self.released.load(Ordering::Acquire) {
+            guard = self
+                .blocking_changed
+                .wait(guard)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
     }
 
     pub(crate) fn mark_completed(&self) {
         self.completed.store(true, Ordering::Release);
     }
 
-    fn states(&self) -> (bool, bool) {
+    pub(crate) fn states(&self) -> (bool, bool) {
         (
             self.arrived.load(Ordering::Acquire),
             self.completed.load(Ordering::Acquire),
@@ -490,6 +522,7 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
             opening_gate: configured.opening_gate,
             configuration_ready_gate: configured.configuration_ready_gate,
             mcp_ready_gate: configured.mcp_ready_gate,
+            turn_gates: configured.turn_gates,
         }))
     }
 
@@ -513,6 +546,7 @@ pub(crate) fn set_test_launch(
         opening_gate: None,
         configuration_ready_gate: None,
         mcp_ready_gate: None,
+        turn_gates: TestTurnGates::default(),
         legacy_mode_id,
     });
 }
@@ -596,6 +630,192 @@ pub(crate) fn release_test_mcp_ready() -> pyo3::PyResult<()> {
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("MCP readiness is not held"))?;
     gate.release();
     Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_registration")]
+pub(crate) fn hold_test_turn_registration() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn registration",
+        )
+    })?;
+    launch.turn_gates.registration = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_registration")]
+pub(crate) fn release_test_turn_registration() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.registration.as_ref())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("turn registration is not held")
+        })?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_intake")]
+pub(crate) fn hold_test_turn_intake() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn intake",
+        )
+    })?;
+    launch.turn_gates.intake = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_intake")]
+pub(crate) fn release_test_turn_intake() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.intake.as_ref())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("turn intake is not held"))?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_submission")]
+pub(crate) fn hold_test_turn_submission() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn submission",
+        )
+    })?;
+    launch.turn_gates.submission = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_submission")]
+pub(crate) fn release_test_turn_submission() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.submission.as_ref())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("turn submission is not held"))?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_settlement")]
+pub(crate) fn hold_test_turn_settlement() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn settlement",
+        )
+    })?;
+    launch.turn_gates.settlement = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_settlement")]
+pub(crate) fn release_test_turn_settlement() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.settlement.as_ref())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("turn settlement is not held"))?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_terminal_delivery")]
+pub(crate) fn hold_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn terminal delivery",
+        )
+    })?;
+    launch.turn_gates.terminal_delivery = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_terminal_delivery")]
+pub(crate) fn release_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.terminal_delivery.as_ref())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("turn terminal delivery is not held")
+        })?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_outcome")]
+pub(crate) fn hold_test_turn_outcome() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn outcome",
+        )
+    })?;
+    launch.turn_gates.outcome = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_outcome")]
+pub(crate) fn release_test_turn_outcome() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.outcome.as_ref())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("turn outcome is not held"))?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_turn_gate_states")]
+pub(crate) fn turn_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    use pyo3::types::{PyDict, PyDictMethods};
+
+    let launch = lock(test_launch());
+    let snapshot = PyDict::new(py);
+    let launch = launch.as_ref().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("configure a test launch before reading gates")
+    })?;
+    for (name, gate) in [
+        ("registration", launch.turn_gates.registration.as_ref()),
+        ("intake", launch.turn_gates.intake.as_ref()),
+        ("submission", launch.turn_gates.submission.as_ref()),
+        ("settlement", launch.turn_gates.settlement.as_ref()),
+        (
+            "terminal_delivery",
+            launch.turn_gates.terminal_delivery.as_ref(),
+        ),
+        ("outcome", launch.turn_gates.outcome.as_ref()),
+    ] {
+        if let Some(gate) = gate {
+            let (arrived, completed) = gate.states();
+            let states = PyDict::new(py);
+            states.set_item("arrived", arrived)?;
+            states.set_item("completed", completed)?;
+            snapshot.set_item(name, states)?;
+        }
+    }
+    Ok(snapshot.into_any().unbind())
 }
 
 #[cfg(feature = "agent-test-support")]

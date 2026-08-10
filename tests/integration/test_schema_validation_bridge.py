@@ -658,7 +658,7 @@ def test_concurrent_submissions_are_serialized_within_one_result_slot(
     assert sorted(row["is_error"] for row in tool_events) == [False, True]
 
 
-def test_authoritative_settlement_closes_the_actual_callback_bridge(
+def test_authoritative_settlement_cancels_the_actual_callback_bridge(
     tmp_path: Path,
 ) -> None:
     events, workspace = _configure_agent(

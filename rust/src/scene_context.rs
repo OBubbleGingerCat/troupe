@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::actor_registry::ProductionState;
+use crate::agent_turn::AgentTurnControl;
 use crate::mailbox::CueOperation;
 use crate::python_task::{
     ProvisionalPermitGuard, ProvisionalPermitStack, TaskFactoryWrapper, TaskLineage,
@@ -546,6 +547,7 @@ pub(crate) struct CuedScope {
     actor_identity: usize,
     cue_id: Py<PyString>,
     effect_counter: Mutex<Py<PyInt>>,
+    agent_turns: Mutex<Vec<Weak<AgentTurnControl>>>,
     active: AtomicBool,
 }
 
@@ -564,6 +566,7 @@ impl CuedScope {
             actor_identity,
             cue_id,
             effect_counter: Mutex::new(zero),
+            agent_turns: Mutex::new(Vec::new()),
             active: AtomicBool::new(true),
         }))
     }
@@ -588,13 +591,34 @@ impl CuedScope {
                         .expect("zero must be a Python int")
                         .unbind(),
                 ),
+                agent_turns: Mutex::new(Vec::new()),
                 active: AtomicBool::new(true),
             })
         })
     }
 
     pub(crate) fn close_inline(&self) {
-        self.active.store(false, Ordering::Release);
+        let turns = {
+            let mut registered = lock(&self.agent_turns);
+            self.active.store(false, Ordering::Release);
+            registered
+                .drain(..)
+                .filter_map(|turn| turn.upgrade())
+                .collect::<Vec<_>>()
+        };
+        for turn in turns {
+            turn.request_cancel();
+        }
+    }
+
+    pub(crate) fn register_agent_turn(&self, turn: &Arc<AgentTurnControl>) -> bool {
+        let mut registered = lock(&self.agent_turns);
+        if !self.active.load(Ordering::Acquire) {
+            return false;
+        }
+        registered.retain(|existing| existing.strong_count() != 0);
+        registered.push(Arc::downgrade(turn));
+        true
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -1304,6 +1328,7 @@ mod tests {
                 actor_identity: 1,
                 cue_id: PyString::new(py, "scene-effect-digit-limit-cue0").unbind(),
                 effect_counter: Mutex::new(huge),
+                agent_turns: Mutex::new(Vec::new()),
                 active: AtomicBool::new(true),
             };
             assert_eq!(
@@ -1895,6 +1920,7 @@ mod tests {
                 actor_identity: 11,
                 cue_id: PyString::new(py, "scene-effect-counter-cue9").unbind(),
                 effect_counter: Mutex::new(seed),
+                agent_turns: Mutex::new(Vec::new()),
                 active: AtomicBool::new(true),
             });
             let _: &Mutex<Py<PyInt>> = &cued.effect_counter;
@@ -1956,6 +1982,7 @@ mod tests {
                     actor_identity: 12,
                     cue_id: cue_id.unbind(),
                     effect_counter: Mutex::new(counter.unbind()),
+                    agent_turns: Mutex::new(Vec::new()),
                     active: AtomicBool::new(true),
                 });
                 let driver = Py::new(py, ScopeDriver::new_cued_for_test(Arc::clone(&cued)))?;

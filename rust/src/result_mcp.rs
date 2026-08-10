@@ -95,6 +95,7 @@ struct ResultSlot {
     operation_id: Uuid,
     turn_index: u64,
     state: Mutex<ResultSlotState>,
+    failure: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -184,6 +185,70 @@ pub(crate) enum ResultAtSettlement {
     Unavailable,
 }
 
+pub(crate) struct PreparedResultSettlement {
+    outcome: Option<ResultAtSettlement>,
+    validation_bridge: Option<Arc<PythonSchemaValidationBridge>>,
+}
+
+impl PreparedResultSettlement {
+    pub(crate) fn take_outcome(&mut self) -> ResultAtSettlement {
+        self.outcome
+            .take()
+            .expect("a prepared result settlement has one outcome")
+    }
+
+    pub(crate) fn take_committed_failure(&mut self) -> Option<ResultFailureAtHandoff> {
+        let outcome = self.outcome.take()?;
+        match outcome {
+            ResultAtSettlement::Rejected {
+                issues,
+                invalid_calls,
+                truncated,
+            } if invalid_calls > MAX_REPAIRABLE_INVALID_CALLS => {
+                Some(ResultFailureAtHandoff::Rejected {
+                    issues,
+                    invalid_calls,
+                    truncated,
+                })
+            }
+            ResultAtSettlement::SchemaCallbackFailed(error) => {
+                Some(ResultFailureAtHandoff::SchemaCallbackFailed(error))
+            }
+            outcome => {
+                self.outcome = Some(outcome);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn discard_outcome(&mut self) {
+        let _ = self.outcome.take();
+    }
+
+    pub(crate) fn finish(self) {
+        if let Some(validation_bridge) = self.validation_bridge {
+            validation_bridge.close();
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ResultFailureAtHandoff {
+    Rejected {
+        issues: Vec<ValidationIssue>,
+        invalid_calls: u8,
+        truncated: bool,
+    },
+    SchemaCallbackFailed(PyErr),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResultCancelHandoff {
+    Cancelled,
+    FailurePreceded,
+    Unavailable,
+}
+
 #[derive(Debug)]
 pub(crate) enum ResultSubmissionStart {
     Completed(ResultSubmission),
@@ -257,6 +322,7 @@ impl ResultRouteEpoch {
                 invalid_calls: 0,
                 last_invalid: None,
             }),
+            failure: CancellationToken::new(),
         });
         epoch.active = Some((arm_generation, Arc::clone(&slot)));
         Ok(ArmedResultLease {
@@ -307,13 +373,20 @@ impl ResultRouteEpoch {
         }
     }
 
-    fn settle(&self, arm_generation: u64, expected: &Arc<ResultSlot>) -> ResultAtSettlement {
+    fn prepare_settlement(
+        &self,
+        arm_generation: u64,
+        expected: &Arc<ResultSlot>,
+    ) -> PreparedResultSettlement {
         let mut epoch = lock(&self.state);
         let matches = epoch.active.as_ref().is_some_and(|(generation, slot)| {
             *generation == arm_generation && Arc::ptr_eq(slot, expected)
         });
         if !matches {
-            return ResultAtSettlement::Unavailable;
+            return PreparedResultSettlement {
+                outcome: Some(ResultAtSettlement::Unavailable),
+                validation_bridge: None,
+            };
         }
         let (state, validation_bridge) = {
             let mut state = lock(&expected.state);
@@ -328,11 +401,106 @@ impl ResultRouteEpoch {
         };
         epoch.active = None;
         drop(epoch);
+        PreparedResultSettlement {
+            outcome: Some(result_at_settlement(state)),
+            validation_bridge,
+        }
+    }
 
-        let outcome = result_at_settlement(state);
-        if let Some(validation_bridge) = validation_bridge {
+    fn begin_cancellation(
+        &self,
+        arm_generation: u64,
+        expected: &Arc<ResultSlot>,
+    ) -> ResultCancelHandoff {
+        let epoch = lock(&self.state);
+        let matches = epoch.active.as_ref().is_some_and(|(generation, slot)| {
+            *generation == arm_generation && Arc::ptr_eq(slot, expected)
+        });
+        if epoch.revoked || !matches {
+            return ResultCancelHandoff::Unavailable;
+        }
+        let mut bridge_to_close = None;
+        let outcome = {
+            let mut state = lock(&expected.state);
+            match &mut *state {
+                ResultSlotState::Awaiting {
+                    validation_bridge, ..
+                } => {
+                    bridge_to_close = validation_bridge.as_ref().map(Arc::clone);
+                    if let Some(validation_bridge) = validation_bridge {
+                        validation_bridge.begin_close();
+                    }
+                    *state = ResultSlotState::Settling {
+                        callback_error: None,
+                    };
+                    ResultCancelHandoff::Cancelled
+                }
+                ResultSlotState::Accepted(_) => {
+                    *state = ResultSlotState::Settling {
+                        callback_error: None,
+                    };
+                    ResultCancelHandoff::Cancelled
+                }
+                ResultSlotState::Rejected { .. }
+                | ResultSlotState::Settling {
+                    callback_error: Some(_),
+                } => ResultCancelHandoff::FailurePreceded,
+                ResultSlotState::Settling {
+                    callback_error: None,
+                } => ResultCancelHandoff::Cancelled,
+                ResultSlotState::Disarmed => ResultCancelHandoff::Unavailable,
+            }
+        };
+        drop(epoch);
+        if let Some(validation_bridge) = bridge_to_close {
             validation_bridge.close();
         }
+        outcome
+    }
+
+    fn take_failure_for_handoff(
+        &self,
+        arm_generation: u64,
+        expected: &Arc<ResultSlot>,
+    ) -> Option<ResultFailureAtHandoff> {
+        let epoch = lock(&self.state);
+        let matches = epoch.active.as_ref().is_some_and(|(generation, slot)| {
+            *generation == arm_generation && Arc::ptr_eq(slot, expected)
+        });
+        if epoch.revoked || !matches {
+            return None;
+        }
+        let mut state = lock(&expected.state);
+        let outcome = match &mut *state {
+            ResultSlotState::Rejected { .. } => {
+                let ResultSlotState::Rejected {
+                    issues,
+                    invalid_calls,
+                    truncated,
+                } = std::mem::replace(
+                    &mut *state,
+                    ResultSlotState::Settling {
+                        callback_error: None,
+                    },
+                )
+                else {
+                    unreachable!("the rejected result state was matched")
+                };
+                Some(ResultFailureAtHandoff::Rejected {
+                    issues,
+                    invalid_calls,
+                    truncated,
+                })
+            }
+            ResultSlotState::Settling { callback_error } => callback_error
+                .take()
+                .map(ResultFailureAtHandoff::SchemaCallbackFailed),
+            ResultSlotState::Awaiting { .. }
+            | ResultSlotState::Accepted(_)
+            | ResultSlotState::Disarmed => None,
+        };
+        drop(state);
+        drop(epoch);
         outcome
     }
 
@@ -680,6 +848,11 @@ impl ResultRequestLease {
         if let Some(validation_bridge) = bridge_to_close {
             validation_bridge.close();
         }
+        if matches!(outcome, Ok(ResultSubmission::Rejected { .. }))
+            && let Some((_, slot)) = &self.active_result
+        {
+            slot.failure.cancel();
+        }
         outcome.unwrap_or_else(|outcome| outcome)
     }
 
@@ -742,6 +915,11 @@ impl ResultRequestLease {
         if let Some(validation_bridge) = bridge_to_close {
             validation_bridge.close();
         }
+        if matches!(outcome, Ok(ResultSubmission::SchemaCallbackFailed))
+            && let Some((_, slot)) = &self.active_result
+        {
+            slot.failure.cancel();
+        }
         outcome.unwrap_or_else(|outcome| outcome)
     }
 }
@@ -776,12 +954,70 @@ impl ValidatedResultCandidate {
 }
 
 impl ArmedResultLease {
+    #[cfg(test)]
+    pub(crate) fn terminal_failure_for_test(failure: ResultFailureAtHandoff) -> Self {
+        let arm_generation = 1;
+        let route_epoch = ResultRouteEpoch::new(1);
+        let state = match failure {
+            ResultFailureAtHandoff::Rejected {
+                issues,
+                invalid_calls,
+                truncated,
+            } => ResultSlotState::Rejected {
+                issues,
+                invalid_calls,
+                truncated,
+            },
+            ResultFailureAtHandoff::SchemaCallbackFailed(error) => ResultSlotState::Settling {
+                callback_error: Some(error),
+            },
+        };
+        let slot = Arc::new(ResultSlot {
+            session_generation: 1,
+            arm_generation,
+            operation_id: Uuid::from_u128(1),
+            turn_index: 1,
+            state: Mutex::new(state),
+            failure: CancellationToken::new(),
+        });
+        {
+            let mut epoch = lock(&route_epoch.state);
+            epoch.next_arm_generation = arm_generation;
+            epoch.active = Some((arm_generation, Arc::clone(&slot)));
+        }
+        Self {
+            route_epoch,
+            arm_generation,
+            slot,
+            armed: true,
+        }
+    }
+
     pub(crate) fn operation_id(&self) -> Uuid {
         self.slot.operation_id
     }
 
     pub(crate) fn turn_index(&self) -> u64 {
         self.slot.turn_index
+    }
+
+    pub(crate) fn failure_notification(&self) -> CancellationToken {
+        self.slot.failure.clone()
+    }
+
+    pub(crate) fn begin_cancellation(&mut self) -> ResultCancelHandoff {
+        if !self.armed {
+            return ResultCancelHandoff::Unavailable;
+        }
+        self.route_epoch
+            .begin_cancellation(self.arm_generation, &self.slot)
+    }
+
+    pub(crate) fn take_failure_for_handoff(&mut self) -> Option<ResultFailureAtHandoff> {
+        self.armed.then(|| {
+            self.route_epoch
+                .take_failure_for_handoff(self.arm_generation, &self.slot)
+        })?
     }
 
     #[cfg(test)]
@@ -795,14 +1031,26 @@ impl ArmedResultLease {
         }
     }
 
-    pub(crate) fn settle(mut self) -> ResultAtSettlement {
-        let outcome = if self.armed {
-            self.route_epoch.settle(self.arm_generation, &self.slot)
+    #[cfg(test)]
+    pub(crate) fn settle(self) -> ResultAtSettlement {
+        let mut prepared = self.prepare_settlement();
+        let outcome = prepared.take_outcome();
+        prepared.finish();
+        outcome
+    }
+
+    pub(crate) fn prepare_settlement(mut self) -> PreparedResultSettlement {
+        let prepared = if self.armed {
+            self.route_epoch
+                .prepare_settlement(self.arm_generation, &self.slot)
         } else {
-            ResultAtSettlement::Unavailable
+            PreparedResultSettlement {
+                outcome: Some(ResultAtSettlement::Unavailable),
+                validation_bridge: None,
+            }
         };
         self.armed = false;
-        outcome
+        prepared
     }
 
     pub(crate) fn disarm(mut self) {
@@ -2533,6 +2781,33 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use crate::act_schema::{CompiledActSchema, compile_act_schema};
+
+    #[test]
+    fn repairable_invalid_result_is_not_a_committed_handoff_failure() {
+        let issue = ValidationIssue {
+            path: "/value".to_owned(),
+            code: "invalid_type",
+            message: "expected int64".to_owned(),
+        };
+        let mut prepared = PreparedResultSettlement {
+            outcome: Some(ResultAtSettlement::Rejected {
+                issues: vec![issue.clone()],
+                invalid_calls: 1,
+                truncated: false,
+            }),
+            validation_bridge: None,
+        };
+
+        assert!(prepared.take_committed_failure().is_none());
+        assert!(matches!(
+            prepared.take_outcome(),
+            ResultAtSettlement::Rejected {
+                issues,
+                invalid_calls: 1,
+                truncated: false,
+            } if issues == vec![issue]
+        ));
+    }
 
     struct PendingConnection {
         route: Arc<ResultRoute>,

@@ -438,6 +438,8 @@ def test_result_rejection_precedes_a_correlated_prompt_error(
                 actor_kwargs={},
             )
             assert await handle.cue({}) == ()
+            while handle._agent_state_for_test() == "cancelling":  # type: ignore[attr-defined]
+                await asyncio.sleep(0)
             states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
             runtime.request_shutdown()
 
@@ -451,6 +453,53 @@ def test_result_rejection_precedes_a_correlated_prompt_error(
     tool_events = [row for row in _events(events) if row["event"] == "tool_result_received"]
     assert len(tool_events) == invalid_calls
     assert all(row["is_error"] is True for row in tool_events)
+
+
+def test_transport_loss_precedes_a_repairable_invalid_result(tmp_path: Path) -> None:
+    events, workspace = _launch(tmp_path, "act_invalid_then_transport_loss")
+    captured: list[BaseException] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class InvalidActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                await self.act(
+                    script="Return one invalid value, then lose the transport.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="integer result"
+                        )
+                    },
+                )
+            except (troupe.AgentResultError, troupe.AgentSessionBrokenError) as error:
+                captured.append(error)
+            return ()
+
+    class InvalidProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                InvalidActor,
+                name="repairable-invalid-before-transport-loss",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            assert await handle.cue({}) == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    _run(runtime, InvalidProduction([]))
+
+    assert len(captured) == 1
+    assert type(captured[0]) is troupe.AgentSessionBrokenError
+    assert captured[0].code == "transport_lost"  # type: ignore[attr-defined]
+    assert states == ["broken"]
+    tool_events = [row for row in _events(events) if row["event"] == "tool_result_received"]
+    assert len(tool_events) == 1
+    assert tool_events[0]["is_error"] is True
+    assert any(row["event"] == "transport_closing_after_invalid" for row in _events(events))
 
 
 def test_schema_callback_failure_precedes_a_correlated_prompt_error(
@@ -497,6 +546,8 @@ def test_schema_callback_failure_precedes_a_correlated_prompt_error(
                 actor_kwargs={},
             )
             assert await handle.cue({}) == ()
+            while handle._agent_state_for_test() == "cancelling":  # type: ignore[attr-defined]
+                await asyncio.sleep(0)
             states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
             runtime.request_shutdown()
 

@@ -94,6 +94,10 @@ impl AgentSupervisor {
         };
         let spec = launch_spec(profile.agent);
         let slot = AgentSessionSlot::new();
+        #[cfg(feature = "agent-test-support")]
+        slot.install_test_turn_registration_gate(command.turn_gates.registration.clone());
+        #[cfg(feature = "agent-test-support")]
+        slot.install_test_turn_terminal_delivery_gate(command.turn_gates.terminal_delivery.clone());
         self.track(&slot);
         spawn_opening(
             &slot,

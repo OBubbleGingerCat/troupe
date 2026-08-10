@@ -106,6 +106,24 @@ impl ActorHandle {
     }
 
     #[cfg(feature = "agent-test-support")]
+    fn _agent_has_queued_turn_for_test(&self, py: Python<'_>) -> PyResult<bool> {
+        self.capability(py)?
+            .agent_session()
+            .map(|session| session.has_queued_turn_for_test())
+            .ok_or_else(|| PyRuntimeError::new_err("Actor has no agent session"))
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_fail_transport_for_test(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self
+            .capability(py)?
+            .agent_session()
+            .ok_or_else(|| PyRuntimeError::new_err("Actor has no agent session"))?;
+        py.detach(move || session.commit_transport_loss());
+        Ok(())
+    }
+
+    #[cfg(feature = "agent-test-support")]
     fn _agent_ready_for_test<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let session = self
             .capability(py)?

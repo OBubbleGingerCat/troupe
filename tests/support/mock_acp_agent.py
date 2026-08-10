@@ -17,6 +17,7 @@ MCP_REVISION = "2025-11-25"
 RESULT_TOOL = "troupe_submit_result"
 MCP_BODY_MAX_BYTES = 8 * 1024 * 1024
 ACP_FRAME_MAX_BYTES = 16 * 1024 * 1024
+_OUTPUT_LOCK = threading.Lock()
 
 
 def _record(path: Path, event: str, **details: object) -> None:
@@ -44,13 +45,14 @@ def _response(
         for _ in range(frame_depth - 3):
             nested = {"nested": nested}
         result = {**result, "_meta": nested}
-    print(
-        json.dumps(
-            {"jsonrpc": "2.0", "id": request_id, "result": result},
-            separators=(",", ":"),
-        ),
-        flush=True,
-    )
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": request_id, "result": result},
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
 
 
 def _scenario_depth(scenario: str, prefix: str) -> int | None:
@@ -69,17 +71,34 @@ def _error(
     error = {"code": code, "message": message}
     if data is not None:
         error["data"] = data
-    print(
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": error,
-            },
-            separators=(",", ":"),
-        ),
-        flush=True,
-    )
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": error,
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+
+def _request(request_id: object, method: str, params: object) -> None:
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params,
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
 
 
 def _write_oversized_acp_frame() -> None:
@@ -481,6 +500,9 @@ def main() -> int:
     current_session_id: str | None = None
     prompt_turn = 0
     remembered_token: str | None = None
+    pending_prompt_id: object | None = None
+    pending_permission_id: object | None = None
+    background_threads: list[threading.Thread] = []
 
     for raw_line in sys.stdin:
         request = json.loads(raw_line)
@@ -488,6 +510,25 @@ def main() -> int:
         request_id = request.get("id")
         params = request.get("params", {})
         _record(args.events, "acp_request", method=method)
+
+        if method is None and request_id == pending_permission_id:
+            assert request.get("result") == {"outcome": {"outcome": "cancelled"}}, request
+            assert pending_prompt_id is not None
+            assert args.release is not None
+            _record(args.events, "permission_cancelled_response_received")
+
+            def settle_after_permission(request_id: object = pending_prompt_id) -> None:
+                assert args.release is not None
+                with args.release.open("rb", buffering=0) as release:
+                    assert release.read(1) == b"1"
+                _response(request_id, {"stopReason": "cancelled"})
+                _record(args.events, "cancel_settled", turn=1)
+
+            settlement = threading.Thread(target=settle_after_permission)
+            settlement.start()
+            background_threads.append(settlement)
+            pending_permission_id = None
+            continue
 
         if method == "initialize":
             if args.scenario == "oversized_acp_frame":
@@ -625,6 +666,24 @@ def main() -> int:
                     ),
                 },
             )
+            if args.scenario in {"exit_before_turn_intake", "idle_clean_eof"}:
+                assert args.release is not None
+
+                def terminate_after_release() -> None:
+                    assert args.release is not None
+                    with args.release.open("rb", buffering=0) as release:
+                        assert release.read(1) == b"1"
+                    if args.scenario == "exit_before_turn_intake":
+                        _record(args.events, "process_exiting_before_turn_intake")
+                        os._exit(0)
+                    _record(args.events, "idle_stdout_closing")
+                    with _OUTPUT_LOCK:
+                        os.close(sys.stdout.fileno())
+                    _record(args.events, "idle_stdout_closed")
+
+                terminal = threading.Thread(target=terminate_after_release)
+                terminal.start()
+                background_threads.append(terminal)
             if args.scenario == "mcp_before_configuration":
                 assert pending_mcp_server is not None
                 _discover_mcp(
@@ -639,8 +698,14 @@ def main() -> int:
                 "act_body_limits",
                 "act_custom_correction",
                 "act_callback_fault_then_request_error",
+                "act_cancel_after_result_then_reuse",
+                "act_cancel_during_callback_then_reuse",
+                "act_cancel_permission_then_reuse",
+                "act_cancel_then_reuse",
+                "act_cancel_transport_lost",
                 "act_digit_limit_integer",
                 "act_invalid_then_request_error",
+                "act_invalid_then_transport_loss",
                 "act_malformed_prompt_response",
                 "act_ninth_invalid_then_request_error",
                 "act_no_result",
@@ -650,6 +715,7 @@ def main() -> int:
                 "act_request_error_parse_collision_then_success",
                 "act_request_error_transport_collision_then_success",
                 "act_result_matrix",
+                "act_result_rejected_then_reuse",
                 "act_settle_during_callback",
                 "act_submit_results",
                 "act_submit_concurrent",
@@ -670,6 +736,73 @@ def main() -> int:
                 session_id=params["sessionId"],
                 prompt=prompt_text,
             )
+            cancellation_scenarios = {
+                "act_cancel_after_result_then_reuse",
+                "act_cancel_during_callback_then_reuse",
+                "act_cancel_permission_then_reuse",
+                "act_cancel_then_reuse",
+                "act_cancel_transport_lost",
+                "act_result_rejected_then_reuse",
+            }
+            if args.scenario in cancellation_scenarios:
+                if prompt_turn == 1:
+                    pending_prompt_id = request_id
+                    if args.scenario == "act_cancel_after_result_then_reuse":
+                        accepted = _submit_result(
+                            current_mcp_server,
+                            900,
+                            {"value": 1},
+                        )
+                        assert accepted["result"]["isError"] is False, accepted
+                        _record(args.events, "result_submitted", turn=1, value={"value": 1})
+                    elif args.scenario == "act_cancel_during_callback_then_reuse":
+                        def submit_callback_value() -> None:
+                            response = _submit_result(
+                                current_mcp_server,
+                                901,
+                                {"value": 1},
+                            )
+                            _record(
+                                args.events,
+                                "callback_tool_result_finished",
+                                is_error=response["result"]["isError"],
+                                text=response["result"]["content"][0]["text"],
+                            )
+
+                        submission = threading.Thread(target=submit_callback_value)
+                        submission.start()
+                        background_threads.append(submission)
+                    elif args.scenario == "act_result_rejected_then_reuse":
+                        def submit_invalid_values() -> None:
+                            for index in range(9):
+                                response = _submit_result(
+                                    current_mcp_server,
+                                    910 + index,
+                                    {"value": "invalid"},
+                                )
+                                assert response["result"]["isError"] is True, response
+                                _record(
+                                    args.events,
+                                    "invalid_result_submitted",
+                                    invalid_call=index + 1,
+                                    text=response["result"]["content"][0]["text"],
+                                )
+
+                        submission = threading.Thread(target=submit_invalid_values)
+                        submission.start()
+                        background_threads.append(submission)
+                    continue
+
+                value = {"value": prompt_turn}
+                accepted = _submit_result(
+                    current_mcp_server,
+                    950 + prompt_turn,
+                    value,
+                )
+                assert accepted["result"]["isError"] is False, accepted
+                _record(args.events, "result_submitted", turn=prompt_turn, value=value)
+                _response(request_id, {"stopReason": "end_turn"})
+                continue
             if args.scenario == "act_oversized_acp_frame":
                 _record(args.events, "oversized_acp_frame_sent")
                 _write_oversized_acp_frame()
@@ -691,6 +824,22 @@ def main() -> int:
                 _record(args.events, "turn_ended_without_result", turn=prompt_turn)
                 _response(request_id, {"stopReason": "end_turn"})
                 continue
+            if args.scenario == "act_invalid_then_transport_loss":
+                rejected = _submit_result(
+                    current_mcp_server,
+                    699,
+                    {"value": "not-an-integer"},
+                )
+                assert rejected["result"]["isError"] is True, rejected
+                _record(
+                    args.events,
+                    "tool_result_received",
+                    index=0,
+                    is_error=True,
+                    text=rejected["result"]["content"][0]["text"],
+                )
+                _record(args.events, "transport_closing_after_invalid")
+                return 0
             request_error_scenarios = {
                 "act_callback_fault_then_request_error",
                 "act_invalid_then_request_error",
@@ -1034,6 +1183,62 @@ def main() -> int:
                     )
                 },
             )
+        elif method == "session/cancel" and args.scenario in {
+            "act_cancel_after_result_then_reuse",
+            "act_cancel_during_callback_then_reuse",
+            "act_cancel_permission_then_reuse",
+            "act_cancel_then_reuse",
+            "act_cancel_transport_lost",
+            "act_result_rejected_then_reuse",
+        }:
+            assert params["sessionId"] == current_session_id
+            assert pending_prompt_id is not None
+            _record(args.events, "cancel_received", turn=1)
+
+            if args.scenario == "act_cancel_transport_lost":
+                _record(args.events, "transport_closing_after_cancel")
+                return 0
+
+            assert args.release is not None
+
+            if args.scenario == "act_cancel_permission_then_reuse":
+                pending_permission_id = "permission-after-cancel"
+                _request(
+                    pending_permission_id,
+                    "session/request_permission",
+                    {
+                        "sessionId": current_session_id,
+                        "toolCall": {
+                            "toolCallId": "cancelled-tool",
+                            "kind": "execute",
+                            "title": "Run a command",
+                        },
+                        "options": [
+                            {
+                                "optionId": "allow-once",
+                                "name": "Allow once",
+                                "kind": "allow_once",
+                            },
+                            {
+                                "optionId": "reject-once",
+                                "name": "Reject once",
+                                "kind": "reject_once",
+                            },
+                        ],
+                    },
+                )
+                continue
+
+            def settle_cancelled_turn(request_id: object = pending_prompt_id) -> None:
+                assert args.release is not None
+                with args.release.open("rb", buffering=0) as release:
+                    assert release.read(1) == b"1"
+                _response(request_id, {"stopReason": "cancelled"})
+                _record(args.events, "cancel_settled", turn=1)
+
+            settlement = threading.Thread(target=settle_cancelled_turn)
+            settlement.start()
+            background_threads.append(settlement)
         elif method == "session/set_mode":
             config["mode"] = params["modeId"]
             _record(
@@ -1099,6 +1304,8 @@ def main() -> int:
         else:
             _error(request_id, -32601, "Method not found")
 
+    for thread in background_threads:
+        thread.join()
     _record(args.events, "stdin_closed")
     return 0
 
