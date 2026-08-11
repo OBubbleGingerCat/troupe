@@ -47,12 +47,16 @@ def _configure_mock(
     events: Path,
     *,
     scenario: str = "ready",
+    provider: Literal["codex", "claude", "kimi"] | None = None,
     release: Path | None = None,
     legacy_mode_id: str | None = None,
     authoritative_prompt_error_codes: list[int] | None = None,
 ) -> None:
     args = [str(MOCK_AGENT), "--events", str(events), "--scenario", scenario]
-    if scenario.startswith("claude_"):
+    if provider is None:
+        provider = "claude" if scenario.startswith("claude_") else "codex"
+    args.extend(["--provider", provider])
+    if provider in {"claude", "kimi"}:
         args.extend(["--mcp-revision", "2025-11-25"])
     if release is not None:
         args.extend(["--release", str(release)])
@@ -1465,6 +1469,397 @@ def test_claude_cancel_racing_with_normal_end_turn_keeps_the_session(
     async def scenario() -> None:
         await asyncio.wait_for(
             asyncio.shield(runtime.run(ClaudeCancelRaceProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert observed == [{"value": 2}]
+    prompts = [row for row in _events(events) if row["event"] == "prompt_received"]
+    assert len(prompts) == 2
+    assert len({row["session_id"] for row in prompts}) == 1
+
+
+def test_kimi_adapter_handles_pinned_permissions_and_typed_updates(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, scenario="kimi_permission_matrix", provider="kimi")
+    observed: list[dict[str, object]] = []
+    runtime = _native()._Runtime()
+
+    class KimiPermissionActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            observed.append(
+                await self.act(
+                    script="Complete the task without human interaction.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the completed task value"
+                        )
+                    },
+                )
+            )
+            return ()
+
+    class KimiPermissionProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                KimiPermissionActor,
+                name="kimi-permissions",
+                agent_profile=_profile(workspace, agent="kimi"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            assert await handle.cue({}) == ()
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(KimiPermissionProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert observed == [{"value": 11}]
+    rows = _events(events)
+    responses = [
+        row for row in rows if row["event"] == "kimi_permission_response_received"
+    ]
+    assert [row["permission_case"] for row in responses] == [
+        "tool",
+        "question",
+        "plan_review",
+        "plan_options",
+        "unknown",
+        "ambiguous",
+    ]
+    assert [
+        row["config_id"] for row in rows if row["event"] == "config_applied"
+    ] == ["mode", "model", "thinking"]
+    assert [
+        row["update"] for row in rows if row["event"] == "kimi_typed_update_sent"
+    ] == [
+        "agent_thought_chunk",
+        "agent_message_chunk",
+        "tool_call",
+        "tool_call_update",
+        "available_commands_update",
+    ]
+
+
+def test_kimi_allows_absent_thinking_option_when_effort_is_unspecified(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(
+            events,
+            scenario="kimi_thinking_option_absent",
+            provider="kimi",
+        )
+
+        handle = troupe.Production([]).cast_actor(
+            SessionActor,
+            name="kimi-without-thinking-option",
+            agent_profile=_profile(workspace, agent="kimi", effort=None),
+            actor_args=(),
+            actor_kwargs={},
+        )
+        ready = await _ready(handle)
+
+        assert ready["state"] == "ready"
+        assert ready["model"] == "test-model"
+        assert ready["effort"] is None
+        assert [
+            row["config_id"]
+            for row in _events(events)
+            if row["event"] == "config_applied"
+        ] == ["mode", "model"]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "expected_config_ids"),
+    [
+        ("kimi_model_domain_invalid", ["mode"]),
+        ("kimi_thinking_domain_invalid", ["mode", "model"]),
+    ],
+)
+def test_kimi_rejects_invalid_model_and_thinking_domains_during_opening(
+    tmp_path: Path,
+    scenario_name: str,
+    expected_config_ids: list[str],
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(events, scenario=scenario_name, provider="kimi")
+
+        handle = troupe.Production([]).cast_actor(
+            SessionActor,
+            name=f"kimi-invalid-{scenario_name}",
+            agent_profile=_profile(workspace, agent="kimi"),
+            actor_args=(),
+            actor_kwargs={},
+        )
+        for _ in range(2):
+            with pytest.raises(troupe.AgentSessionStartError) as raised:
+                await _ready(handle)
+            assert raised.value.code == "configuration_invalid"
+            assert raised.value.phase == "configure"
+        assert [
+            row["config_id"]
+            for row in _events(events)
+            if row["event"] == "config_applied"
+        ] == expected_config_ids
+        assert not any(
+            row["event"] == "prompt_received" for row in _events(events)
+        )
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+@pytest.mark.parametrize(
+    "scenario_name",
+    ["kimi_agent_version_mismatch", "kimi_agent_info_missing"],
+)
+def test_kimi_rejects_an_unpinned_agent_info_version_during_initialize(
+    tmp_path: Path,
+    scenario_name: str,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(
+            events,
+            scenario=scenario_name,
+            provider="kimi",
+        )
+
+        handle = troupe.Production([]).cast_actor(
+            SessionActor,
+            name="kimi-version-mismatch",
+            agent_profile=_profile(workspace, agent="kimi"),
+            actor_args=(),
+            actor_kwargs={},
+        )
+        for _ in range(2):
+            with pytest.raises(troupe.AgentSessionStartError) as raised:
+                await _ready(handle)
+            assert raised.value.code == "protocol_incompatible"
+            assert raised.value.phase == "initialize"
+        assert not any(
+            row["event"] == "acp_request" and row["method"] == "session/new"
+            for row in _events(events)
+        )
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_kimi_rejects_unsupported_reverse_request_without_losing_the_turn(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        scenario="kimi_unsupported_reverse_request",
+        provider="kimi",
+    )
+    observed: list[dict[str, object]] = []
+    runtime = _native()._Runtime()
+
+    class KimiUnsupportedRequestActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            observed.append(
+                await self.act(
+                    script="Complete the task without a terminal reverse request.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the completed task value"
+                        )
+                    },
+                )
+            )
+            return ()
+
+    class KimiUnsupportedRequestProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                KimiUnsupportedRequestActor,
+                name="kimi-unsupported-reverse-request",
+                agent_profile=_profile(workspace, agent="kimi"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            assert await handle.cue({}) == ()
+            assert handle._agent_state_for_test() == "ready"  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(KimiUnsupportedRequestProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert observed == [{"value": 12}]
+    assert [
+        (row["code"], row["message"])
+        for row in _events(events)
+        if row["event"] == "kimi_unsupported_reverse_response_received"
+    ] == [(-32601, "Method not found")]
+
+
+def test_kimi_unsupported_reverse_request_after_terminal_breaks_the_session(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        scenario="kimi_terminal_then_unsupported_reverse_batch",
+        provider="kimi",
+    )
+    _native()._agent_test_hold_turn_response_flush()
+    runtime = _native()._Runtime()
+    results: list[dict[str, object]] = []
+    failures: list[troupe.AgentSessionBrokenError] = []
+
+    class KimiLateUnsupportedActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                results.append(
+                    await self.act(
+                        script="Remember the token alpha.",
+                        output_schema={
+                            "stored": troupe.act_schema.StrValue(
+                                description="the remembered token",
+                                choices=["alpha"],
+                            )
+                        },
+                    )
+                )
+            except troupe.AgentSessionBrokenError as error:
+                failures.append(error)
+            return ()
+
+    class KimiLateUnsupportedProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                KimiLateUnsupportedActor,
+                name="kimi-late-unsupported-reverse",
+                agent_profile=_profile(workspace, agent="kimi"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            first = asyncio.create_task(handle.cue({}))
+            await _wait_for_event(events, "terminal_then_unsupported_reverse_batch_sent")
+            for _ in range(1_000):
+                if _native()._agent_test_turn_gate_states()["response_flush"][
+                    "arrived"
+                ]:
+                    break
+                await asyncio.sleep(0)
+            assert _native()._agent_test_turn_gate_states()["response_flush"][
+                "arrived"
+            ]
+            for _ in range(1_000):
+                if first.done():
+                    break
+                await asyncio.sleep(0)
+            try:
+                assert not first.done()
+            finally:
+                _native()._agent_test_release_turn_response_flush()
+            assert await first == ()
+            assert await handle.cue({}) == ()
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(KimiLateUnsupportedProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert results == []
+    assert [failure.code for failure in failures] == [
+        "protocol_violation",
+        "protocol_violation",
+    ]
+
+
+def test_kimi_authoritative_cancelled_response_keeps_the_same_session(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settlement_release = workspace / "settlement.fifo"
+    os.mkfifo(settlement_release)
+    _configure_mock(
+        events,
+        scenario="act_cancel_then_reuse",
+        provider="kimi",
+        release=settlement_release,
+    )
+    observed: list[dict[str, object]] = []
+    runtime = _native()._Runtime()
+
+    class KimiCancelActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            observed.append(
+                await self.act(
+                    script=f"Complete Kimi turn {cue.instruction['turn']}.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the completed turn number"
+                        )
+                    },
+                )
+            )
+            return ()
+
+    class KimiCancelProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                KimiCancelActor,
+                name="kimi-cancel-reuse",
+                agent_profile=_profile(workspace, agent="kimi"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            first = asyncio.create_task(handle.cue({"turn": 1}))
+            await _wait_for_event(events, "prompt_received")
+            assert first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            await _wait_for_event(events, "cancel_received")
+            await _signal_fifo(settlement_release)
+            assert await handle.cue({"turn": 2}) == ()
+            assert handle._agent_state_for_test() == "ready"  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(KimiCancelProduction([]))),
             HARNESS_TIMEOUT,
         )
 

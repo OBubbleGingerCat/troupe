@@ -957,6 +957,7 @@ impl CompiledActSchema {
         let prompt = format!(
             "TROUPE_ACT_V1\nSCRIPT_JSON\n{encoded_script}\nRESULT_CONTRACT\n{contract}\n\
              Submit exactly one accepted result through troupe_submit_result.\n\
+             Pass value as a JSON object, not a JSON-encoded string.\n\
              Extra fields are forbidden. Correct validation errors within this same turn.\n\
              Assistant text is not a result channel."
         );

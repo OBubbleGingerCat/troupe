@@ -437,6 +437,110 @@ def _claude_permission_cases(
     ]
 
 
+def _kimi_permission_cases(
+    session_id: str,
+) -> list[tuple[str, dict[str, object], dict[str, object]]]:
+    def option(option_id: str, kind: str) -> dict[str, object]:
+        return {
+            "optionId": option_id,
+            "name": f"mock Kimi display text for {option_id}",
+            "kind": kind,
+        }
+
+    def request(
+        *,
+        title: str,
+        options: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            "sessionId": session_id,
+            "toolCall": {
+                "toolCallId": "kimi-permission-tool",
+                "kind": "other",
+                "status": "pending",
+                "title": title,
+            },
+            "options": options,
+        }
+
+    def selected(option_id: str) -> dict[str, object]:
+        return {"outcome": {"outcome": "selected", "optionId": option_id}}
+
+    return [
+        (
+            "tool",
+            request(
+                title="Bash",
+                options=[
+                    option("approve_always", "allow_always"),
+                    option("reject", "reject_once"),
+                    option("approve_once", "allow_once"),
+                ],
+            ),
+            selected("approve_once"),
+        ),
+        (
+            "question",
+            request(
+                title="AskUserQuestion",
+                options=[
+                    option("q0_opt_1", "allow_once"),
+                    option("q0_skip", "reject_once"),
+                    option("q0_opt_0", "allow_once"),
+                ],
+            ),
+            selected("q0_skip"),
+        ),
+        (
+            "plan_review",
+            request(
+                title="ExitPlanMode",
+                options=[
+                    option("plan_reject_and_exit", "reject_once"),
+                    option("plan_approve", "allow_once"),
+                    option("plan_revise", "reject_once"),
+                ],
+            ),
+            selected("plan_approve"),
+        ),
+        (
+            "plan_options",
+            request(
+                title="ExitPlanMode",
+                options=[
+                    option("plan_opt_1", "allow_once"),
+                    option("plan_revise", "reject_once"),
+                    option("plan_opt_0", "allow_once"),
+                    option("plan_reject_and_exit", "reject_once"),
+                ],
+            ),
+            selected("plan_opt_0"),
+        ),
+        (
+            "unknown",
+            request(
+                title="FutureKimiTool",
+                options=[
+                    option("future-allow", "allow_once"),
+                    option("future-reject", "reject_once"),
+                ],
+            ),
+            selected("future-reject"),
+        ),
+        (
+            "ambiguous",
+            request(
+                title="FutureKimiTool",
+                options=[
+                    option("reject-a", "reject_once"),
+                    option("reject-b", "reject_once"),
+                ],
+            ),
+            {"outcome": {"outcome": "cancelled"}},
+        ),
+    ]
+
+
 def _write_oversized_acp_frame() -> None:
     sys.stdout.buffer.write(b" " * (ACP_FRAME_MAX_BYTES + 1))
     sys.stdout.buffer.flush()
@@ -466,7 +570,11 @@ def _config_options(
     include_mode: bool = True,
 ) -> list[dict[str, object]]:
     effort_id = next(
-        (identifier for identifier in ("effort", "reasoning_effort") if identifier in values),
+        (
+            identifier
+            for identifier in ("effort", "reasoning_effort", "thinking")
+            if identifier in values
+        ),
         None,
     )
 
@@ -475,7 +583,13 @@ def _config_options(
             return values_
         return tuple(value for value in values_ if value != values[identifier])
 
-    mode_values = ("default", "plan") if "effort" in values else ("default", "agent")
+    mode_values = (
+        ("default", "plan", "auto", "yolo")
+        if "thinking" in values
+        else ("default", "plan")
+        if "effort" in values
+        else ("default", "agent")
+    )
     options = [
         _select_option(
             "mode",
@@ -838,6 +952,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--events", type=Path, required=True)
     parser.add_argument("--scenario", default="ready")
+    parser.add_argument("--provider", choices=("codex", "claude", "kimi"), default="codex")
     parser.add_argument("--release", type=Path)
     parser.add_argument("--results-json")
     parser.add_argument("--attempt-file", type=Path)
@@ -875,17 +990,21 @@ def main() -> int:
             start_new_session=args.scenario != "spawn_descendant",
         )
         _record(args.events, "descendant_started", descendant_pid=descendant.pid)
+    effort_id = {
+        "codex": "reasoning_effort",
+        "claude": "effort",
+        "kimi": "thinking",
+    }[args.provider]
     config = {
         "mode": "default",
         "model": "default-model",
-        (
-            "effort"
-            if args.scenario.startswith("claude_")
-            else "reasoning_effort"
-        ): "medium",
+        effort_id: "medium",
     }
-    if args.scenario == "claude_effort_option_absent":
-        del config["effort"]
+    if args.scenario in {
+        "claude_effort_option_absent",
+        "kimi_thinking_option_absent",
+    }:
+        del config[effort_id]
     session_invocations = 0
     partial_route_connection: socket.socket | None = None
     pending_mcp_server: dict[str, Any] | None = None
@@ -898,10 +1017,14 @@ def main() -> int:
     pending_permission_id: object | None = None
     pending_permission_expected: dict[str, object] | None = None
     pending_permission_case: str | None = None
+    pending_unsupported_request_id: object | None = None
     codex_permission_queue: list[
         tuple[str, dict[str, object], dict[str, object]]
     ] = []
     claude_permission_queue: list[
+        tuple[str, dict[str, object], dict[str, object]]
+    ] = []
+    kimi_permission_queue: list[
         tuple[str, dict[str, object], dict[str, object]]
     ] = []
     background_threads: list[threading.Thread] = []
@@ -938,6 +1061,40 @@ def main() -> int:
         request_id = request.get("id")
         params = request.get("params", {})
         _record(args.events, "acp_request", method=method)
+
+        if method is None and request_id == pending_unsupported_request_id:
+            error = request.get("error")
+            assert isinstance(error, dict), request
+            assert request.get("result") is None, request
+            assert error.get("code") == -32601, request
+            assert error.get("message") == "Method not found", request
+            _record(
+                args.events,
+                "kimi_unsupported_reverse_response_received",
+                code=error["code"],
+                message=error["message"],
+            )
+            if args.scenario == "kimi_terminal_then_unsupported_reverse_batch":
+                pending_unsupported_request_id = None
+                continue
+            assert current_mcp_server is not None
+            assert pending_prompt_id is not None
+            accepted = _submit_result(
+                current_mcp_server,
+                995,
+                {"value": 12},
+            )
+            assert accepted["result"]["isError"] is False, accepted
+            _record(
+                args.events,
+                "result_submitted",
+                turn=prompt_turn,
+                value={"value": 12},
+            )
+            _response(pending_prompt_id, {"stopReason": "end_turn"})
+            pending_unsupported_request_id = None
+            pending_prompt_id = None
+            continue
 
         if method is None and request_id == pending_permission_id:
             if args.scenario == "codex_permission_matrix":
@@ -1021,6 +1178,48 @@ def main() -> int:
                     "result_submitted",
                     turn=prompt_turn,
                     value={"value": 8},
+                )
+                _response(pending_prompt_id, {"stopReason": "end_turn"})
+                pending_permission_id = None
+                pending_permission_expected = None
+                pending_permission_case = None
+                pending_prompt_id = None
+                continue
+            if args.scenario == "kimi_permission_matrix":
+                assert request.get("result") == pending_permission_expected, request
+                assert pending_permission_case is not None
+                _record(
+                    args.events,
+                    "kimi_permission_response_received",
+                    permission_case=pending_permission_case,
+                    result=request.get("result"),
+                )
+                if kimi_permission_queue:
+                    (
+                        pending_permission_case,
+                        permission_params,
+                        pending_permission_expected,
+                    ) = kimi_permission_queue.pop(0)
+                    pending_permission_id = f"kimi-permission-{pending_permission_case}"
+                    _request(
+                        pending_permission_id,
+                        "session/request_permission",
+                        permission_params,
+                    )
+                    continue
+                assert current_mcp_server is not None
+                assert pending_prompt_id is not None
+                accepted = _submit_result(
+                    current_mcp_server,
+                    994,
+                    {"value": 11},
+                )
+                assert accepted["result"]["isError"] is False, accepted
+                _record(
+                    args.events,
+                    "result_submitted",
+                    turn=prompt_turn,
+                    value={"value": 11},
                 )
                 _response(pending_prompt_id, {"stopReason": "end_turn"})
                 pending_permission_id = None
@@ -1154,11 +1353,21 @@ def main() -> int:
                     "authMethods": [
                         {"id": "mock-credential", "name": "Mock credential"}
                     ],
-                    "agentInfo": {
-                        "name": "troupe-mock",
-                        "title": "Troupe Mock Agent",
-                        "version": "1",
-                    },
+                    "agentInfo": (
+                        None
+                        if args.scenario == "kimi_agent_info_missing"
+                        else {
+                            "name": "troupe-mock",
+                            "title": "Troupe Mock Agent",
+                            "version": (
+                                "0.31.2"
+                                if args.scenario == "kimi_agent_version_mismatch"
+                                else "0.31.1"
+                                if args.provider == "kimi"
+                                else "1"
+                            ),
+                        }
+                    ),
                 },
                 frame_depth=_scenario_depth(args.scenario, "opening_acp_depth_"),
             )
@@ -1388,6 +1597,9 @@ def main() -> int:
                 "claude_synthetic_cancel",
                 "claude_synthetic_cancel_detached_descendant",
                 "claude_uncertain_prompt_error",
+                "kimi_permission_matrix",
+                "kimi_terminal_then_unsupported_reverse_batch",
+                "kimi_unsupported_reverse_request",
                 "act_terminal_then_permission_batch",
                 "act_unknown_prompt_response_id",
                 "opening_crash_twice_then_ready",
@@ -1442,6 +1654,76 @@ def main() -> int:
                     "session/request_permission",
                     permission_params,
                 )
+                continue
+            if args.scenario == "kimi_permission_matrix":
+                assert current_session_id is not None
+                pending_prompt_id = request_id
+                for update in (
+                    {
+                        "sessionUpdate": "agent_thought_chunk",
+                        "content": {"type": "text", "text": "Kimi is reasoning"},
+                    },
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "Kimi diagnostic"},
+                    },
+                    {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "1:kimi-tool",
+                        "title": "Bash",
+                        "kind": "execute",
+                        "status": "in_progress",
+                    },
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "1:kimi-tool",
+                        "status": "completed",
+                    },
+                    {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [
+                            {
+                                "name": "status",
+                                "description": "Show Kimi session status",
+                            }
+                        ],
+                    },
+                ):
+                    _notification(
+                        "session/update",
+                        {"sessionId": current_session_id, "update": update},
+                    )
+                    _record(
+                        args.events,
+                        "kimi_typed_update_sent",
+                        update=update["sessionUpdate"],
+                    )
+                kimi_permission_queue = _kimi_permission_cases(current_session_id)
+                (
+                    pending_permission_case,
+                    permission_params,
+                    pending_permission_expected,
+                ) = kimi_permission_queue.pop(0)
+                pending_permission_id = f"kimi-permission-{pending_permission_case}"
+                _request(
+                    pending_permission_id,
+                    "session/request_permission",
+                    permission_params,
+                )
+                continue
+            if args.scenario == "kimi_unsupported_reverse_request":
+                assert current_session_id is not None
+                pending_prompt_id = request_id
+                pending_unsupported_request_id = "kimi-unsupported-terminal-create"
+                _request(
+                    pending_unsupported_request_id,
+                    "terminal/create",
+                    {
+                        "sessionId": current_session_id,
+                        "command": "/bin/true",
+                    },
+                )
+                _record(args.events, "kimi_unsupported_reverse_request_sent")
                 continue
             if args.scenario in {
                 "claude_plan_mode_not_restored",
@@ -2022,6 +2304,7 @@ def main() -> int:
                 "opening_crash_twice_then_ready",
                 "post_ready_config_after_result",
                 "act_terminal_then_permission_batch",
+                "kimi_terminal_then_unsupported_reverse_batch",
             }:
                 tool_response = _submit_result(
                     current_mcp_server,
@@ -2041,6 +2324,21 @@ def main() -> int:
                     _permission_params(current_session_id),
                 )
                 _record(args.events, "terminal_then_permission_batch_sent")
+                continue
+            if args.scenario == "kimi_terminal_then_unsupported_reverse_batch":
+                assert current_session_id is not None
+                pending_unsupported_request_id = "unsupported-after-terminal-batch"
+                _response_and_request_batch(
+                    request_id,
+                    {"stopReason": "end_turn"},
+                    pending_unsupported_request_id,
+                    "terminal/create",
+                    {
+                        "sessionId": current_session_id,
+                        "command": "/bin/true",
+                    },
+                )
+                _record(args.events, "terminal_then_unsupported_reverse_batch_sent")
                 continue
             _response(
                 request_id,
@@ -2189,6 +2487,8 @@ def main() -> int:
                 "mode_domain_invalid": "mode",
                 "model_domain_invalid": "model",
                 "effort_domain_invalid": "reasoning_effort",
+                "kimi_model_domain_invalid": "model",
+                "kimi_thinking_domain_invalid": "thinking",
             }.get(args.scenario)
             config_response = {
                 "configOptions": _config_options(

@@ -17,10 +17,12 @@ ROOT = Path(__file__).resolve().parents[2]
 PRODUCTIONS = {
     "codex": ROOT / "examples" / "live_agents" / "codex_actor",
     "claude": ROOT / "examples" / "live_agents" / "claude_actor",
+    "kimi": ROOT / "examples" / "live_agents" / "kimi_actor",
 }
 PROFILE_ENVS = {
     "codex": "TROUPE_LIVE_CODEX_PROFILE",
     "claude": "TROUPE_LIVE_CLAUDE_PROFILE",
+    "kimi": "TROUPE_LIVE_KIMI_PROFILE",
 }
 CLAUDE_USER_ENV_ALLOWLIST = frozenset(
     {
@@ -33,6 +35,7 @@ CLAUDE_USER_ENV_ALLOWLIST = frozenset(
 )
 CASE_HARD_STOP_SECONDS = 900.0
 SHUTDOWN_HARD_STOP_SECONDS = 60.0
+KIMI_EXACT_VERSION = "0.31.1"
 
 
 class AcceptanceFailure(RuntimeError):
@@ -62,7 +65,7 @@ def _load_profile(provider: str) -> tuple[Path, dict[str, object]]:
     workspace = value.get("workspace")
     model = value.get("model")
     if "effort" not in value:
-        raise AcceptanceFailure(f"{PROFILE_ENV} must contain effort")
+        raise AcceptanceFailure(f"{profile_env} must contain effort")
     effort = value["effort"]
     if not isinstance(workspace, str) or not workspace:
         raise AcceptanceFailure("live profile workspace must be a non-empty string")
@@ -161,6 +164,8 @@ def _run_case(
     unlogged: bool = False,
     user_settings: Path | None = None,
     user_settings_target: Path | None = None,
+    kimi_home: Path | None = None,
+    kimi_command_dir: Path | None = None,
 ) -> dict[str, Any]:
     report = workspace / f"{mode}-report.json"
     stdout_log = workspace / f"{mode}-stdout.log"
@@ -171,6 +176,16 @@ def _run_case(
         environment["CODEX_PATH"] = str(workspace / "forbidden-codex-override")
     elif provider == "claude":
         environment["TROUPE_CLAUDE_SETTING_PRECEDENCE"] = "ambient"
+    elif provider == "kimi":
+        if kimi_home is None or kimi_command_dir is None:
+            raise AcceptanceFailure("Kimi live case requires an isolated home")
+        environment["KIMI_CODE_HOME"] = str(kimi_home)
+        environment["KIMI_CODE_NO_AUTO_UPDATE"] = "1"
+        environment["KIMI_DISABLE_TELEMETRY"] = "1"
+        environment["KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT"] = "0"
+        environment["PATH"] = os.pathsep.join(
+            (str(kimi_command_dir), environment.get("PATH", ""))
+        )
     else:
         raise AcceptanceFailure("unsupported live provider")
     environment[PROFILE_ENVS[provider]] = json.dumps(
@@ -183,8 +198,10 @@ def _run_case(
         provider_home.mkdir()
         if provider == "codex":
             environment["CODEX_HOME"] = str(provider_home)
-        else:
+        elif provider == "claude":
             environment["CLAUDE_CONFIG_DIR"] = str(provider_home)
+        else:
+            environment["KIMI_CODE_HOME"] = str(provider_home)
         environment["NO_BROWSER"] = "1"
         environment["BROWSER"] = "/bin/false"
         for name in (
@@ -195,8 +212,15 @@ def _run_case(
             "CODEX_API_KEY",
             "DEFAULT_AUTH_REQUEST",
             "OPENAI_API_KEY",
+            "KIMI_API_KEY",
+            "KIMI_CODE_OAUTH_TOKEN",
+            "MOONSHOT_API_KEY",
         ):
             environment.pop(name, None)
+        if provider == "kimi":
+            for name in tuple(environment):
+                if name.startswith("KIMI_MODEL_") or name.startswith("MOONSHOT_"):
+                    environment.pop(name, None)
 
     console = Path(sys.executable).with_name("troupe")
     if not console.is_file():
@@ -286,6 +310,7 @@ def _run_case(
         ).lower()
         forbidden_interaction = (
             "claude.ai/login",
+            "auth.kimi.com",
             "device code",
             "open your browser",
             "press enter",
@@ -694,6 +719,261 @@ def _isolated_claude_user_settings(
     return value
 
 
+def _resolve_kimi_binary(source_home: Path) -> Path:
+    candidates = [
+        shutil.which("kimi"),
+        str(source_home / "bin" / "kimi.bak"),
+    ]
+    checked: set[Path] = set()
+    for candidate_value in candidates:
+        if candidate_value is None:
+            continue
+        candidate = Path(candidate_value).expanduser()
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        if resolved in checked or not resolved.is_file() or not os.access(resolved, os.X_OK):
+            continue
+        checked.add(resolved)
+        try:
+            probe = subprocess.run(
+                [str(resolved), "--version"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=30,
+                text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0 and probe.stdout.strip() == KIMI_EXACT_VERSION:
+            return resolved
+    raise AcceptanceFailure(
+        f"Kimi Code {KIMI_EXACT_VERSION} is required for live acceptance"
+    )
+
+
+def _copy_kimi_login(source_home: Path, target_home: Path) -> None:
+    if not source_home.is_absolute() or not source_home.is_dir():
+        raise AcceptanceFailure("Kimi Code home is unavailable for live isolation")
+    target_home.mkdir(mode=0o700)
+    copied_credentials = False
+    for name in ("config.toml", "device_id", "migrations-effort.json"):
+        source = source_home / name
+        if source.is_file():
+            shutil.copy2(source, target_home / name)
+    for name in ("credentials", "oauth"):
+        source = source_home / name
+        if source.is_dir():
+            shutil.copytree(source, target_home / name)
+            copied_credentials = True
+    if not (target_home / "config.toml").is_file() or not copied_credentials:
+        raise AcceptanceFailure("Kimi Code login material is unavailable")
+
+
+def _prepare_kimi_command(workspace: Path, binary: Path) -> Path:
+    command_dir = workspace / "kimi-command"
+    command_dir.mkdir()
+    (command_dir / "kimi").symlink_to(binary)
+    return command_dir
+
+
+def _load_kimi_tool_calls(kimi_home: Path) -> list[tuple[str, dict[str, object]]]:
+    wires = list(kimi_home.glob("sessions/**/agents/main/wire.jsonl"))
+    if len(wires) != 1:
+        raise AcceptanceFailure("Kimi acceptance did not create exactly one main wire")
+    calls: list[tuple[str, dict[str, object]]] = []
+    for line_number, line in enumerate(
+        wires[0].read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise AcceptanceFailure(
+                f"Kimi wire line {line_number} is invalid"
+            ) from error
+        if not isinstance(record, dict) or record.get("type") != "context.append_loop_event":
+            continue
+        event = record.get("event")
+        if not isinstance(event, dict) or event.get("type") != "tool.call":
+            continue
+        name = event.get("name")
+        arguments = event.get("args")
+        if isinstance(name, str) and isinstance(arguments, dict):
+            calls.append((name, arguments))
+    return calls
+
+
+def _is_kimi_result_tool(name: str) -> bool:
+    return name == "troupe_submit_result" or name.endswith("__troupe_submit_result")
+
+
+def _require_kimi_wire_evidence(
+    calls: list[tuple[str, dict[str, object]]],
+    *,
+    seed_token: str,
+) -> None:
+    tool_names = {name for name, _ in calls}
+    if not {"Read", "Write", "AskUserQuestion", "Bash"}.issubset(tool_names):
+        raise AcceptanceFailure("Kimi built-in tool audit is incomplete")
+
+    expected = [
+        {"status": "needs-human", "token": seed_token},
+        {"status": "stored", "token": seed_token},
+        {"token": seed_token, "confidence": 6},
+        {"token": seed_token, "confidence": 8},
+    ]
+    matched_indexes: list[int] = []
+    expected_index = 0
+    for index, (name, arguments) in enumerate(calls):
+        if not _is_kimi_result_tool(name):
+            continue
+        value = arguments.get("value")
+        if expected_index < len(expected) and value == expected[expected_index]:
+            matched_indexes.append(index)
+            expected_index += 1
+    if expected_index != len(expected):
+        raise AcceptanceFailure("Kimi schema correction audit is incomplete")
+
+    remember_accepted = matched_indexes[1]
+    recall_accepted = matched_indexes[3]
+    if any(
+        not _is_kimi_result_tool(name)
+        for name, _ in calls[remember_accepted + 1 : recall_accepted]
+    ):
+        raise AcceptanceFailure("Kimi context recall used an external tool")
+
+
+def _run_kimi(base: Path, configured_profile: dict[str, object]) -> None:
+    workspace = Path(tempfile.mkdtemp(prefix=".troupe-live-kimi-", dir=base))
+    ownership_marker = workspace / ".troupe-live-owned"
+    ownership_marker.write_text("kimi\n", encoding="ascii")
+    try:
+        seed_token = f"ctx-{secrets.token_hex(8)}"
+        source_home = Path(
+            os.environ.get("KIMI_CODE_HOME", str(Path.home() / ".kimi-code"))
+        ).expanduser()
+        if not source_home.is_absolute():
+            raise AcceptanceFailure("KIMI_CODE_HOME must be absolute for live isolation")
+        binary = _resolve_kimi_binary(source_home)
+        kimi_home = workspace / "isolated-kimi-home"
+        _copy_kimi_login(source_home, kimi_home)
+        command_dir = _prepare_kimi_command(workspace, binary)
+        live_profile = {**configured_profile, "workspace": str(workspace)}
+        (workspace / "seed.txt").write_text(seed_token + "\n", encoding="utf-8")
+        acceptance = _run_case(
+            provider="kimi",
+            mode="acceptance",
+            workspace=workspace,
+            profile=live_profile,
+            seed_token=seed_token,
+            kimi_home=kimi_home,
+            kimi_command_dir=command_dir,
+        )
+        if acceptance.get("remember") != {"status": "stored", "token": seed_token}:
+            raise AcceptanceFailure("Kimi did not return the first contextual result")
+        if acceptance.get("recall") != {"token": seed_token, "confidence": 8}:
+            raise AcceptanceFailure("Kimi did not retain context or repair custom schema")
+        if acceptance.get("cancel") != {"cancelled": True}:
+            raise AcceptanceFailure("Kimi caller cancellation was not observed")
+        if acceptance.get("recover") != {
+            "kind": "result",
+            "value": {"status": "recovered"},
+        }:
+            raise AcceptanceFailure("Kimi authoritative cancellation was not reusable")
+        _require_kimi_wire_evidence(
+            _load_kimi_tool_calls(kimi_home),
+            seed_token=seed_token,
+        )
+
+        artifact = workspace / "artifact.txt"
+        if artifact.read_text(encoding="utf-8").strip() != "kimi-workspace-ok":
+            raise AcceptanceFailure("Kimi workspace side effect is missing or incorrect")
+        if (workspace / "seed.txt").exists():
+            raise AcceptanceFailure("context seed survived the first Kimi turn")
+        cancel_marker = workspace / "cancel-started.txt"
+        try:
+            cancel_pid = int(cancel_marker.read_text(encoding="ascii").strip())
+        except (OSError, ValueError) as error:
+            raise AcceptanceFailure("Kimi cancellation marker is invalid") from error
+        if cancel_pid <= 0:
+            raise AcceptanceFailure("Kimi cancellation marker has an invalid PID")
+        cancel_process_name = f"troupe-kimi-cancel-{seed_token}"
+        leaked_processes = _processes_with_argument(cancel_process_name)
+        if leaked_processes:
+            for pid in leaked_processes:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            raise AcceptanceFailure("Kimi cancellation tool process survived cleanup")
+
+        invalid_model = {
+            **live_profile,
+            "model": f"troupe-invalid-model-{secrets.token_hex(8)}",
+        }
+        _require_error(
+            _run_case(
+                provider="kimi",
+                mode="invalid-model",
+                workspace=workspace,
+                profile=invalid_model,
+                seed_token=seed_token,
+                kimi_home=kimi_home,
+                kimi_command_dir=command_dir,
+            ),
+            error_type="AgentSessionStartError",
+            code="configuration_invalid",
+            phase="configure",
+        )
+
+        invalid_effort = {
+            **live_profile,
+            "effort": f"troupe-invalid-effort-{secrets.token_hex(8)}",
+        }
+        _require_error(
+            _run_case(
+                provider="kimi",
+                mode="invalid-effort",
+                workspace=workspace,
+                profile=invalid_effort,
+                seed_token=seed_token,
+                kimi_home=kimi_home,
+                kimi_command_dir=command_dir,
+            ),
+            error_type="AgentSessionStartError",
+            code="configuration_invalid",
+            phase="configure",
+        )
+
+        _require_error(
+            _run_case(
+                provider="kimi",
+                mode="auth-required",
+                workspace=workspace,
+                profile=live_profile,
+                seed_token=seed_token,
+                unlogged=True,
+                kimi_home=kimi_home,
+                kimi_command_dir=command_dir,
+            ),
+            error_type="AgentAuthenticationRequiredError",
+            code="authentication_required",
+            phase="session_new",
+        )
+    finally:
+        if ownership_marker.read_text(encoding="ascii") != "kimi\n":
+            raise AcceptanceFailure("refusing to clean an unowned live workspace")
+        shutil.rmtree(workspace)
+    if workspace.exists():
+        raise AcceptanceFailure("live Kimi workspace survived cleanup")
+
+
 def _run_claude(base: Path, configured_profile: dict[str, object]) -> None:
     workspace = Path(tempfile.mkdtemp(prefix=".troupe-live-claude-", dir=base))
     ownership_marker = workspace / ".troupe-live-owned"
@@ -864,7 +1144,7 @@ def _run_claude(base: Path, configured_profile: dict[str, object]) -> None:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in PRODUCTIONS:
-        raise AcceptanceFailure("usage: provider_acceptance.py {codex|claude}")
+        raise AcceptanceFailure("usage: provider_acceptance.py {codex|claude|kimi}")
     from troupe import _runtime
 
     if hasattr(_runtime, "_agent_test_reset_launch"):
@@ -873,8 +1153,10 @@ def main(argv: list[str]) -> int:
     base, profile = _load_profile(provider)
     if provider == "codex":
         _run_codex(base, profile)
-    else:
+    elif provider == "claude":
         _run_claude(base, profile)
+    else:
+        _run_kimi(base, profile)
     return 0
 
 

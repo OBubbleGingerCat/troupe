@@ -877,6 +877,8 @@ agent_test_support_absent = not any(
         "_agent_test_release_turn_intake",
         "_agent_test_hold_turn_submission",
         "_agent_test_release_turn_submission",
+        "_agent_test_hold_turn_response_flush",
+        "_agent_test_release_turn_response_flush",
         "_agent_test_hold_turn_settlement",
         "_agent_test_release_turn_settlement",
         "_agent_test_hold_turn_terminal_delivery",

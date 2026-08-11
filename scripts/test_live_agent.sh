@@ -5,12 +5,12 @@ repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd -- "$repository_root"
 
 if (($# != 1)); then
-  printf 'usage: %s {codex|claude}\n' "${0##*/}" >&2
+  printf 'usage: %s {codex|claude|kimi}\n' "${0##*/}" >&2
   exit 2
 fi
 
 case "$1" in
-  codex | claude)
+  codex | claude | kimi)
     provider="$1"
     build_root="$(mktemp -d "${TMPDIR:-/tmp}/troupe-live-build.XXXXXX")"
     ownership_marker="$build_root/.troupe-live-build-owned"

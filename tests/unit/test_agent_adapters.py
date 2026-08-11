@@ -121,7 +121,7 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             },
             "model_config_id": "model",
             "effort_config_id": "thinking",
-            "effort_option_optional_when_unspecified": False,
+            "effort_option_optional_when_unspecified": True,
             "configuration_order": ["mode", "model", "effort"],
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
@@ -446,6 +446,119 @@ def test_claude_adapter_does_not_treat_synthetic_cancel_as_healthy(
     )
 
 
+@pytest.mark.parametrize(
+    ("request_json", "expected"),
+    [
+        (
+            _permission_request(
+                options=[
+                    _option("approve_always", "allow_always"),
+                    _option("reject", "reject_once"),
+                    _option("approve_once", "allow_once"),
+                ],
+            ),
+            "selected:approve_once",
+        ),
+        (
+            _permission_request(
+                kind="other",
+                options=[
+                    _option("q0_opt_1", "allow_once"),
+                    _option("q0_skip", "reject_once"),
+                    _option("q0_opt_0", "allow_once"),
+                ],
+                meta={"fixture": "kimi-question"},
+            ),
+            "selected:q0_skip",
+        ),
+        (
+            _permission_request(
+                kind="other",
+                options=[
+                    _option("plan_reject_and_exit", "reject_once"),
+                    _option("plan_approve", "allow_once"),
+                    _option("plan_revise", "reject_once"),
+                ],
+                meta={"fixture": "kimi-plan-review"},
+            ),
+            "selected:plan_approve",
+        ),
+        (
+            _permission_request(
+                kind="other",
+                options=[
+                    _option("plan_opt_1", "allow_once"),
+                    _option("plan_revise", "reject_once"),
+                    _option("plan_opt_0", "allow_once"),
+                    _option("plan_reject_and_exit", "reject_once"),
+                ],
+                meta={"fixture": "kimi-plan-review-options"},
+            ),
+            "selected:plan_opt_0",
+        ),
+        (
+            _permission_request(
+                options=[
+                    _option("future-allow", "allow_once"),
+                    _option("future-reject", "reject_once"),
+                ],
+                meta={"future_adapter_shape": True},
+            ),
+            "selected:future-reject",
+        ),
+        (
+            _permission_request(
+                options=[
+                    _option("reject-a", "reject_once"),
+                    _option("reject-b", "reject_once"),
+                ],
+                meta={"future_adapter_shape": True},
+            ),
+            "cancelled",
+        ),
+    ],
+)
+def test_kimi_adapter_resolves_only_pinned_autonomous_permissions(
+    request_json: str,
+    expected: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_permission_for_test("kimi", request_json)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "data", "expected"),
+    [
+        (-32000, None, "authentication_lost"),
+        (-32603, None, "uncertain"),
+        (-32602, {"configId": "thinking"}, "uncertain"),
+    ],
+)
+def test_kimi_adapter_maps_only_pinned_terminal_error_evidence(
+    code: int,
+    data: object | None,
+    expected: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_settlement_for_test(
+            "kimi", code, json.dumps(data)
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("stop_reason", ["cancelled", "end_turn", "refusal"])
+def test_kimi_adapter_treats_real_terminal_responses_as_authoritative(
+    stop_reason: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_supervisor_response_for_test("kimi", stop_reason)
+        == "authoritative"
+    )
+
+
 def test_codex_live_example_and_explicit_acceptance_runner_are_wired() -> None:
     expected = [
         ROOT / "examples" / "live_agents" / "README.md",
@@ -502,6 +615,147 @@ def test_claude_live_example_and_isolated_acceptance_runner_are_wired() -> None:
     assert '"user", "project", "local"' in harness_source
     assert "start_new_session=True" in harness_source
     assert "setproxy" not in harness_source
+
+
+def test_kimi_live_example_and_isolated_acceptance_runner_are_wired() -> None:
+    expected = [
+        ROOT / "examples" / "live_agents" / "README.md",
+        ROOT / "examples" / "live_agents" / "kimi_actor" / "__init__.py",
+        ROOT / "examples" / "live_agents" / "kimi_actor" / "production.py",
+        ROOT / "tests" / "live" / "provider_acceptance.py",
+        ROOT / "scripts" / "test_live_agent.sh",
+    ]
+    assert all(path.is_file() for path in expected)
+
+    runner_source = expected[-1].read_text(encoding="utf-8")
+    assert "kimi" in runner_source
+
+    production_source = expected[2].read_text(encoding="utf-8")
+    assert "TROUPE_LIVE_KIMI_PROFILE" in production_source
+    assert "ValueRejected" in production_source
+    assert "asyncio.CancelledError" in production_source
+    assert "choices=[self.seed_token]" not in production_source
+
+    harness_source = expected[3].read_text(encoding="utf-8")
+    assert '"KIMI_CODE_HOME"' in harness_source
+    assert '"KIMI_CODE_NO_AUTO_UPDATE"' in harness_source
+    assert '"kimi.bak"' in harness_source
+    assert "start_new_session=True" in harness_source
+
+
+def _kimi_wire_calls() -> list[tuple[str, dict[str, object]]]:
+    return [
+        ("Read", {"path": "seed.txt"}),
+        ("AskUserQuestion", {"questions": []}),
+        ("Write", {"path": "artifact.txt"}),
+        (
+            "mcp__troupe__troupe_submit_result",
+            {"value": {"status": "needs-human", "token": "ctx-token"}},
+        ),
+        (
+            "mcp__troupe__troupe_submit_result",
+            {"value": {"status": "stored", "token": "ctx-token"}},
+        ),
+        (
+            "mcp__troupe__troupe_submit_result",
+            {"value": {"token": "ctx-token", "confidence": 6}},
+        ),
+        (
+            "mcp__troupe__troupe_submit_result",
+            {"value": {"token": "ctx-token", "confidence": 8}},
+        ),
+        ("Bash", {"command": "sleep 120"}),
+    ]
+
+
+def test_kimi_live_acceptance_requires_context_and_both_schema_repairs() -> None:
+    acceptance = _live_acceptance_module()
+    acceptance._require_kimi_wire_evidence(
+        _kimi_wire_calls(),
+        seed_token="ctx-token",
+    )
+
+
+@pytest.mark.parametrize("missing_index", range(7))
+def test_kimi_live_acceptance_rejects_incomplete_wire_evidence(
+    missing_index: int,
+) -> None:
+    acceptance = _live_acceptance_module()
+    calls = _kimi_wire_calls()
+    del calls[missing_index]
+    with pytest.raises(acceptance.AcceptanceFailure):
+        acceptance._require_kimi_wire_evidence(calls, seed_token="ctx-token")
+
+
+def test_kimi_live_acceptance_rejects_external_recall_tools() -> None:
+    acceptance = _live_acceptance_module()
+    calls = _kimi_wire_calls()
+    calls.insert(5, ("Read", {"path": "seed.txt"}))
+    with pytest.raises(acceptance.AcceptanceFailure, match="context recall"):
+        acceptance._require_kimi_wire_evidence(calls, seed_token="ctx-token")
+
+
+def test_kimi_live_login_isolation_excludes_ambient_state(tmp_path: Path) -> None:
+    acceptance = _live_acceptance_module()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.toml").write_text("default_model = 'test'\n", encoding="utf-8")
+    (source / "device_id").write_text("device\n", encoding="ascii")
+    (source / "credentials").mkdir()
+    (source / "credentials" / "login.json").write_text("{}\n", encoding="ascii")
+    (source / "oauth").mkdir()
+    (source / "oauth" / "login").write_text("token\n", encoding="ascii")
+    (source / "sessions").mkdir()
+    (source / "sessions" / "ambient.jsonl").write_text("secret\n", encoding="ascii")
+    (source / "plugins").mkdir()
+    (source / "plugins" / "ambient.json").write_text("{}\n", encoding="ascii")
+
+    target = tmp_path / "target"
+    acceptance._copy_kimi_login(source, target)
+
+    assert (target / "config.toml").is_file()
+    assert (target / "credentials" / "login.json").is_file()
+    assert (target / "oauth" / "login").is_file()
+    assert not (target / "sessions").exists()
+    assert not (target / "plugins").exists()
+
+
+@pytest.mark.parametrize(
+    ("with_exact_binary", "failure_pattern"),
+    [
+        (False, "0.31.1 is required"),
+        (True, "login material is unavailable"),
+    ],
+)
+def test_kimi_live_setup_failure_cleans_its_owned_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_exact_binary: bool,
+    failure_pattern: str,
+) -> None:
+    acceptance = _live_acceptance_module()
+    source = tmp_path / "source-home"
+    source.mkdir()
+    if with_exact_binary:
+        binary_dir = source / "bin"
+        binary_dir.mkdir()
+        binary = binary_dir / "kimi.bak"
+        binary.write_text("#!/bin/sh\nprintf '0.31.1\\n'\n", encoding="ascii")
+        binary.chmod(0o700)
+        (source / "config.toml").write_text(
+            "default_model = 'test'\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("KIMI_CODE_HOME", str(source))
+    monkeypatch.setenv("PATH", "")
+
+    with pytest.raises(acceptance.AcceptanceFailure, match=failure_pattern):
+        acceptance._run_kimi(
+            tmp_path,
+            {"workspace": str(tmp_path), "model": "test", "effort": "max"},
+        )
+
+    assert list(tmp_path.glob(".troupe-live-kimi-*")) == []
 
 
 def test_claude_live_user_settings_fixture_does_not_inherit_ambient_settings() -> None:

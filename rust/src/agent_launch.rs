@@ -26,7 +26,6 @@ pub(crate) enum LaunchRunner {
     Command {
         program: &'static str,
         fixed_args: &'static [&'static str],
-        #[cfg_attr(not(feature = "agent-test-support"), allow(dead_code))]
         exact_version: &'static str,
     },
 }
@@ -216,6 +215,13 @@ pub(crate) struct AgentLaunchSpec {
 }
 
 impl AgentLaunchSpec {
+    pub(crate) const fn required_agent_info_version(&self) -> Option<&'static str> {
+        match self.runner {
+            LaunchRunner::Npx { .. } => None,
+            LaunchRunner::Command { exact_version, .. } => Some(exact_version),
+        }
+    }
+
     pub(crate) fn supports_step1_opening(&self, agent: AgentKind) -> bool {
         let mode_matches = match self.mode_application {
             ModeApplicationV1::SessionConfigOption { value, .. } => value == self.initial_mode,
@@ -334,7 +340,7 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     },
     model_config_id: "model",
     effort_config_id: "thinking",
-    effort_option_optional_when_unspecified: false,
+    effort_option_optional_when_unspecified: true,
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
@@ -491,6 +497,7 @@ pub(crate) struct TestTurnGates {
     pub(crate) registration: Option<Arc<TestOpeningGate>>,
     pub(crate) intake: Option<Arc<TestOpeningGate>>,
     pub(crate) submission: Option<Arc<TestOpeningGate>>,
+    pub(crate) response_flush: Option<Arc<TestOpeningGate>>,
     pub(crate) settlement: Option<Arc<TestOpeningGate>>,
     pub(crate) terminal_delivery: Option<Arc<TestOpeningGate>>,
     pub(crate) outcome: Option<Arc<TestOpeningGate>>,
@@ -917,6 +924,33 @@ pub(crate) fn release_test_turn_submission() -> pyo3::PyResult<()> {
 }
 
 #[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_turn_response_flush")]
+pub(crate) fn hold_test_turn_response_flush() -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding turn response flush",
+        )
+    })?;
+    launch.turn_gates.response_flush = Some(TestOpeningGate::new());
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_turn_response_flush")]
+pub(crate) fn release_test_turn_response_flush() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let gate = launch
+        .as_ref()
+        .and_then(|launch| launch.turn_gates.response_flush.as_ref())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("turn response flush is not held")
+        })?;
+    gate.release();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_settlement")]
 pub(crate) fn hold_test_turn_settlement() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
@@ -1007,6 +1041,7 @@ pub(crate) fn turn_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<
         ("registration", launch.turn_gates.registration.as_ref()),
         ("intake", launch.turn_gates.intake.as_ref()),
         ("submission", launch.turn_gates.submission.as_ref()),
+        ("response_flush", launch.turn_gates.response_flush.as_ref()),
         ("settlement", launch.turn_gates.settlement.as_ref()),
         (
             "terminal_delivery",

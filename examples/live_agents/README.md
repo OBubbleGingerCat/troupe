@@ -34,3 +34,20 @@ permission handling, user/project/local settings and hooks, settings
 precedence, typed configuration and authentication failures, conservative
 cancellation settlement, and process cleanup. Neither live runner performs an
 authentication flow.
+
+Kimi uses its built-in ACP server. The runner requires the adapter-pinned Kimi
+Code 0.31.1 binary and an existing Kimi Code login; it accepts the same profile
+shape.
+
+```console
+export TROUPE_LIVE_KIMI_PROFILE='{"workspace":"/tmp","model":"kimi-code/k3","effort":"max"}'
+scripts/test_live_agent.sh kimi
+```
+
+The runner resolves exactly version 0.31.1, places it on an isolated child
+`PATH`, and copies only the login material needed by a temporary
+`KIMI_CODE_HOME`. It verifies the Read, Write, Bash, and AskUserQuestion
+harness, unattended permission handling, contextual turns, both schema
+correction paths, authoritative cancellation recovery, typed configuration and
+authentication failures, wire evidence, and process cleanup. Troupe never
+starts a Kimi authentication flow.

@@ -2575,7 +2575,7 @@ fn dispatch(route: &Arc<ResultRoute>, message: Value) -> DispatchOutcome {
                         "description": "Submit the structured result for the current Actor turn.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": {"value": {}},
+                            "properties": {"value": {"type": "object"}},
                             "required": ["value"],
                             "additionalProperties": false
                         }
@@ -4305,6 +4305,43 @@ mod tests {
             .expect("tools/list has a response transition")
             .finish(true);
         assert_eq!(*lock(&route.phase), RoutePhase::Ready);
+    }
+
+    #[tokio::test]
+    async fn tools_list_declares_the_result_value_as_an_object() {
+        let route = route();
+        dispatch(&route, initialize())
+            .transition
+            .expect("initialize has a response transition")
+            .finish(true);
+        dispatch(
+            &route,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            }),
+        )
+        .transition
+        .expect("initialized notification has a response transition")
+        .finish(true);
+
+        let outcome = dispatch(
+            &route,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        );
+        let body = outcome
+            .response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            response.pointer("/result/tools/0/inputSchema/properties/value/type"),
+            Some(&json!("object")),
+        );
     }
 
     #[test]

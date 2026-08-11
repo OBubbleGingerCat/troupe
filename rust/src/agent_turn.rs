@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::v1::{
@@ -19,7 +18,9 @@ use crate::agent_adapter::{
 use crate::agent_error::AgentSessionFailure;
 #[cfg(feature = "agent-test-support")]
 use crate::agent_launch::TestTurnGates;
-use crate::agent_session::{ActAdmissionLease, AgentSessionSlot, SessionTurnLease};
+use crate::agent_session::{
+    ActAdmissionLease, AgentSessionSlot, ProtocolViolationBoundary, SessionTurnLease,
+};
 use crate::result_mcp::{
     ArmedResultLease, MAX_REPAIRABLE_INVALID_CALLS, PreparedResultSettlement, ResultAtSettlement,
     ResultCancelHandoff, ResultFailureAtHandoff,
@@ -363,6 +364,18 @@ impl AgentTurnControl {
         )
     }
 
+    pub(crate) fn respond_unsupported_request<T>(&self, respond: impl FnOnce() -> T) -> (bool, T) {
+        let state = lock(&self.state);
+        let attributable = !state.prompt_response_observed
+            && matches!(
+                state.phase,
+                AgentTurnControlPhase::Submitted
+                    | AgentTurnControlPhase::SupervisorOwnedCancelled
+                    | AgentTurnControlPhase::SupervisorOwnedFailed
+            );
+        (attributable, respond())
+    }
+
     fn begin_result_failure_handoff(&self) -> bool {
         let mut cancelling_marker = None;
         let mut accepted = false;
@@ -535,9 +548,13 @@ impl AgentTurnControl {
                 };
                 (Some(outcome), failure)
             };
-            let proposed_failure = proposed_failure.or_else(|| {
-                (!configuration_is_restored).then(AgentSessionFailure::protocol_violation)
-            });
+            let proposed_failure = proposed_failure
+                .or_else(|| {
+                    boundary_protocol_violation.then(AgentSessionFailure::protocol_violation)
+                })
+                .or_else(|| {
+                    (!configuration_is_restored).then(AgentSessionFailure::protocol_violation)
+                });
             let broken_failure = terminal_failure.or_else(|| proposed_failure.clone());
             let local_failure_committed = matches!(
                 caller_outcome.as_ref(),
@@ -779,7 +796,7 @@ pub(crate) async fn run_agent_turn_worker(
     response_provenance: &PromptResponseProvenance,
     adapter: &'static dyn AcpAgentAdapter,
     authoritative_error_codes: Arc<[i32]>,
-    boundary_protocol_violation: Arc<AtomicBool>,
+    boundary_protocol_violation: Arc<ProtocolViolationBoundary>,
     cancellation: &CancellationToken,
     #[cfg(feature = "agent-test-support")] turn_gates: TestTurnGates,
 ) {
@@ -796,7 +813,7 @@ pub(crate) async fn run_agent_turn_worker(
         let request = tokio::select! {
             request = slot.next_turn() => request,
             () = connection.incoming_closed() => {
-                if boundary_protocol_violation.load(Ordering::Acquire) {
+                if boundary_protocol_violation.is_observed() {
                     slot.commit_protocol_violation("configure");
                 } else {
                     slot.commit_transport_loss();
@@ -849,7 +866,7 @@ pub(crate) async fn run_agent_turn_worker(
                         .send_notification(CancelNotification::new(session_id.clone()))
                         .is_err()
                     {
-                        let failure = if boundary_protocol_violation.load(Ordering::Acquire) {
+                        let failure = if boundary_protocol_violation.is_observed() {
                             AgentSessionFailure::protocol_violation()
                         } else {
                             AgentSessionFailure::transport_lost()
@@ -871,10 +888,15 @@ pub(crate) async fn run_agent_turn_worker(
             gate.wait().await;
             gate.mark_completed();
         }
+        let boundary_protocol_violation = tokio::select! {
+            evidence = boundary_protocol_violation.wait_for_settlement_evidence() => evidence,
+            () = cancellation.cancelled() => return,
+            () = terminal_fault.cancelled() => return,
+        };
         let completion = request.control.complete_response(
             response,
             remote_error,
-            boundary_protocol_violation.load(Ordering::Acquire),
+            boundary_protocol_violation,
             adapter,
             &authoritative_error_codes,
         );
@@ -1097,6 +1119,31 @@ mod tests {
             .expect("terminal response must publish one caller outcome")
     }
 
+    fn successful_response_at_protocol_boundary() -> (AgentTurnCompletion, AgentTurnOutcome) {
+        let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Kimi);
+        let slot = AgentSessionSlot::new();
+        let control = AgentTurnControl::new(slot);
+        let (response, mut caller) = oneshot::channel();
+        {
+            let mut state = lock(&control.state);
+            state.phase = AgentTurnControlPhase::Submitted;
+            state.caller_response = Some(response);
+        }
+
+        let completion = control.complete_response(
+            Ok(PromptResponse::new(StopReason::MaxTokens)),
+            false,
+            true,
+            adapter,
+            &[],
+        );
+        control.publish_caller_outcome();
+        let outcome = caller
+            .try_recv()
+            .expect("the protocol boundary must publish one caller outcome");
+        (completion, outcome)
+    }
+
     #[test]
     fn prompt_error_classifier_uses_response_provenance_not_peer_controlled_payloads() {
         let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Codex);
@@ -1175,6 +1222,17 @@ mod tests {
             classify_prompt_error(&remote, true, true, adapter, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
+    }
+
+    #[test]
+    fn successful_prompt_response_cannot_cross_an_observed_protocol_boundary() {
+        let (completion, outcome) = successful_response_at_protocol_boundary();
+
+        assert!(completion.broken);
+        assert!(matches!(
+            outcome,
+            AgentTurnOutcome::SessionBroken(failure) if failure.code == "protocol_violation"
+        ));
     }
 
     #[test]

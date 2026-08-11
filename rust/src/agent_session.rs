@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -121,7 +121,7 @@ struct AcpFrameLimitedReader<R> {
     terminal_failure: Option<AcpFrameFailure>,
     inner_eof: bool,
     exceeded: Arc<AtomicBool>,
-    protocol_violation: Arc<AtomicBool>,
+    protocol_violation: Arc<ProtocolViolationBoundary>,
     json_depth: usize,
     in_json_string: bool,
     escaped_json_byte: bool,
@@ -134,7 +134,11 @@ enum AcpFrameFailure {
 }
 
 impl<R> AcpFrameLimitedReader<R> {
-    fn new(inner: R, exceeded: Arc<AtomicBool>, protocol_violation: Arc<AtomicBool>) -> Self {
+    fn new(
+        inner: R,
+        exceeded: Arc<AtomicBool>,
+        protocol_violation: Arc<ProtocolViolationBoundary>,
+    ) -> Self {
         Self {
             inner,
             frame_bytes: 0,
@@ -258,7 +262,7 @@ impl<R> AcpFrameLimitedReader<R> {
         match failure {
             AcpFrameFailure::ResourceLimit => self.exceeded.store(true, Ordering::Release),
             AcpFrameFailure::ProtocolViolation => {
-                self.protocol_violation.store(true, Ordering::Release);
+                self.protocol_violation.mark_observed();
             }
         }
     }
@@ -273,15 +277,74 @@ impl<R> AcpFrameLimitedReader<R> {
 }
 
 struct AcpResponseTracker {
-    pending: Mutex<HashSet<RequestId>>,
-    protocol_violation: Arc<AtomicBool>,
+    pending: Mutex<HashMap<RequestId, Arc<str>>>,
+    predeferred_responses: Mutex<HashSet<RequestId>>,
+    response_flush_waiters: Mutex<HashMap<RequestId, Vec<oneshot::Sender<()>>>>,
+    protocol_violation: Arc<ProtocolViolationBoundary>,
 }
 
 impl AcpResponseTracker {
-    fn new(protocol_violation: Arc<AtomicBool>) -> Self {
+    fn new(protocol_violation: Arc<ProtocolViolationBoundary>) -> Self {
         Self {
-            pending: Mutex::new(HashSet::new()),
+            pending: Mutex::new(HashMap::new()),
+            predeferred_responses: Mutex::new(HashSet::new()),
+            response_flush_waiters: Mutex::new(HashMap::new()),
             protocol_violation,
+        }
+    }
+
+    fn wait_for_response_flush(&self, id: RequestId) -> oneshot::Receiver<()> {
+        let (sender, receiver) = oneshot::channel();
+        lock(&self.response_flush_waiters)
+            .entry(id)
+            .or_default()
+            .push(sender);
+        receiver
+    }
+
+    fn observe_outgoing_flushed(&self, line: &str) {
+        let frame = TransportFrame::parse_json(line);
+        let observe_message = |message: &RawJsonRpcMessage| {
+            let RawJsonRpcMessage::Response(response) = message else {
+                return;
+            };
+            let id = match response {
+                agent_client_protocol::schema::v1::Response::Result { id, .. }
+                | agent_client_protocol::schema::v1::Response::Error { id, .. } => id,
+            };
+            if lock(&self.predeferred_responses).remove(id) {
+                self.protocol_violation.complete_deferred_response();
+            }
+            if let Some(waiters) = lock(&self.response_flush_waiters).remove(id) {
+                for waiter in waiters {
+                    let _ = waiter.send(());
+                }
+            }
+        };
+        match frame {
+            TransportFrame::Single(message) => observe_message(&message),
+            TransportFrame::Batch(batch) => {
+                for entry in batch.entries() {
+                    if let TransportBatchEntry::Message(message) = entry {
+                        observe_message(message);
+                    }
+                }
+            }
+            TransportFrame::Malformed { .. } => {}
+        }
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn outgoing_contains_response(line: &str) -> bool {
+        match TransportFrame::parse_json(line) {
+            TransportFrame::Single(RawJsonRpcMessage::Response(_)) => true,
+            TransportFrame::Batch(batch) => batch.entries().any(|entry| {
+                matches!(
+                    entry,
+                    TransportBatchEntry::Message(RawJsonRpcMessage::Response(_))
+                )
+            }),
+            TransportFrame::Single(_) | TransportFrame::Malformed { .. } => false,
         }
     }
 
@@ -293,6 +356,10 @@ impl AcpResponseTracker {
         self.observe_with_provenance(line, AcpFrameDirection::Incoming)
     }
 
+    fn response_was_predeferred(&self, id: &RequestId) -> bool {
+        lock(&self.predeferred_responses).contains(id)
+    }
+
     fn observe_with_provenance(
         &self,
         line: &str,
@@ -300,7 +367,7 @@ impl AcpResponseTracker {
     ) -> std::io::Result<()> {
         let result = self.observe(line, direction);
         if result.is_err() {
-            self.protocol_violation.store(true, Ordering::Release);
+            self.protocol_violation.mark_observed();
         }
         result
     }
@@ -308,10 +375,14 @@ impl AcpResponseTracker {
     fn observe(&self, line: &str, direction: AcpFrameDirection) -> std::io::Result<()> {
         let frame = TransportFrame::parse_json(line);
         let mut pending = lock(&self.pending);
+        let mut prompt_response_seen = false;
         let mut observe_message = |message: &RawJsonRpcMessage| -> std::io::Result<()> {
             match (direction, message) {
                 (AcpFrameDirection::Outgoing, RawJsonRpcMessage::Request(request)) => {
-                    if !pending.insert(request.id.clone()) {
+                    if pending
+                        .insert(request.id.clone(), Arc::clone(&request.method))
+                        .is_some()
+                    {
                         return Err(acp_protocol_error("duplicate outgoing ACP request id"));
                     }
                 }
@@ -320,8 +391,16 @@ impl AcpResponseTracker {
                         agent_client_protocol::schema::v1::Response::Result { id, .. }
                         | agent_client_protocol::schema::v1::Response::Error { id, .. } => id,
                     };
-                    if !pending.remove(response_id) {
-                        return Err(acp_protocol_error("unknown or duplicate ACP response id"));
+                    let method = pending.remove(response_id).ok_or_else(|| {
+                        acp_protocol_error("unknown or duplicate ACP response id")
+                    })?;
+                    prompt_response_seen |= method.as_ref() == "session/prompt";
+                }
+                (AcpFrameDirection::Incoming, RawJsonRpcMessage::Request(request))
+                    if prompt_response_seen =>
+                {
+                    if lock(&self.predeferred_responses).insert(request.id.clone()) {
+                        self.protocol_violation.begin_deferred_response();
                     }
                 }
                 _ => {}
@@ -342,6 +421,90 @@ impl AcpResponseTracker {
             TransportFrame::Malformed { .. } => Err(acp_protocol_error("malformed ACP frame")),
         }
     }
+}
+
+#[derive(Default)]
+pub(crate) struct ProtocolViolationBoundary {
+    observed: AtomicBool,
+    deferred_responses: AtomicU64,
+    settlement_changed: Notify,
+}
+
+impl ProtocolViolationBoundary {
+    fn mark_observed(&self) {
+        self.observed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn is_observed(&self) -> bool {
+        self.observed.load(Ordering::Acquire)
+    }
+
+    fn begin_deferred_response(&self) {
+        self.deferred_responses
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_add(1)
+            })
+            .expect("the deferred ACP response counter cannot exhaust");
+        self.mark_observed();
+    }
+
+    fn complete_deferred_response(&self) -> bool {
+        let previous = self.deferred_responses.fetch_sub(1, Ordering::AcqRel);
+        assert_ne!(previous, 0, "a deferred ACP response must be registered");
+        self.settlement_changed.notify_waiters();
+        previous == 1
+    }
+
+    pub(crate) async fn wait_for_settlement_evidence(&self) -> bool {
+        loop {
+            let changed = self.settlement_changed.notified();
+            if !self.is_observed() {
+                return false;
+            }
+            if self.deferred_responses.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            changed.await;
+        }
+    }
+
+    fn settlement_evidence_is_ready(&self) -> bool {
+        self.is_observed() && self.deferred_responses.load(Ordering::Acquire) == 0
+    }
+}
+
+fn defer_protocol_violation_until_response_flush(
+    connection: &ConnectionTo<Agent>,
+    response_flushed: oneshot::Receiver<()>,
+    already_registered: bool,
+    slot: Weak<AgentSessionSlot>,
+    phase: &'static str,
+    boundary: Arc<ProtocolViolationBoundary>,
+    protocol_violation: CancellationToken,
+) -> Result<(), agent_client_protocol::Error> {
+    if !already_registered {
+        boundary.begin_deferred_response();
+    }
+    let boundary_for_task = Arc::clone(&boundary);
+    let spawn = connection.spawn(async move {
+        let flushed = response_flushed.await.is_ok();
+        let settlement_ready = if already_registered {
+            boundary_for_task.settlement_evidence_is_ready()
+        } else {
+            boundary_for_task.complete_deferred_response()
+        };
+        if flushed && settlement_ready {
+            if let Some(slot) = slot.upgrade() {
+                slot.commit_protocol_violation(phase);
+            }
+            protocol_violation.cancel();
+        }
+        Ok(())
+    });
+    if spawn.is_err() && !already_registered {
+        boundary.complete_deferred_response();
+    }
+    spawn
 }
 
 #[derive(Clone, Copy)]
@@ -2108,7 +2271,7 @@ async fn run_opening_attempt(
     let protocol_violation_for_handler = protocol_violation.clone();
     let protocol_violation_for_permissions = protocol_violation.clone();
     let protocol_violation_for_connection = protocol_violation.clone();
-    let protocol_violation_observed = Arc::new(AtomicBool::new(false));
+    let protocol_violation_observed = Arc::new(ProtocolViolationBoundary::default());
     let protocol_violation_observed_for_handler = Arc::clone(&protocol_violation_observed);
     let protocol_violation_observed_for_permissions = Arc::clone(&protocol_violation_observed);
     let protocol_violation_observed_for_turn = Arc::clone(&protocol_violation_observed);
@@ -2125,17 +2288,31 @@ async fn run_opening_attempt(
         &protocol_violation_observed,
     )));
     let outgoing_tracker = Arc::clone(&response_tracker);
+    #[cfg(feature = "agent-test-support")]
+    let response_flush_gate = command.turn_gates.response_flush.clone();
     let outgoing = futures::sink::unfold(stdin.compat_write(), move |mut writer, line: String| {
         let tracker = Arc::clone(&outgoing_tracker);
+        #[cfg(feature = "agent-test-support")]
+        let response_flush_gate = response_flush_gate.clone();
         async move {
             tracker.observe_outgoing(&line)?;
             writer.write_all(line.as_bytes()).await?;
             writer.write_all(b"\n").await?;
+            #[cfg(feature = "agent-test-support")]
+            if AcpResponseTracker::outgoing_contains_response(&line)
+                && let Some(gate) = &response_flush_gate
+            {
+                gate.wait().await;
+                gate.mark_completed();
+            }
             writer.flush().await?;
+            tracker.observe_outgoing_flushed(&line);
             Ok::<_, std::io::Error>(writer)
         }
     });
     let incoming_tracker = Arc::clone(&response_tracker);
+    let flush_tracker_for_permissions = Arc::clone(&response_tracker);
+    let flush_tracker_for_handler = Arc::clone(&response_tracker);
     let incoming = futures::io::BufReader::new(stdout.compat())
         .lines()
         .map(move |line| {
@@ -2152,7 +2329,12 @@ async fn run_opening_attempt(
             .builder()
             .name("troupe")
             .on_receive_request(
-                async move |request: RequestPermissionRequest, responder, _connection| {
+                async move |request: RequestPermissionRequest, responder, connection| {
+                    let response_id = responder.id().clone();
+                    let already_registered =
+                        flush_tracker_for_permissions.response_was_predeferred(&response_id);
+                    let response_flushed =
+                        flush_tracker_for_permissions.wait_for_response_flush(response_id);
                     let Some(slot) = slot_for_permissions.upgrade() else {
                         return responder.respond(RequestPermissionResponse::new(
                             RequestPermissionOutcome::Cancelled,
@@ -2162,26 +2344,38 @@ async fn run_opening_attempt(
                         let response = responder.respond(RequestPermissionResponse::new(
                             RequestPermissionOutcome::Cancelled,
                         ));
-                        protocol_violation_observed_for_permissions.store(true, Ordering::Release);
                         let phase = OpeningPhase::load(&opening_phase_for_permissions).name();
-                        slot.commit_protocol_violation(phase);
-                        protocol_violation_for_permissions.cancel();
+                        defer_protocol_violation_until_response_flush(
+                            &connection,
+                            response_flushed,
+                            already_registered,
+                            Arc::downgrade(&slot),
+                            phase,
+                            Arc::clone(&protocol_violation_observed_for_permissions),
+                            protocol_violation_for_permissions.clone(),
+                        )?;
                         return response;
                     };
                     let (attributable, response) =
                         control.respond_permission(&request, responder, agent_adapter(spec.agent));
                     if !attributable {
-                        protocol_violation_observed_for_permissions.store(true, Ordering::Release);
                         let phase = OpeningPhase::load(&opening_phase_for_permissions).name();
-                        slot.commit_protocol_violation(phase);
-                        protocol_violation_for_permissions.cancel();
+                        defer_protocol_violation_until_response_flush(
+                            &connection,
+                            response_flushed,
+                            already_registered,
+                            Arc::downgrade(&slot),
+                            phase,
+                            Arc::clone(&protocol_violation_observed_for_permissions),
+                            protocol_violation_for_permissions.clone(),
+                        )?;
                     }
                     response
                 },
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_dispatch(
-                async move |dispatch: Dispatch, _connection: ConnectionTo<Agent>| match dispatch {
+                async move |dispatch: Dispatch, connection: ConnectionTo<Agent>| match dispatch {
                     message @ Dispatch::Notification(_) if message.method() == "session/update" => {
                         match message.into_notification::<SessionNotification>() {
                             Ok(Ok(notification)) => {
@@ -2222,8 +2416,7 @@ async fn run_opening_attempt(
                                             control.accepts_ordinary_update()
                                         });
                                     if !accepted {
-                                        protocol_violation_observed_for_handler
-                                            .store(true, Ordering::Release);
+                                        protocol_violation_observed_for_handler.mark_observed();
                                         let phase =
                                             OpeningPhase::load(&opening_phase_for_handler).name();
                                         if let Some(slot) = slot_for_updates.upgrade() {
@@ -2235,8 +2428,7 @@ async fn run_opening_attempt(
                             }
                             Ok(Err(_)) => unreachable!("the notification method matched"),
                             Err(_) => {
-                                protocol_violation_observed_for_handler
-                                    .store(true, Ordering::Release);
+                                protocol_violation_observed_for_handler.mark_observed();
                                 let phase = OpeningPhase::load(&opening_phase_for_handler).name();
                                 if let Some(slot) = slot_for_updates.upgrade() {
                                     slot.commit_protocol_violation(phase);
@@ -2264,6 +2456,45 @@ async fn run_opening_attempt(
                             }
                         }
                         router.route_with_result(result)?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Request(message, responder) => {
+                        let method = message.method;
+                        let response_id = responder.id().clone();
+                        let already_registered =
+                            flush_tracker_for_handler.response_was_predeferred(&response_id);
+                        let response_flushed =
+                            flush_tracker_for_handler.wait_for_response_flush(response_id);
+                        let control = slot_for_updates
+                            .upgrade()
+                            .and_then(|slot| slot.current_submitted_turn());
+                        let (attributable, response) = if let Some(control) = control {
+                            control.respond_unsupported_request(|| {
+                                responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found().data(method),
+                                )
+                            })
+                        } else {
+                            (
+                                false,
+                                responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found().data(method),
+                                ),
+                            )
+                        };
+                        if !attributable {
+                            let phase = OpeningPhase::load(&opening_phase_for_handler).name();
+                            defer_protocol_violation_until_response_flush(
+                                &connection,
+                                response_flushed,
+                                already_registered,
+                                slot_for_updates.clone(),
+                                phase,
+                                Arc::clone(&protocol_violation_observed_for_handler),
+                                protocol_violation_for_handler.clone(),
+                            )?;
+                        }
+                        response?;
                         Ok(Handled::Yes)
                     }
                     message => Ok(Handled::No {
@@ -2504,6 +2735,12 @@ async fn open_handshake(
         })?;
     if initialized.protocol_version != ProtocolVersion::V1
         || !supports_http_mcp(&initialized.agent_capabilities.mcp_capabilities)
+        || spec.required_agent_info_version().is_some_and(|expected| {
+            initialized
+                .agent_info
+                .as_ref()
+                .is_none_or(|info| info.version != expected)
+        })
     {
         return Err(AgentStartupFailure::start(
             "protocol_incompatible",
@@ -3548,7 +3785,7 @@ mod tests {
             let mut reader = AcpFrameLimitedReader::new(
                 wire.as_slice(),
                 Arc::clone(&exceeded),
-                Arc::new(AtomicBool::new(false)),
+                Arc::new(ProtocolViolationBoundary::default()),
             );
             let mut output = Vec::new();
             let result = reader.read_to_end(&mut output).await.map(|_| output);
@@ -3571,7 +3808,7 @@ mod tests {
 "#
             .as_slice(),
             Arc::clone(&exceeded),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(ProtocolViolationBoundary::default()),
         );
         let mut output = Vec::new();
         reader.read_to_end(&mut output).await.unwrap();
@@ -3607,7 +3844,7 @@ mod tests {
             let mut reader = AcpFrameLimitedReader::new(
                 frame.as_slice(),
                 Arc::clone(&exceeded),
-                Arc::new(AtomicBool::new(false)),
+                Arc::new(ProtocolViolationBoundary::default()),
             );
             let mut output = Vec::new();
             reader.read_to_end(&mut output).await.unwrap();
@@ -3620,7 +3857,7 @@ mod tests {
         let mut reader = AcpFrameLimitedReader::new(
             frame.as_slice(),
             Arc::clone(&exceeded),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(ProtocolViolationBoundary::default()),
         );
         let mut output = Vec::new();
         assert_eq!(
@@ -3633,7 +3870,7 @@ mod tests {
         let mut reader = AcpFrameLimitedReader::new(
             b"{not-json}\n".as_slice(),
             Arc::clone(&exceeded),
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(ProtocolViolationBoundary::default()),
         );
         let mut output = Vec::new();
         assert_eq!(
@@ -3646,7 +3883,7 @@ mod tests {
     #[tokio::test]
     async fn acp_frame_reader_rejects_malformed_json_rpc_response_envelope() {
         let exceeded = Arc::new(AtomicBool::new(false));
-        let protocol_violation = Arc::new(AtomicBool::new(false));
+        let protocol_violation = Arc::new(ProtocolViolationBoundary::default());
         let frame = br#"{"jsonrpc":"2.0","id":"request","result":{},"error":{"code":-32603,"message":"ambiguous"}}
 "#;
         let mut reader = AcpFrameLimitedReader::new(
@@ -3661,12 +3898,12 @@ mod tests {
             std::io::ErrorKind::InvalidData,
         );
         assert!(!exceeded.load(Ordering::Acquire));
-        assert!(protocol_violation.load(Ordering::Acquire));
+        assert!(protocol_violation.is_observed());
     }
 
     #[test]
     fn acp_response_tracker_rejects_unknown_and_duplicate_response_ids() {
-        let protocol_violation = Arc::new(AtomicBool::new(false));
+        let protocol_violation = Arc::new(ProtocolViolationBoundary::default());
         let tracker = AcpResponseTracker::new(Arc::clone(&protocol_violation));
         tracker
             .observe_outgoing(
@@ -3676,7 +3913,7 @@ mod tests {
         tracker
             .observe_incoming(r#"{"jsonrpc":"2.0","id":"expected","result":{}}"#)
             .unwrap();
-        assert!(!protocol_violation.load(Ordering::Acquire));
+        assert!(!protocol_violation.is_observed());
 
         assert_eq!(
             tracker
@@ -3685,7 +3922,71 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData,
         );
-        assert!(protocol_violation.load(Ordering::Acquire));
+        assert!(protocol_violation.is_observed());
+    }
+
+    #[tokio::test]
+    async fn acp_response_tracker_signals_only_after_the_response_is_flushed() {
+        let tracker = AcpResponseTracker::new(Arc::new(ProtocolViolationBoundary::default()));
+        let response_id = serde_json::from_str::<RequestId>(r#""late-request""#).unwrap();
+        let mut flushed = tracker.wait_for_response_flush(response_id);
+        let response = r#"{"jsonrpc":"2.0","id":"late-request","error":{"code":-32601,"message":"Method not found"}}"#;
+
+        tracker.observe_outgoing(response).unwrap();
+        assert!(flushed.try_recv().is_err());
+        tracker.observe_outgoing_flushed(response);
+        flushed.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_then_request_batch_predeclares_deferred_settlement_evidence() {
+        let boundary = Arc::new(ProtocolViolationBoundary::default());
+        let tracker = AcpResponseTracker::new(Arc::clone(&boundary));
+        tracker
+            .observe_outgoing(
+                r#"{"jsonrpc":"2.0","id":"prompt","method":"session/prompt","params":{}}"#,
+            )
+            .unwrap();
+        tracker
+            .observe_incoming(
+                r#"[{"jsonrpc":"2.0","id":"prompt","result":{"stopReason":"end_turn"}},{"jsonrpc":"2.0","id":"late","method":"terminal/create","params":{}}]"#,
+            )
+            .unwrap();
+        let late_id = serde_json::from_str::<RequestId>(r#""late""#).unwrap();
+        assert!(boundary.is_observed());
+        assert!(tracker.response_was_predeferred(&late_id));
+        let waiter = tokio::spawn({
+            let boundary = Arc::clone(&boundary);
+            async move { boundary.wait_for_settlement_evidence().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        let response =
+            r#"{"jsonrpc":"2.0","id":"late","error":{"code":-32601,"message":"Method not found"}}"#;
+        tracker.observe_outgoing(response).unwrap();
+        tracker.observe_outgoing_flushed(response);
+        assert!(waiter.await.unwrap());
+        assert!(!tracker.response_was_predeferred(&late_id));
+    }
+
+    #[tokio::test]
+    async fn deferred_protocol_violation_waits_for_every_response_flush() {
+        let boundary = Arc::new(ProtocolViolationBoundary::default());
+
+        boundary.begin_deferred_response();
+        boundary.begin_deferred_response();
+        assert!(boundary.is_observed());
+        let waiter_boundary = Arc::clone(&boundary);
+        let waiter =
+            tokio::spawn(async move { waiter_boundary.wait_for_settlement_evidence().await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        assert!(!boundary.complete_deferred_response());
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        assert!(boundary.complete_deferred_response());
+        assert!(waiter.await.unwrap());
     }
 
     #[tokio::test]
