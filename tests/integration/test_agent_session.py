@@ -8,7 +8,7 @@ import os
 import socket
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import pytest
@@ -29,9 +29,14 @@ def _native() -> Any:
     return importlib.import_module("troupe._runtime")
 
 
-def _profile(workspace: Path, *, effort: str | None = "max") -> troupe.AgentProfile:
+def _profile(
+    workspace: Path,
+    *,
+    effort: str | None = "max",
+    agent: Literal["codex", "claude", "kimi"] = "codex",
+) -> troupe.AgentProfile:
     return troupe.AgentProfile(
-        agent="codex",
+        agent=agent,
         workspace=workspace,
         model="test-model",
         effort=effort,
@@ -47,6 +52,8 @@ def _configure_mock(
     authoritative_prompt_error_codes: list[int] | None = None,
 ) -> None:
     args = [str(MOCK_AGENT), "--events", str(events), "--scenario", scenario]
+    if scenario.startswith("claude_"):
+        args.extend(["--mcp-revision", "2025-11-25"])
     if release is not None:
         args.extend(["--release", str(release)])
     launch: dict[str, object] = {
@@ -80,6 +87,20 @@ def _events(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        status = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return False
+    state = status[status.rfind(")") + 2 :].split(maxsplit=1)[0]
+    return state not in {"X", "Z"}
+
+
+async def _wait_for_process_exit(pid: int) -> None:
+    while _process_is_running(pid):
+        await asyncio.sleep(0)
 
 
 def _open_directory_fds(path: Path) -> list[int]:
@@ -908,6 +929,551 @@ def test_codex_non_authoritative_prompt_errors_break_and_latch_the_session(
     assert all(error.__cause__ is None for error in errors)
     assert states == ["broken", "broken"]
     assert sum(row["event"] == "prompt_received" for row in _events(events)) == 1
+
+
+def test_claude_adapter_handles_the_pinned_permission_matrix_in_one_turn(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, scenario="claude_permission_matrix")
+    observed: list[dict[str, object]] = []
+    runtime = _native()._Runtime()
+
+    class ClaudePermissionActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            observed.append(
+                await self.act(
+                    script="Complete the task without human interaction.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the completed task value"
+                        )
+                    },
+                )
+            )
+            return ()
+
+    class ClaudePermissionProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudePermissionActor,
+                name="claude-permissions",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            assert await handle.cue({}) == ()
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudePermissionProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert observed == [{"value": 8}]
+    responses = [
+        row
+        for row in _events(events)
+        if row["event"] == "claude_permission_response_received"
+    ]
+    assert [row["permission_case"] for row in responses] == [
+        "tool",
+        "exit_plan_mode",
+        "unknown",
+        "ambiguous",
+    ]
+    assert [
+        row["config_id"]
+        for row in _events(events)
+        if row["event"] == "config_applied"
+    ] == ["mode", "model", "effort"]
+    assert [
+        row["mode"]
+        for row in _events(events)
+        if row["event"] == "claude_mode_update_sent"
+    ] == ["plan", "default"]
+    assert [
+        row["mode"]
+        for row in _events(events)
+        if row["event"] == "claude_config_mode_snapshot_sent"
+    ] == ["plan", "default"]
+
+
+def test_claude_turn_cannot_settle_until_plan_mode_is_restored(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    release = workspace / "settle.fifo"
+    os.mkfifo(release)
+    _configure_mock(
+        events,
+        scenario="claude_plan_mode_not_restored",
+        release=release,
+    )
+    errors: list[troupe.AgentSessionBrokenError] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class ClaudePlanActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                await self.act(
+                    script="Complete the task after leaving plan mode.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the completed task value"
+                        )
+                    },
+                )
+            except troupe.AgentSessionBrokenError as error:
+                errors.append(error)
+            return ()
+
+    class ClaudePlanProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudePlanActor,
+                name="claude-plan-not-restored",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            first = asyncio.create_task(handle.cue({}))
+            while True:
+                state = handle._agent_state_for_test()  # type: ignore[attr-defined]
+                permission_answered = any(
+                    row["event"] == "claude_unrestored_permission_response_received"
+                    for row in _events(events)
+                )
+                if state == "broken" or (state == "active" and permission_answered):
+                    break
+                await asyncio.sleep(0)
+            assert handle._agent_state_for_test() == "active"  # type: ignore[attr-defined]
+            await _signal_fifo(release)
+            assert await first == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            assert await handle.cue({}) == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudePlanProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert [error.code for error in errors] == [
+        "protocol_violation",
+        "protocol_violation",
+    ]
+    assert states == ["broken", "broken"]
+    assert sum(row["event"] == "prompt_received" for row in _events(events)) == 1
+
+
+def test_claude_cannot_restore_plan_mode_after_the_prompt_response(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    restore = workspace / "restore.fifo"
+    os.mkfifo(restore)
+    _configure_mock(
+        events,
+        scenario="claude_plan_mode_restored_after_response",
+        release=restore,
+    )
+    _native()._agent_test_hold_turn_settlement()
+    errors: list[troupe.AgentSessionBrokenError] = []
+    results: list[dict[str, object]] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class ClaudeLateRestoreActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                results.append(
+                    await self.act(
+                        script="Complete the task after leaving plan mode.",
+                        output_schema={
+                            "value": troupe.act_schema.Int64Value(
+                                description="the completed task value"
+                            )
+                        },
+                    )
+                )
+            except troupe.AgentSessionBrokenError as error:
+                errors.append(error)
+            return ()
+
+    class ClaudeLateRestoreProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudeLateRestoreActor,
+                name="claude-late-plan-restore",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            first = asyncio.create_task(handle.cue({}))
+            while not _native()._agent_test_turn_gate_states()["settlement"]["arrived"]:
+                await asyncio.sleep(0)
+            await _signal_fifo(restore)
+            while (
+                handle._agent_state_for_test() == "active"  # type: ignore[attr-defined]
+                and handle._agent_mode_transition_for_test() != "stable"  # type: ignore[attr-defined]
+            ):
+                await asyncio.sleep(0)
+            _native()._agent_test_release_turn_settlement()
+            assert await first == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            assert await handle.cue({}) == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudeLateRestoreProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert results == []
+    assert [error.code for error in errors] == [
+        "protocol_violation",
+        "protocol_violation",
+    ]
+    assert states == ["broken", "broken"]
+    assert sum(row["event"] == "prompt_received" for row in _events(events)) == 1
+
+
+def test_claude_allows_an_absent_effort_option_when_effort_is_unspecified(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, scenario="claude_effort_option_absent")
+
+    async def scenario() -> None:
+        production = troupe.Production([])
+        handle = production.cast_actor(
+            SessionActor,
+            name="claude-without-effort-option",
+            agent_profile=_profile(workspace, agent="claude", effort=None),
+            actor_args=(),
+            actor_kwargs={},
+        )
+
+        ready = await _ready(handle)
+        assert ready["state"] == "ready"
+        assert ready["model"] == "test-model"
+        assert ready["effort"] is None
+        assert [
+            row["config_id"]
+            for row in _events(events)
+            if row["event"] == "config_applied"
+        ] == ["mode", "model"]
+
+        await production._agent_shutdown_for_test()  # type: ignore[attr-defined]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_claude_rate_limit_is_authoritative_and_keeps_the_session(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        scenario="claude_rate_limit_then_success",
+        authoritative_prompt_error_codes=[],
+    )
+    errors: list[troupe.AgentTurnError] = []
+    observed: list[dict[str, object]] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class ClaudeRateLimitActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            try:
+                observed.append(
+                    await self.act(
+                        script=f"Complete Claude turn {cue.instruction['turn']}.",
+                        output_schema={
+                            "value": troupe.act_schema.Int64Value(
+                                description="the task value"
+                            )
+                        },
+                    )
+                )
+            except troupe.AgentTurnError as error:
+                errors.append(error)
+            return ()
+
+    class ClaudeRateLimitProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudeRateLimitActor,
+                name="claude-rate-limit",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            for turn in (1, 2):
+                assert await handle.cue({"turn": turn}) == ()
+                states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudeRateLimitProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert [error.code for error in errors] == ["request_failed"]
+    assert observed == [{"value": 7}]
+    assert states == ["ready", "ready"]
+    prompts = [row for row in _events(events) if row["event"] == "prompt_received"]
+    assert len(prompts) == 2
+    assert len({row["session_id"] for row in prompts}) == 1
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "expected_code"),
+    [
+        ("claude_authentication_lost", "authentication_lost"),
+        ("claude_uncertain_prompt_error", "uncertain_settlement"),
+    ],
+)
+def test_claude_non_authoritative_errors_break_and_latch_the_session(
+    tmp_path: Path,
+    scenario_name: str,
+    expected_code: str,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        scenario=scenario_name,
+        authoritative_prompt_error_codes=[],
+    )
+    errors: list[troupe.AgentSessionBrokenError] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class ClaudeBrokenActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                await self.act(
+                    script="Attempt the Claude task.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the task value"
+                        )
+                    },
+                )
+            except troupe.AgentSessionBrokenError as error:
+                errors.append(error)
+            return ()
+
+    class ClaudeBrokenProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudeBrokenActor,
+                name=f"claude-broken-{scenario_name}",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            for turn in (1, 2):
+                assert await handle.cue({"turn": turn}) == ()
+                states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudeBrokenProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert [error.code for error in errors] == [expected_code, expected_code]
+    assert states == ["broken", "broken"]
+    assert sum(row["event"] == "prompt_received" for row in _events(events)) == 1
+
+
+def test_claude_synthetic_cancel_breaks_and_latches_without_replacement(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settlement_release = workspace / "settlement.fifo"
+    os.mkfifo(settlement_release)
+    _configure_mock(
+        events,
+        scenario="claude_synthetic_cancel_detached_descendant",
+        release=settlement_release,
+    )
+    errors: list[troupe.AgentSessionBrokenError] = []
+    runtime = _native()._Runtime()
+
+    class ClaudeCancelActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                await self.act(
+                    script="Run until cancelled.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the task value"
+                        )
+                    },
+                )
+            except troupe.AgentSessionBrokenError as error:
+                errors.append(error)
+            return ()
+
+    class ClaudeCancelProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudeCancelActor,
+                name="claude-synthetic-cancel",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            first = asyncio.create_task(handle.cue({"turn": 1}))
+            await _wait_for_event(events, "prompt_received")
+            await _wait_for_event(events, "descendant_started")
+            descendant_pid = int(
+                next(
+                    row["descendant_pid"]
+                    for row in _events(events)
+                    if row["event"] == "descendant_started"
+                )
+            )
+            try:
+                assert _process_is_running(descendant_pid)
+                assert first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+                await _wait_for_event(events, "cancel_received")
+                assert handle._agent_state_for_test() == "cancelling"  # type: ignore[attr-defined]
+
+                second = asyncio.create_task(handle.cue({"turn": 2}))
+                await asyncio.sleep(0)
+                assert not second.done()
+                await _signal_fifo(settlement_release)
+                assert await second == ()
+                assert handle._agent_state_for_test() == "broken"  # type: ignore[attr-defined]
+                await asyncio.wait_for(_wait_for_process_exit(descendant_pid), 1.0)
+                assert await handle.cue({"turn": 3}) == ()
+            finally:
+                if _process_is_running(descendant_pid):
+                    os.kill(descendant_pid, 9)
+                runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudeCancelProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert [error.code for error in errors] == [
+        "uncertain_settlement",
+        "uncertain_settlement",
+    ]
+    rows = _events(events)
+    assert sum(row["event"] == "prompt_received" for row in rows) == 1
+    assert sum(row["event"] == "session_new_received" for row in rows) == 1
+
+
+def test_claude_cancel_racing_with_normal_end_turn_keeps_the_session(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    settlement_release = workspace / "settlement.fifo"
+    os.mkfifo(settlement_release)
+    _configure_mock(
+        events,
+        scenario="claude_cancel_end_turn_race",
+        release=settlement_release,
+    )
+    observed: list[dict[str, object]] = []
+    runtime = _native()._Runtime()
+
+    class ClaudeCancelRaceActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            observed.append(
+                await self.act(
+                    script=f"Complete turn {cue.instruction['turn']}.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the task value"
+                        )
+                    },
+                )
+            )
+            return ()
+
+    class ClaudeCancelRaceProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                ClaudeCancelRaceActor,
+                name="claude-cancel-end-turn-race",
+                agent_profile=_profile(workspace, agent="claude"),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            first = asyncio.create_task(handle.cue({"turn": 1}))
+            await _wait_for_event(events, "prompt_received")
+            assert first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            await _wait_for_event(events, "cancel_received")
+            await _signal_fifo(settlement_release)
+            assert await handle.cue({"turn": 2}) == ()
+            assert handle._agent_state_for_test() == "ready"  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ClaudeCancelRaceProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert observed == [{"value": 2}]
+    prompts = [row for row in _events(events) if row["event"] == "prompt_received"]
+    assert len(prompts) == 2
+    assert len({row["session_id"] for row in prompts}) == 1
 
 
 @pytest.mark.parametrize(

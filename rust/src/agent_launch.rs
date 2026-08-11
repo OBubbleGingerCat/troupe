@@ -205,6 +205,7 @@ pub(crate) struct AgentLaunchSpec {
     pub(crate) mode_application: ModeApplicationV1,
     pub(crate) model_config_id: &'static str,
     pub(crate) effort_config_id: &'static str,
+    pub(crate) effort_option_optional_when_unspecified: bool,
     pub(crate) configuration_order: ConfigurationOrderV1,
     pub(crate) effective_value_validation: EffectiveValueValidationV1,
     pub(crate) mcp_registration: McpRegistrationV1,
@@ -270,6 +271,7 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     },
     model_config_id: "model",
     effort_config_id: "reasoning_effort",
+    effort_option_optional_when_unspecified: false,
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
@@ -300,6 +302,7 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     },
     model_config_id: "model",
     effort_config_id: "effort",
+    effort_option_optional_when_unspecified: true,
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
@@ -331,6 +334,7 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     },
     model_config_id: "model",
     effort_config_id: "thinking",
+    effort_option_optional_when_unspecified: false,
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
@@ -1111,6 +1115,10 @@ pub(crate) fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3
         value.set_item("mode_application", mode_application)?;
         value.set_item("model_config_id", spec.model_config_id)?;
         value.set_item("effort_config_id", spec.effort_config_id)?;
+        value.set_item(
+            "effort_option_optional_when_unspecified",
+            spec.effort_option_optional_when_unspecified,
+        )?;
         match spec.configuration_order {
             ConfigurationOrderV1::ModeModelEffort => {
                 value.set_item("configuration_order", ["mode", "model", "effort"])?;

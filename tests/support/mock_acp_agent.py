@@ -353,6 +353,90 @@ def _codex_permission_cases(
     ]
 
 
+def _claude_permission_cases(
+    session_id: str,
+) -> list[tuple[str, dict[str, object], dict[str, object]]]:
+    def option(option_id: str, kind: str) -> dict[str, object]:
+        return {
+            "optionId": option_id,
+            "name": f"mock Claude display text for {option_id}",
+            "kind": kind,
+        }
+
+    def request(
+        *,
+        kind: str,
+        options: list[dict[str, object]],
+        meta: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        value: dict[str, object] = {
+            "sessionId": session_id,
+            "toolCall": {
+                "toolCallId": "claude-permission-tool",
+                "kind": kind,
+                "status": "pending",
+            },
+            "options": options,
+        }
+        if meta is not None:
+            value["_meta"] = meta
+        return value
+
+    def selected(option_id: str) -> dict[str, object]:
+        return {"outcome": {"outcome": "selected", "optionId": option_id}}
+
+    return [
+        (
+            "tool",
+            request(
+                kind="execute",
+                options=[
+                    option("allow_always", "allow_always"),
+                    option("reject", "reject_once"),
+                    option("allow", "allow_once"),
+                ],
+            ),
+            selected("allow"),
+        ),
+        (
+            "exit_plan_mode",
+            request(
+                kind="switch_mode",
+                options=[
+                    option("acceptEdits", "allow_always"),
+                    option("plan", "reject_once"),
+                    option("default", "allow_once"),
+                ],
+            ),
+            selected("default"),
+        ),
+        (
+            "unknown",
+            request(
+                kind="execute",
+                options=[
+                    option("future-allow", "allow_once"),
+                    option("future-reject", "reject_once"),
+                ],
+                meta={"future_adapter_shape": True},
+            ),
+            selected("future-reject"),
+        ),
+        (
+            "ambiguous",
+            request(
+                kind="execute",
+                options=[
+                    option("reject-a", "reject_once"),
+                    option("reject-b", "reject_once"),
+                ],
+                meta={"future_adapter_shape": True},
+            ),
+            {"outcome": {"outcome": "cancelled"}},
+        ),
+    ]
+
+
 def _write_oversized_acp_frame() -> None:
     sys.stdout.buffer.write(b" " * (ACP_FRAME_MAX_BYTES + 1))
     sys.stdout.buffer.flush()
@@ -381,17 +465,23 @@ def _config_options(
     invalid_domain: str | None = None,
     include_mode: bool = True,
 ) -> list[dict[str, object]]:
+    effort_id = next(
+        (identifier for identifier in ("effort", "reasoning_effort") if identifier in values),
+        None,
+    )
+
     def choices(identifier: str, values_: tuple[str, ...]) -> tuple[str, ...]:
         if invalid_domain != identifier:
             return values_
         return tuple(value for value in values_ if value != values[identifier])
 
+    mode_values = ("default", "plan") if "effort" in values else ("default", "agent")
     options = [
         _select_option(
             "mode",
             "Mode",
             values["mode"],
-            choices("mode", ("default", "agent")),
+            choices("mode", mode_values),
             "mode",
         ),
         _select_option(
@@ -401,14 +491,17 @@ def _config_options(
             choices("model", ("default-model", "test-model")),
             "model",
         ),
-        _select_option(
-            "reasoning_effort",
-            "Reasoning effort",
-            values["reasoning_effort"],
-            choices("reasoning_effort", ("medium", "max")),
-            "thought_level",
-        ),
     ]
+    if effort_id is not None:
+        options.append(
+            _select_option(
+                effort_id,
+                "Reasoning effort",
+                values[effort_id],
+                choices(effort_id, ("medium", "max")),
+                "thought_level",
+            )
+        )
     if not include_mode:
         options = [option for option in options if option["id"] != "mode"]
     return options
@@ -740,13 +833,17 @@ def _claim_attempt(path: Path | None) -> int:
 
 
 def main() -> int:
+    global MCP_REVISION
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--events", type=Path, required=True)
     parser.add_argument("--scenario", default="ready")
     parser.add_argument("--release", type=Path)
     parser.add_argument("--results-json")
     parser.add_argument("--attempt-file", type=Path)
+    parser.add_argument("--mcp-revision", default=MCP_REVISION)
     args = parser.parse_args()
+    MCP_REVISION = args.mcp_revision
 
     attempt = _claim_attempt(args.attempt_file)
 
@@ -765,19 +862,30 @@ def main() -> int:
             "codex_path_observed",
             value=os.environ.get("CODEX_PATH"),
         )
-    if args.scenario == "spawn_descendant":
+    if args.scenario in {
+        "spawn_descendant",
+        "spawn_detached_descendant",
+        "spawn_detached_descendant_then_exit",
+    }:
         descendant = subprocess.Popen(
             [sys.executable, "-c", "import signal; signal.pause()"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=args.scenario != "spawn_descendant",
         )
         _record(args.events, "descendant_started", descendant_pid=descendant.pid)
     config = {
         "mode": "default",
         "model": "default-model",
-        "reasoning_effort": "medium",
+        (
+            "effort"
+            if args.scenario.startswith("claude_")
+            else "reasoning_effort"
+        ): "medium",
     }
+    if args.scenario == "claude_effort_option_absent":
+        del config["effort"]
     session_invocations = 0
     partial_route_connection: socket.socket | None = None
     pending_mcp_server: dict[str, Any] | None = None
@@ -793,7 +901,36 @@ def main() -> int:
     codex_permission_queue: list[
         tuple[str, dict[str, object], dict[str, object]]
     ] = []
+    claude_permission_queue: list[
+        tuple[str, dict[str, object], dict[str, object]]
+    ] = []
     background_threads: list[threading.Thread] = []
+
+    def send_claude_mode_transition(mode: str) -> None:
+        assert current_session_id is not None
+        _notification(
+            "session/update",
+            {
+                "sessionId": current_session_id,
+                "update": {
+                    "sessionUpdate": "current_mode_update",
+                    "currentModeId": mode,
+                },
+            },
+        )
+        _record(args.events, "claude_mode_update_sent", mode=mode)
+        config["mode"] = mode
+        _notification(
+            "session/update",
+            {
+                "sessionId": current_session_id,
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": _config_options(config),
+                },
+            },
+        )
+        _record(args.events, "claude_config_mode_snapshot_sent", mode=mode)
 
     for raw_line in sys.stdin:
         request = json.loads(raw_line)
@@ -836,6 +973,110 @@ def main() -> int:
                 )
                 assert accepted["result"]["isError"] is False, accepted
                 _record(args.events, "result_submitted", turn=prompt_turn, value={"value": 7})
+                _response(pending_prompt_id, {"stopReason": "end_turn"})
+                pending_permission_id = None
+                pending_permission_expected = None
+                pending_permission_case = None
+                pending_prompt_id = None
+                continue
+            if args.scenario == "claude_permission_matrix":
+                assert request.get("result") == pending_permission_expected, request
+                assert pending_permission_case is not None
+                completed_permission_case = pending_permission_case
+                _record(
+                    args.events,
+                    "claude_permission_response_received",
+                    permission_case=pending_permission_case,
+                    result=request.get("result"),
+                )
+                if completed_permission_case == "exit_plan_mode":
+                    send_claude_mode_transition("default")
+                if claude_permission_queue:
+                    (
+                        pending_permission_case,
+                        permission_params,
+                        pending_permission_expected,
+                    ) = claude_permission_queue.pop(0)
+                    pending_permission_id = (
+                        f"claude-permission-{pending_permission_case}"
+                    )
+                    if pending_permission_case == "exit_plan_mode":
+                        send_claude_mode_transition("plan")
+                    _request(
+                        pending_permission_id,
+                        "session/request_permission",
+                        permission_params,
+                    )
+                    continue
+                assert current_mcp_server is not None
+                assert pending_prompt_id is not None
+                accepted = _submit_result(
+                    current_mcp_server,
+                    991,
+                    {"value": 8},
+                )
+                assert accepted["result"]["isError"] is False, accepted
+                _record(
+                    args.events,
+                    "result_submitted",
+                    turn=prompt_turn,
+                    value={"value": 8},
+                )
+                _response(pending_prompt_id, {"stopReason": "end_turn"})
+                pending_permission_id = None
+                pending_permission_expected = None
+                pending_permission_case = None
+                pending_prompt_id = None
+                continue
+            if args.scenario in {
+                "claude_plan_mode_not_restored",
+                "claude_plan_mode_restored_after_response",
+            }:
+                assert request.get("result") == pending_permission_expected, request
+                assert current_mcp_server is not None
+                assert pending_prompt_id is not None
+                _record(
+                    args.events,
+                    "claude_unrestored_permission_response_received",
+                    scenario=args.scenario,
+                )
+                if args.scenario == "claude_plan_mode_restored_after_response":
+                    accepted = _submit_result(
+                        current_mcp_server,
+                        993,
+                        {"value": 10},
+                    )
+                    assert accepted["result"]["isError"] is False, accepted
+                    _record(
+                        args.events,
+                        "result_submitted",
+                        turn=prompt_turn,
+                        value={"value": 10},
+                    )
+                    _response(pending_prompt_id, {"stopReason": "end_turn"})
+                    _record(args.events, "claude_prompt_response_sent_before_restore")
+                assert args.release is not None
+                with args.release.open("rb", buffering=0) as release:
+                    assert release.read(1) == b"1"
+                if args.scenario == "claude_plan_mode_restored_after_response":
+                    send_claude_mode_transition("default")
+                    pending_permission_id = None
+                    pending_permission_expected = None
+                    pending_permission_case = None
+                    pending_prompt_id = None
+                    continue
+                accepted = _submit_result(
+                    current_mcp_server,
+                    992,
+                    {"value": 9},
+                )
+                assert accepted["result"]["isError"] is False, accepted
+                _record(
+                    args.events,
+                    "result_submitted",
+                    turn=prompt_turn,
+                    value={"value": 9},
+                )
                 _response(pending_prompt_id, {"stopReason": "end_turn"})
                 pending_permission_id = None
                 pending_permission_expected = None
@@ -1067,14 +1308,21 @@ def main() -> int:
                     },
                 )
                 _record(args.events, "opening_session_scoped_update_sent")
-            if args.scenario in {"exit_before_turn_intake", "idle_clean_eof"}:
+            if args.scenario in {
+                "exit_before_turn_intake",
+                "idle_clean_eof",
+                "spawn_detached_descendant_then_exit",
+            }:
                 assert args.release is not None
 
                 def terminate_after_release() -> None:
                     assert args.release is not None
                     with args.release.open("rb", buffering=0) as release:
                         assert release.read(1) == b"1"
-                    if args.scenario == "exit_before_turn_intake":
+                    if args.scenario in {
+                        "exit_before_turn_intake",
+                        "spawn_detached_descendant_then_exit",
+                    }:
                         _record(args.events, "process_exiting_before_turn_intake")
                         os._exit(0)
                     _record(args.events, "idle_stdout_closing")
@@ -1131,6 +1379,15 @@ def main() -> int:
                 "codex_permission_matrix",
                 "codex_uncertain_prompt_error",
                 "codex_usage_limit_then_success",
+                "claude_authentication_lost",
+                "claude_cancel_end_turn_race",
+                "claude_permission_matrix",
+                "claude_plan_mode_not_restored",
+                "claude_plan_mode_restored_after_response",
+                "claude_rate_limit_then_success",
+                "claude_synthetic_cancel",
+                "claude_synthetic_cancel_detached_descendant",
+                "claude_uncertain_prompt_error",
                 "act_terminal_then_permission_batch",
                 "act_unknown_prompt_response_id",
                 "opening_crash_twice_then_ready",
@@ -1168,6 +1425,43 @@ def main() -> int:
                     permission_params,
                 )
                 continue
+            if args.scenario == "claude_permission_matrix":
+                assert current_session_id is not None
+                pending_prompt_id = request_id
+                claude_permission_queue = _claude_permission_cases(current_session_id)
+                (
+                    pending_permission_case,
+                    permission_params,
+                    pending_permission_expected,
+                ) = claude_permission_queue.pop(0)
+                pending_permission_id = (
+                    f"claude-permission-{pending_permission_case}"
+                )
+                _request(
+                    pending_permission_id,
+                    "session/request_permission",
+                    permission_params,
+                )
+                continue
+            if args.scenario in {
+                "claude_plan_mode_not_restored",
+                "claude_plan_mode_restored_after_response",
+            }:
+                assert current_session_id is not None
+                pending_prompt_id = request_id
+                send_claude_mode_transition("plan")
+                (
+                    pending_permission_case,
+                    permission_params,
+                    pending_permission_expected,
+                ) = _claude_permission_cases(current_session_id)[1]
+                pending_permission_id = "claude-permission-exit-plan-mode-unrestored"
+                _request(
+                    pending_permission_id,
+                    "session/request_permission",
+                    permission_params,
+                )
+                continue
             cancellation_scenarios = {
                 "act_cancel_after_result_then_reuse",
                 "act_cancel_during_callback_then_reuse",
@@ -1175,10 +1469,33 @@ def main() -> int:
                 "act_cancel_then_reuse",
                 "act_cancel_transport_lost",
                 "act_result_rejected_then_reuse",
+                "claude_cancel_end_turn_race",
+                "claude_synthetic_cancel",
+                "claude_synthetic_cancel_detached_descendant",
             }
             if args.scenario in cancellation_scenarios:
                 if prompt_turn == 1:
                     pending_prompt_id = request_id
+                    if (
+                        args.scenario
+                        == "claude_synthetic_cancel_detached_descendant"
+                    ):
+                        descendant = subprocess.Popen(
+                            [
+                                sys.executable,
+                                "-c",
+                                "import signal; signal.pause()",
+                            ],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                        _record(
+                            args.events,
+                            "descendant_started",
+                            descendant_pid=descendant.pid,
+                        )
                     if args.scenario == "act_cancel_after_result_then_reuse":
                         accepted = _submit_result(
                             current_mcp_server,
@@ -1340,6 +1657,33 @@ def main() -> int:
                     request_id,
                     -32603,
                     "mock Codex prompt failure",
+                    data=data,
+                )
+                continue
+            if args.scenario in {
+                "claude_authentication_lost",
+                "claude_rate_limit_then_success",
+                "claude_uncertain_prompt_error",
+            } and (
+                args.scenario != "claude_rate_limit_then_success" or prompt_turn == 1
+            ):
+                data: object | None
+                if args.scenario == "claude_authentication_lost":
+                    data = {"errorKind": "authentication_failed"}
+                elif args.scenario == "claude_rate_limit_then_success":
+                    data = {"errorKind": "rate_limit"}
+                else:
+                    data = None
+                _record(
+                    args.events,
+                    "claude_prompt_error_sent",
+                    scenario=args.scenario,
+                    data=data,
+                )
+                _error(
+                    request_id,
+                    -32603,
+                    "mock Claude prompt failure",
                     data=data,
                 )
                 continue
@@ -1653,6 +1997,7 @@ def main() -> int:
                 "act_request_error_parse_collision_then_success",
                 "act_request_error_transport_collision_then_success",
                 "codex_usage_limit_then_success",
+                "claude_rate_limit_then_success",
             }:
                 value = {"value": 7}
                 accepted = _submit_result(
@@ -1758,6 +2103,9 @@ def main() -> int:
             "act_cancel_then_reuse",
             "act_cancel_transport_lost",
             "act_result_rejected_then_reuse",
+            "claude_cancel_end_turn_race",
+            "claude_synthetic_cancel",
+            "claude_synthetic_cancel_detached_descendant",
         }:
             assert params["sessionId"] == current_session_id
             assert pending_prompt_id is not None
@@ -1782,7 +2130,16 @@ def main() -> int:
                 assert args.release is not None
                 with args.release.open("rb", buffering=0) as release:
                     assert release.read(1) == b"1"
-                _response(request_id, {"stopReason": "cancelled"})
+                _response(
+                    request_id,
+                    {
+                        "stopReason": (
+                            "end_turn"
+                            if args.scenario == "claude_cancel_end_turn_race"
+                            else "cancelled"
+                        )
+                    },
+                )
                 _record(args.events, "cancel_settled", turn=1)
 
             settlement = threading.Thread(target=settle_cancelled_turn)

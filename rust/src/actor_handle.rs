@@ -106,6 +106,14 @@ impl ActorHandle {
     }
 
     #[cfg(feature = "agent-test-support")]
+    fn _agent_mode_transition_for_test(&self, py: Python<'_>) -> PyResult<&'static str> {
+        self.capability(py)?
+            .agent_session()
+            .map(|session| session.mode_transition_name_for_test())
+            .ok_or_else(|| PyRuntimeError::new_err("Actor has no agent session"))
+    }
+
+    #[cfg(feature = "agent-test-support")]
     fn _agent_has_queued_turn_for_test(&self, py: Python<'_>) -> PyResult<bool> {
         self.capability(py)?
             .agent_session()

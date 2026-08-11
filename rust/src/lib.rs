@@ -52,7 +52,9 @@ mod _runtime {
     use crate::actor_handle::ActorHandle;
     #[cfg(feature = "agent-test-support")]
     #[pymodule_export]
-    use crate::agent_adapter::{permission_for_test, settlement_for_test};
+    use crate::agent_adapter::{
+        permission_for_test, settlement_for_test, supervisor_response_for_test,
+    };
     #[pymodule_export]
     use crate::agent_error::{
         AgentAuthenticationRequiredError, AgentError, AgentResultError, AgentResultIssue,

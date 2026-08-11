@@ -1,7 +1,7 @@
 use agent_client_protocol::Error;
 use agent_client_protocol::schema::v1::{
-    ErrorCode, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, SelectedPermissionOutcome,
+    ErrorCode, PermissionOption, PermissionOptionKind, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, SelectedPermissionOutcome, StopReason,
 };
 use serde_json::Value;
 
@@ -15,12 +15,33 @@ pub(crate) enum RemotePromptErrorSettlement {
     Uncertain,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SupervisorResponseSettlement {
+    Authoritative,
+    Uncertain,
+}
+
 pub(crate) trait AcpAgentAdapter: Sync {
     fn launch_spec(&self) -> &'static AgentLaunchSpec;
+
+    fn accepts_post_ready_mode(
+        &self,
+        expected: &str,
+        observed: &str,
+        turn_is_active: bool,
+    ) -> bool {
+        let _ = turn_is_active;
+        observed == expected
+    }
 
     fn resolve_permission(&self, request: &RequestPermissionRequest) -> RequestPermissionOutcome;
 
     fn classify_remote_prompt_error(&self, error: &Error) -> RemotePromptErrorSettlement;
+
+    fn classify_supervisor_response(
+        &self,
+        response: &PromptResponse,
+    ) -> SupervisorResponseSettlement;
 }
 
 struct CodexAcpAdapter;
@@ -180,6 +201,13 @@ impl AcpAgentAdapter for CodexAcpAdapter {
         }
         RemotePromptErrorSettlement::Uncertain
     }
+
+    fn classify_supervisor_response(
+        &self,
+        _response: &PromptResponse,
+    ) -> SupervisorResponseSettlement {
+        SupervisorResponseSettlement::Authoritative
+    }
 }
 
 fn codex_error_is_authentication_loss(error: &Error) -> bool {
@@ -219,6 +247,100 @@ fn classify_unimplemented_provider_error(error: &Error) -> RemotePromptErrorSett
     }
 }
 
+impl ClaudeAcpAdapter {
+    fn resolve_claude_permission(
+        &self,
+        request: &RequestPermissionRequest,
+    ) -> RequestPermissionOutcome {
+        let exit_plan_mode =
+            select_unique_id_and_kind(request, "default", PermissionOptionKind::AllowOnce)
+                .is_some()
+                && select_unique_id_and_kind(request, "plan", PermissionOptionKind::RejectOnce)
+                    .is_some();
+        if exit_plan_mode {
+            return select_unique_id_and_kind(request, "default", PermissionOptionKind::AllowOnce)
+                .expect("the Claude ExitPlanMode default option was just verified");
+        }
+
+        let ordinary_tool_permission =
+            select_unique_id_and_kind(request, "allow", PermissionOptionKind::AllowOnce).is_some()
+                && select_unique_id_and_kind(request, "reject", PermissionOptionKind::RejectOnce)
+                    .is_some()
+                && select_unique_id_and_kind(
+                    request,
+                    "allow_always",
+                    PermissionOptionKind::AllowAlways,
+                )
+                .is_some();
+        if ordinary_tool_permission {
+            return select_unique_id_and_kind(request, "allow", PermissionOptionKind::AllowOnce)
+                .expect("the Claude allow-once option was just verified");
+        }
+
+        reject_unknown(request)
+    }
+
+    fn classify_claude_prompt_error(error: &Error) -> RemotePromptErrorSettlement {
+        if error.code == ErrorCode::AuthRequired {
+            return RemotePromptErrorSettlement::AuthenticationLost;
+        }
+        if error.code != ErrorCode::InternalError {
+            return RemotePromptErrorSettlement::Uncertain;
+        }
+        let Some(error_kind) = error
+            .data
+            .as_ref()
+            .and_then(|data| object_field(data, "errorKind"))
+            .and_then(Value::as_str)
+        else {
+            return RemotePromptErrorSettlement::Uncertain;
+        };
+        match error_kind {
+            "authentication_failed" | "oauth_org_not_allowed" => {
+                RemotePromptErrorSettlement::AuthenticationLost
+            }
+            "billing_error" | "rate_limit" | "overloaded" | "invalid_request"
+            | "model_not_found" | "server_error" | "unknown" | "max_output_tokens"
+            | "no_result" => RemotePromptErrorSettlement::AuthoritativeRequestFailure,
+            _ => RemotePromptErrorSettlement::Uncertain,
+        }
+    }
+}
+
+impl AcpAgentAdapter for ClaudeAcpAdapter {
+    fn launch_spec(&self) -> &'static AgentLaunchSpec {
+        launch_spec(AgentKind::Claude)
+    }
+
+    fn resolve_permission(&self, request: &RequestPermissionRequest) -> RequestPermissionOutcome {
+        self.resolve_claude_permission(request)
+    }
+
+    fn accepts_post_ready_mode(
+        &self,
+        expected: &str,
+        observed: &str,
+        turn_is_active: bool,
+    ) -> bool {
+        observed == expected || (turn_is_active && expected == "default" && observed == "plan")
+    }
+
+    fn classify_remote_prompt_error(&self, error: &Error) -> RemotePromptErrorSettlement {
+        Self::classify_claude_prompt_error(error)
+    }
+
+    fn classify_supervisor_response(
+        &self,
+        response: &PromptResponse,
+    ) -> SupervisorResponseSettlement {
+        if response.stop_reason == StopReason::Cancelled {
+            SupervisorResponseSettlement::Uncertain
+        } else {
+            SupervisorResponseSettlement::Authoritative
+        }
+    }
+}
+
 macro_rules! impl_pending_adapter {
     ($adapter:ty, $agent:expr) => {
         impl AcpAgentAdapter for $adapter {
@@ -236,11 +358,17 @@ macro_rules! impl_pending_adapter {
             fn classify_remote_prompt_error(&self, error: &Error) -> RemotePromptErrorSettlement {
                 classify_unimplemented_provider_error(error)
             }
+
+            fn classify_supervisor_response(
+                &self,
+                _response: &PromptResponse,
+            ) -> SupervisorResponseSettlement {
+                SupervisorResponseSettlement::Authoritative
+            }
         }
     };
 }
 
-impl_pending_adapter!(ClaudeAcpAdapter, AgentKind::Claude);
 impl_pending_adapter!(KimiAcpAdapter, AgentKind::Kimi);
 
 #[cfg(feature = "agent-test-support")]
@@ -295,6 +423,25 @@ pub(crate) fn settlement_for_test(
     )
 }
 
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_adapter_supervisor_response_for_test")]
+pub(crate) fn supervisor_response_for_test(
+    agent: &str,
+    stop_reason: &str,
+) -> pyo3::PyResult<&'static str> {
+    let stop_reason: StopReason = serde_json::from_value(Value::String(stop_reason.to_owned()))
+        .map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid stop reason: {error}"))
+        })?;
+    let response = PromptResponse::new(stop_reason);
+    Ok(
+        match agent_adapter(parse_agent_for_test(agent)?).classify_supervisor_response(&response) {
+            SupervisorResponseSettlement::Authoritative => "authoritative",
+            SupervisorResponseSettlement::Uncertain => "uncertain",
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +469,14 @@ mod tests {
             RequestPermissionOutcome::Selected(selected)
                 if selected.option_id.0.as_ref() == "implement_plan"
         ));
+    }
+
+    #[test]
+    fn claude_accepts_plan_mode_only_during_an_active_turn() {
+        assert!(CLAUDE_ADAPTER.accepts_post_ready_mode("default", "default", false));
+        assert!(CLAUDE_ADAPTER.accepts_post_ready_mode("default", "plan", true));
+        assert!(!CLAUDE_ADAPTER.accepts_post_ready_mode("default", "plan", false));
+        assert!(!CLAUDE_ADAPTER.accepts_post_ready_mode("default", "acceptEdits", true));
+        assert!(!CODEX_ADAPTER.accepts_post_ready_mode("agent", "plan", true));
     }
 }

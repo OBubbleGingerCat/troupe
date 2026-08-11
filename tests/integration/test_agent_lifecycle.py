@@ -841,14 +841,23 @@ def test_production_shutdown_completes_an_active_actor_act_caller(
     assert failures[0].code == "transport_lost"
 
 
-def test_production_shutdown_terminates_the_whole_agent_process_group(
+@pytest.mark.parametrize(
+    ("scenario_name", "shares_agent_process_group"),
+    [
+        ("spawn_descendant", True),
+        ("spawn_detached_descendant", False),
+    ],
+)
+def test_production_shutdown_terminates_the_whole_agent_process_tree(
     tmp_path: Path,
+    scenario_name: str,
+    shares_agent_process_group: bool,
 ) -> None:
     events = tmp_path / "events.jsonl"
     attempts = tmp_path / "attempts"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    _configure_mock(events, "spawn_descendant", attempts)
+    _configure_mock(events, scenario_name, attempts)
     runtime = _native()._Runtime()
 
     class ProcessGroupProduction(troupe.Production):
@@ -871,7 +880,7 @@ def test_production_shutdown_terminates_the_whole_agent_process_group(
                 )
             )
             assert os.getpgid(agent_pid) == agent_pid
-            assert os.getpgid(descendant_pid) == agent_pid
+            assert (os.getpgid(descendant_pid) == agent_pid) is shares_agent_process_group
 
             try:
                 await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
@@ -887,6 +896,65 @@ def test_production_shutdown_terminates_the_whole_agent_process_group(
     async def scenario() -> None:
         await asyncio.wait_for(
             asyncio.shield(runtime.run(ProcessGroupProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_agent_process_exit_still_terminates_a_previously_observed_detached_descendant(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    attempts = tmp_path / "attempts"
+    release = tmp_path / "exit.fifo"
+    os.mkfifo(release)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        "spawn_detached_descendant_then_exit",
+        attempts,
+        release,
+    )
+    runtime = _native()._Runtime()
+
+    class ProcessExitProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                troupe.Actor,
+                name="process-exit-cleanup",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            ready = await handle._agent_ready_for_test()  # type: ignore[attr-defined]
+            agent_pid = int(ready["pid"])
+            await _wait_for_event(events, "descendant_started")
+            descendant_pid = int(
+                next(
+                    row["descendant_pid"]
+                    for row in _events(events)
+                    if row["event"] == "descendant_started"
+                )
+            )
+            assert os.getpgid(descendant_pid) != agent_pid
+
+            try:
+                await _signal_fifo(release)
+                while handle._agent_state_for_test() == "ready":  # type: ignore[attr-defined]
+                    await asyncio.sleep(0)
+                assert handle._agent_state_for_test() == "broken"  # type: ignore[attr-defined]
+                await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+                assert not _process_is_running(descendant_pid)
+            finally:
+                if _process_is_running(descendant_pid):
+                    os.kill(descendant_pid, 9)
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(ProcessExitProduction([]))),
             HARNESS_TIMEOUT,
         )
 

@@ -31,7 +31,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 use tokio_util::sync::CancellationToken;
 
 use crate::act_schema::CompiledActSchema;
-use crate::agent_adapter::agent_adapter;
+use crate::agent_adapter::{AcpAgentAdapter, agent_adapter};
 use crate::agent_error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
 use crate::agent_launch::TestOpeningGate;
@@ -445,6 +445,7 @@ pub(crate) struct AgentReadySnapshot {
 struct AgentReadySession {
     snapshot: Arc<AgentReadySnapshot>,
     route: Option<Arc<ResultRoute>>,
+    configuration_monitor: Option<Arc<OpeningConfigurationMonitor>>,
 }
 
 #[derive(Clone)]
@@ -457,12 +458,78 @@ struct ReadyConfigurationContract {
     effective_effort: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModeObservationSource {
+    CurrentModeUpdate,
+    ConfigOptionSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum PostReadyModeTransition {
+    #[default]
+    Stable,
+    AwaitingTemporarySnapshot(String),
+    Temporary(String),
+    AwaitingBaselineSnapshot(String),
+}
+
+impl PostReadyModeTransition {
+    fn observe(
+        &mut self,
+        source: ModeObservationSource,
+        expected: &str,
+        observed: &str,
+        turn_is_active: bool,
+    ) -> bool {
+        if !turn_is_active && !self.is_stable() {
+            return false;
+        }
+        let next = match (self.clone(), source) {
+            (Self::Stable, _) if observed == expected => Self::Stable,
+            (Self::Stable, ModeObservationSource::CurrentModeUpdate) => {
+                Self::AwaitingTemporarySnapshot(observed.to_owned())
+            }
+            (
+                Self::AwaitingTemporarySnapshot(temporary),
+                ModeObservationSource::CurrentModeUpdate,
+            ) if observed == temporary => Self::AwaitingTemporarySnapshot(temporary),
+            (
+                Self::AwaitingTemporarySnapshot(temporary),
+                ModeObservationSource::ConfigOptionSnapshot,
+            ) if observed == temporary => Self::Temporary(temporary),
+            (Self::Temporary(temporary), _) if observed == temporary => Self::Temporary(temporary),
+            (Self::Temporary(temporary), ModeObservationSource::CurrentModeUpdate)
+                if observed == expected =>
+            {
+                Self::AwaitingBaselineSnapshot(temporary)
+            }
+            (
+                Self::AwaitingBaselineSnapshot(temporary),
+                ModeObservationSource::CurrentModeUpdate,
+            ) if observed == expected => Self::AwaitingBaselineSnapshot(temporary),
+            (Self::AwaitingBaselineSnapshot(_), ModeObservationSource::ConfigOptionSnapshot)
+                if observed == expected =>
+            {
+                Self::Stable
+            }
+            _ => return false,
+        };
+        *self = next;
+        true
+    }
+
+    fn is_stable(&self) -> bool {
+        matches!(self, Self::Stable)
+    }
+}
+
 #[derive(Clone)]
 struct PendingReadyConfigurationContract {
     session_id: SessionId,
     mode_application: ResolvedModeApplication,
     model_config_id: &'static str,
     effort_config_id: &'static str,
+    effort_option_optional_when_unspecified: bool,
     requested_model: String,
     requested_effort: Option<String>,
 }
@@ -506,7 +573,11 @@ impl PendingReadyConfigurationContract {
                 require_current(options, self.effort_config_id, requested)?;
                 Some(requested.clone())
             }
-            None => Some(current_select(options, self.effort_config_id)?.to_owned()),
+            None => effective_unspecified_effort(
+                options,
+                self.effort_config_id,
+                self.effort_option_optional_when_unspecified,
+            )?,
         };
         Ok(ReadyConfigurationContract {
             session_id: self.session_id,
@@ -520,36 +591,59 @@ impl PendingReadyConfigurationContract {
 }
 
 impl ReadyConfigurationContract {
-    fn accepts(&self, notification: &SessionNotification) -> bool {
+    fn accepts(
+        &self,
+        notification: &SessionNotification,
+        adapter: &dyn AcpAgentAdapter,
+        turn_is_active: bool,
+        mode_transition: &mut PostReadyModeTransition,
+    ) -> bool {
         if notification.session_id != self.session_id {
             return false;
         }
-        match &notification.update {
+        let observation = match &notification.update {
             SessionUpdate::ConfigOptionUpdate(update) => {
-                self.accepts_config_options(&update.config_options)
+                let observed = match self.validate_config_options(&update.config_options) {
+                    Ok(observed) => observed,
+                    Err(_) => return false,
+                };
+                observed.map(|mode| (ModeObservationSource::ConfigOptionSnapshot, mode))
             }
-            SessionUpdate::CurrentModeUpdate(update) => {
-                update.current_mode_id.0.as_ref() == self.expected_mode()
-            }
-            _ => true,
+            SessionUpdate::CurrentModeUpdate(update) => Some((
+                ModeObservationSource::CurrentModeUpdate,
+                update.current_mode_id.0.as_ref(),
+            )),
+            _ => return true,
+        };
+        let Some((source, observed)) = observation else {
+            return true;
+        };
+        if !adapter.accepts_post_ready_mode(self.expected_mode(), observed, turn_is_active) {
+            return false;
         }
+        mode_transition.observe(source, self.expected_mode(), observed, turn_is_active)
     }
 
-    fn accepts_config_options(&self, options: &[SessionConfigOption]) -> bool {
-        let valid = || -> Result<(), AgentStartupFailure> {
-            require_applied_mode(options, &self.mode_application)?;
-            require_current(options, self.model_config_id, &self.requested_model)?;
-            if let Some(effective_effort) = &self.effective_effort {
-                require_current(options, self.effort_config_id, effective_effort)?;
-            } else if options
-                .iter()
-                .any(|option| option.id.to_string() == self.effort_config_id)
-            {
-                return Err(configuration_invalid());
+    fn validate_config_options<'a>(
+        &self,
+        options: &'a [SessionConfigOption],
+    ) -> Result<Option<&'a str>, AgentStartupFailure> {
+        let observed_mode = match &self.mode_application {
+            ResolvedModeApplication::SessionConfigOption { config_id, .. } => {
+                Some(current_select(options, config_id)?)
             }
-            Ok(())
+            ResolvedModeApplication::LegacySessionMode { .. } => None,
         };
-        valid().is_ok()
+        require_current(options, self.model_config_id, &self.requested_model)?;
+        if let Some(effective_effort) = &self.effective_effort {
+            require_current(options, self.effort_config_id, effective_effort)?;
+        } else if options
+            .iter()
+            .any(|option| option.id.to_string() == self.effort_config_id)
+        {
+            return Err(configuration_invalid());
+        }
+        Ok(observed_mode)
     }
 
     fn expected_mode(&self) -> &str {
@@ -607,6 +701,7 @@ struct OpeningConfigurationState {
     pending_contract: Option<PendingConfigurationContract>,
     mode_contract: Option<ModeConfigurationContract>,
     contract: Option<ReadyConfigurationContract>,
+    mode_transition: PostReadyModeTransition,
     invalid: bool,
     ready: bool,
 }
@@ -727,10 +822,20 @@ impl OpeningConfigurationMonitor {
             .is_some_and(|current| current == session_id)
     }
 
-    fn observe(&self, notification: &SessionNotification) -> ConfigurationObservation {
+    fn observe(
+        &self,
+        notification: &SessionNotification,
+        adapter: &dyn AcpAgentAdapter,
+        turn_is_active: bool,
+    ) -> ConfigurationObservation {
         let mut state = lock(&self.state);
-        let accepted = if let Some(contract) = &state.contract {
-            contract.accepts(notification)
+        let accepted = if let Some(contract) = state.contract.clone() {
+            contract.accepts(
+                notification,
+                adapter,
+                turn_is_active,
+                &mut state.mode_transition,
+            )
         } else if let Some(contract) = &state.mode_contract {
             contract.accepts(notification)
         } else {
@@ -749,7 +854,7 @@ impl OpeningConfigurationMonitor {
     }
 
     fn commit_ready(
-        &self,
+        self: &Arc<Self>,
         slot: &AgentSessionSlot,
         snapshot: AgentReadySnapshot,
         route: Arc<ResultRoute>,
@@ -759,11 +864,27 @@ impl OpeningConfigurationMonitor {
             return Err(configuration_invalid());
         }
         debug_assert!(state.contract.is_some());
-        let committed = slot.commit_ready(snapshot, Some(route));
+        debug_assert!(state.mode_transition.is_stable());
+        let committed = slot.commit_ready(snapshot, Some(route), Some(Arc::clone(self)));
         if committed {
             state.ready = true;
         }
         Ok(committed)
+    }
+
+    fn mode_is_restored_for_settlement(&self) -> bool {
+        let state = lock(&self.state);
+        state.ready && !state.invalid && state.mode_transition.is_stable()
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn mode_transition_name_for_test(&self) -> &'static str {
+        match &lock(&self.state).mode_transition {
+            PostReadyModeTransition::Stable => "stable",
+            PostReadyModeTransition::AwaitingTemporarySnapshot(_) => "awaiting_temporary_snapshot",
+            PostReadyModeTransition::Temporary(_) => "temporary",
+            PostReadyModeTransition::AwaitingBaselineSnapshot(_) => "awaiting_baseline_snapshot",
+        }
     }
 }
 
@@ -794,6 +915,8 @@ pub(crate) struct AgentSessionSlot {
     next_turn_index: AtomicU64,
     turn_registry: Mutex<AgentTurnRegistry>,
     turn_requested: Notify,
+    owned_process: Mutex<Option<ProcProcess>>,
+    shutdown_descendants: Mutex<Vec<ProcProcess>>,
     #[cfg(feature = "agent-test-support")]
     turn_registration_gate: Mutex<Option<Arc<TestOpeningGate>>>,
     #[cfg(all(feature = "agent-test-support", test))]
@@ -853,6 +976,8 @@ impl AgentSessionSlot {
                 submitted_session: None,
             }),
             turn_requested: Notify::new(),
+            owned_process: Mutex::new(None),
+            shutdown_descendants: Mutex::new(Vec::new()),
             #[cfg(feature = "agent-test-support")]
             turn_registration_gate: Mutex::new(None),
             #[cfg(all(feature = "agent-test-support", test))]
@@ -879,6 +1004,7 @@ impl AgentSessionSlot {
                 effective_model: profile.requested_model.clone(),
                 effective_effort: profile.requested_effort.clone(),
             },
+            None,
             None,
         );
         slot.mark_cleanup_complete();
@@ -1223,6 +1349,7 @@ impl AgentSessionSlot {
         };
         drop(state);
         if committed {
+            self.capture_shutdown_descendants();
             self.terminal_fault.cancel();
         }
         failure
@@ -1239,15 +1366,20 @@ impl AgentSessionSlot {
         };
         let (result, proposed_failure) = transition(existing.clone());
         let failure = existing.or(proposed_failure);
-        if matches!(
+        let entered_broken = matches!(
             *state,
             AgentSessionState::Ready(_)
                 | AgentSessionState::Active(_)
                 | AgentSessionState::Cancelling(_)
-        ) && let Some(failure) = &failure
-        {
+        ) && failure.is_some();
+        if entered_broken {
+            let failure = failure.as_ref().expect("a Broken transition has a failure");
             *state = AgentSessionState::Broken(failure.clone());
             self.changed.notify_waiters();
+        }
+        drop(state);
+        if entered_broken {
+            self.capture_shutdown_descendants();
         }
         result
     }
@@ -1264,6 +1396,7 @@ impl AgentSessionSlot {
     }
 
     pub(crate) fn cancel(&self) {
+        self.capture_shutdown_descendants();
         self.cancellation.cancel();
         let delivery = {
             let mut state = lock(&self.state);
@@ -1301,6 +1434,32 @@ impl AgentSessionSlot {
         }
         self.terminal_fault.cancel();
         self.turn_requested.notify_waiters();
+    }
+
+    fn record_owned_process(&self, pid: u32) {
+        let Some(pid) = i32::try_from(pid).ok() else {
+            return;
+        };
+        *lock(&self.owned_process) = read_proc_process_at(Path::new("/proc"), pid);
+        self.capture_shutdown_descendants();
+    }
+
+    fn capture_shutdown_descendants(&self) {
+        let root = *lock(&self.owned_process);
+        let mut descendants = lock(&self.shutdown_descendants);
+        let mut roots = descendants.clone();
+        roots.extend(root);
+        if roots.is_empty() {
+            return;
+        }
+        let discovered = descendant_processes_from_live_roots_at(Path::new("/proc"), &roots);
+        descendants.extend(discovered);
+        descendants.sort_unstable_by_key(|process| (process.pid, process.start_time));
+        descendants.dedup_by_key(|process| (process.pid, process.start_time));
+    }
+
+    fn take_shutdown_descendants(&self) -> Vec<ProcProcess> {
+        std::mem::take(&mut *lock(&self.shutdown_descendants))
     }
 
     #[cfg(feature = "agent-test-support")]
@@ -1349,6 +1508,24 @@ impl AgentSessionSlot {
         }
     }
 
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn mode_transition_name_for_test(&self) -> &'static str {
+        let monitor = {
+            let state = lock(&self.state);
+            match &*state {
+                AgentSessionState::Ready(session)
+                | AgentSessionState::Active(session)
+                | AgentSessionState::Cancelling(session) => {
+                    session.configuration_monitor.as_ref().map(Arc::clone)
+                }
+                _ => None,
+            }
+        };
+        monitor.as_ref().map_or("unavailable", |monitor| {
+            monitor.mode_transition_name_for_test()
+        })
+    }
+
     pub(crate) fn cleanup_is_complete(&self) -> bool {
         self.cleanup_complete.load(Ordering::Acquire)
     }
@@ -1368,12 +1545,18 @@ impl AgentSessionSlot {
         self.cleanup_changed.notify_waiters();
     }
 
-    fn commit_ready(&self, snapshot: AgentReadySnapshot, route: Option<Arc<ResultRoute>>) -> bool {
+    fn commit_ready(
+        &self,
+        snapshot: AgentReadySnapshot,
+        route: Option<Arc<ResultRoute>>,
+        configuration_monitor: Option<Arc<OpeningConfigurationMonitor>>,
+    ) -> bool {
         let mut state = lock(&self.state);
         if matches!(*state, AgentSessionState::Opening) {
             *state = AgentSessionState::Ready(Arc::new(AgentReadySession {
                 snapshot: Arc::new(snapshot),
                 route,
+                configuration_monitor,
             }));
             self.ready_committed.store(true, Ordering::Release);
             self.changed.notify_waiters();
@@ -1458,6 +1641,7 @@ impl AgentSessionSlot {
             self.changed.notify_waiters();
             delivery
         };
+        self.capture_shutdown_descendants();
         self.turn_requested.notify_waiters();
         #[cfg(feature = "agent-test-support")]
         if delivery.is_some()
@@ -1550,6 +1734,13 @@ impl Drop for ActAdmissionLease {
 }
 
 impl SessionTurnLease {
+    pub(crate) fn configuration_is_restored(&self) -> bool {
+        self.session
+            .configuration_monitor
+            .as_ref()
+            .is_none_or(|monitor| monitor.mode_is_restored_for_settlement())
+    }
+
     pub(crate) fn cancelling_marker(&self) -> SessionTurnMarker {
         SessionTurnMarker {
             slot: Arc::clone(&self.slot),
@@ -1563,6 +1754,11 @@ impl SessionTurnLease {
 
     fn release_inner(&mut self) {
         if !self.claimed {
+            return;
+        }
+        if !self.configuration_is_restored() {
+            self.slot.commit_protocol_violation("configure");
+            self.claimed = false;
             return;
         }
         let mut state = lock(&self.slot.state);
@@ -1600,6 +1796,7 @@ impl Drop for SessionTurnLease {
 
 impl Drop for AgentSessionSlot {
     fn drop(&mut self) {
+        self.capture_shutdown_descendants();
         self.cancellation.cancel();
         *lock(&self.state) = AgentSessionState::Closed;
         self.changed.notify_waiters();
@@ -1949,6 +2146,7 @@ async fn run_opening_attempt(
         });
     let transport = Lines::new(outgoing, incoming);
     let listener_failure = result_service.listener_failure();
+    let mut tracked_descendants = Vec::new();
     let completion = {
         let connection = Client
             .builder()
@@ -1987,6 +2185,12 @@ async fn run_opening_attempt(
                     message @ Dispatch::Notification(_) if message.method() == "session/update" => {
                         match message.into_notification::<SessionNotification>() {
                             Ok(Ok(notification)) => {
+                                let submitted_turn = slot_for_updates
+                                    .upgrade()
+                                    .and_then(|slot| slot.submitted_turn(&notification.session_id));
+                                let turn_is_active = submitted_turn
+                                    .as_ref()
+                                    .is_some_and(|control| control.accepts_ordinary_update());
                                 let configuration_update = matches!(
                                     &notification.update,
                                     SessionUpdate::ConfigOptionUpdate(_)
@@ -1999,7 +2203,11 @@ async fn run_opening_attempt(
                                         | SessionUpdate::UsageUpdate(_)
                                 );
                                 let invalid_after_ready = matches!(
-                                    configuration_monitor_for_handler.observe(&notification),
+                                    configuration_monitor_for_handler.observe(
+                                        &notification,
+                                        agent_adapter(spec.agent),
+                                        turn_is_active,
+                                    ),
                                     ConfigurationObservation::InvalidAfterReady
                                 );
                                 if invalid_after_ready {
@@ -2010,14 +2218,9 @@ async fn run_opening_attempt(
                                     let accepted = (session_scoped_update
                                         && configuration_monitor_for_handler
                                             .owns_session(&notification.session_id))
-                                        || slot_for_updates
-                                            .upgrade()
-                                            .and_then(|slot| {
-                                                slot.submitted_turn(&notification.session_id)
-                                            })
-                                            .is_some_and(|control| {
-                                                control.accepts_ordinary_update()
-                                            });
+                                        || submitted_turn.is_some_and(|control| {
+                                            control.accepts_ordinary_update()
+                                        });
                                     if !accepted {
                                         protocol_violation_observed_for_handler
                                             .store(true, Ordering::Release);
@@ -2158,7 +2361,17 @@ async fn run_opening_attempt(
             },
             _ = &mut child_wait => OpeningAttemptCompletion::Child,
             () = listener_failure.cancelled() => OpeningAttemptCompletion::ResultServiceLost,
-            () = cancellation.cancelled() => OpeningAttemptCompletion::Cancelled,
+            () = cancellation.cancelled() => {
+                tracked_descendants = slot
+                    .upgrade()
+                    .map(|slot| slot.take_shutdown_descendants())
+                    .unwrap_or_default();
+                tracked_descendants.extend(i32::try_from(pid)
+                    .ok()
+                    .map(|root_pid| descendant_processes_at(Path::new("/proc"), root_pid))
+                    .unwrap_or_default());
+                OpeningAttemptCompletion::Cancelled
+            },
         }
     };
     let cancelled =
@@ -2185,11 +2398,16 @@ async fn run_opening_attempt(
             }
         }
     }
+    tracked_descendants.extend(
+        slot.upgrade()
+            .map(|slot| slot.take_shutdown_descendants())
+            .unwrap_or_default(),
+    );
     let route = { lock(&current_route).take() };
     if let Some(route) = route {
         result_service.revoke_route(&route).await;
     }
-    terminate_and_reap(&mut child, pid).await;
+    terminate_and_reap(&mut child, pid, tracked_descendants).await;
     wait_for_stderr_drain(stderr_drain).await;
 
     if cancelled {
@@ -2252,7 +2470,7 @@ async fn open_handshake(
     cancellation: &CancellationToken,
     opening_phase: &AtomicU8,
     response_observed: &AtomicBool,
-    configuration_monitor: &OpeningConfigurationMonitor,
+    configuration_monitor: &Arc<OpeningConfigurationMonitor>,
     generation: u64,
 ) -> Result<Option<SessionId>, OpeningHandshakeFailure> {
     if !spec.supports_step1_opening(profile.agent) {
@@ -2372,6 +2590,7 @@ async fn open_handshake(
     let Some(slot) = slot.upgrade() else {
         return Ok(None);
     };
+    slot.record_owned_process(pid);
     let committed = configuration_monitor.commit_ready(
         &slot,
         AgentReadySnapshot {
@@ -2508,7 +2727,11 @@ async fn configure_session(
         .await?;
         require_applied_mode(&after_model, &command.mode_application)?;
         require_current(&after_model, spec.model_config_id, requested_model)?;
-        Some(current_select(&after_model, spec.effort_config_id)?.to_owned())
+        effective_unspecified_effort(
+            &after_model,
+            spec.effort_config_id,
+            spec.effort_option_optional_when_unspecified,
+        )?
     };
     Ok((requested_model.to_owned(), effective_effort))
 }
@@ -2525,6 +2748,7 @@ fn pending_ready_configuration(
         mode_application: command.mode_application.clone(),
         model_config_id: spec.model_config_id,
         effort_config_id: spec.effort_config_id,
+        effort_option_optional_when_unspecified: spec.effort_option_optional_when_unspecified,
         requested_model: requested_model.to_owned(),
         requested_effort: requested_effort.map(str::to_owned),
     }
@@ -2550,6 +2774,20 @@ fn require_applied_mode(
         }
         ResolvedModeApplication::LegacySessionMode { .. } => Ok(()),
     }
+}
+
+fn effective_unspecified_effort(
+    options: &[SessionConfigOption],
+    config_id: &str,
+    option_optional: bool,
+) -> Result<Option<String>, AgentStartupFailure> {
+    let present = options
+        .iter()
+        .any(|option| option.id.to_string() == config_id);
+    if option_optional && !present {
+        return Ok(None);
+    }
+    Ok(Some(current_select(options, config_id)?.to_owned()))
 }
 
 fn require_legacy_mode(
@@ -2821,35 +3059,162 @@ fn spawn_child(
     Ok(spawned)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcProcess {
+    pid: i32,
+    state: char,
+    parent_pid: i32,
+    process_group: i32,
+    start_time: u64,
+}
+
+fn parse_proc_process(pid: i32, stat: &str) -> Option<ProcProcess> {
+    let command_end = stat.rfind(')')?;
+    let mut fields = stat[command_end + 1..].split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent_pid = fields.next()?.parse::<i32>().ok()?;
+    let process_group = fields.next()?.parse::<i32>().ok()?;
+    // Linux /proc/<pid>/stat starttime is field 22, sixteen fields after pgrp.
+    let start_time = fields.nth(16)?.parse::<u64>().ok()?;
+    Some(ProcProcess {
+        pid,
+        state,
+        parent_pid,
+        process_group,
+        start_time,
+    })
+}
+
+fn read_proc_process(entry: &std::fs::DirEntry) -> Option<ProcProcess> {
+    let name = entry.file_name();
+    let name = name.to_str()?;
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let pid = name.parse::<i32>().ok()?;
+    let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+    parse_proc_process(pid, &stat)
+}
+
+fn read_proc_process_at(proc_root: &Path, pid: i32) -> Option<ProcProcess> {
+    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    parse_proc_process(pid, &stat)
+}
+
+fn process_table_at(proc_root: &Path) -> Option<Vec<ProcProcess>> {
+    Some(
+        std::fs::read_dir(proc_root)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| read_proc_process(&entry))
+            .collect(),
+    )
+}
+
 fn process_group_has_live_members_at(proc_root: &Path, process_group: i32) -> bool {
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
+    let Some(processes) = process_table_at(proc_root) else {
         return true;
     };
-    entries.filter_map(Result::ok).any(|entry| {
-        if entry
-            .file_name()
-            .to_str()
-            .is_none_or(|name| name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return false;
+    processes.into_iter().any(|process| {
+        process.process_group == process_group && !matches!(process.state, 'X' | 'Z')
+    })
+}
+
+fn descendant_processes_at(proc_root: &Path, root_pid: i32) -> Vec<ProcProcess> {
+    let Some(processes) = process_table_at(proc_root) else {
+        return Vec::new();
+    };
+    let mut depths = std::collections::HashMap::from([(root_pid, 0_usize)]);
+    loop {
+        let mut changed = false;
+        for process in &processes {
+            let Some(parent_depth) = depths.get(&process.parent_pid).copied() else {
+                continue;
+            };
+            if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(process.pid) {
+                entry.insert(parent_depth + 1);
+                changed = true;
+            }
         }
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            return false;
-        };
-        let Some(command_end) = stat.rfind(')') else {
-            return false;
-        };
-        let mut fields = stat[command_end + 1..].split_whitespace();
-        let Some(state) = fields.next() else {
-            return false;
-        };
-        let Some(_) = fields.next() else {
-            return false;
-        };
-        let Some(group) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
-            return false;
-        };
-        group == process_group && !matches!(state, "X" | "Z")
+        if !changed {
+            break;
+        }
+    }
+    let mut descendants = processes
+        .into_iter()
+        .filter_map(|process| {
+            depths
+                .get(&process.pid)
+                .copied()
+                .filter(|_| process.pid != root_pid)
+                .map(|depth| (process, depth))
+        })
+        .collect::<Vec<_>>();
+    descendants.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+    descendants
+        .into_iter()
+        .map(|(process, _)| process)
+        .collect()
+}
+
+fn descendant_processes_from_live_roots_at(
+    proc_root: &Path,
+    roots: &[ProcProcess],
+) -> Vec<ProcProcess> {
+    let Some(processes) = process_table_at(proc_root) else {
+        return Vec::new();
+    };
+    let root_pids = roots
+        .iter()
+        .filter(|root| {
+            processes.iter().any(|process| {
+                process.pid == root.pid
+                    && process.start_time == root.start_time
+                    && !matches!(process.state, 'X' | 'Z')
+            })
+        })
+        .map(|root| root.pid)
+        .collect::<std::collections::HashSet<_>>();
+    let mut depths = root_pids
+        .iter()
+        .copied()
+        .map(|pid| (pid, 0_usize))
+        .collect::<std::collections::HashMap<_, _>>();
+    loop {
+        let mut changed = false;
+        for process in &processes {
+            let Some(parent_depth) = depths.get(&process.parent_pid).copied() else {
+                continue;
+            };
+            if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(process.pid) {
+                entry.insert(parent_depth + 1);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut descendants = processes
+        .into_iter()
+        .filter_map(|process| {
+            depths
+                .get(&process.pid)
+                .copied()
+                .filter(|_| !root_pids.contains(&process.pid))
+                .map(|depth| (process, depth))
+        })
+        .collect::<Vec<_>>();
+    descendants.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+    descendants
+        .into_iter()
+        .map(|(process, _)| process)
+        .collect()
+}
+
+fn process_is_live_at(proc_root: &Path, identity: ProcProcess) -> bool {
+    read_proc_process_at(proc_root, identity.pid).is_some_and(|process| {
+        process.start_time == identity.start_time && !matches!(process.state, 'X' | 'Z')
     })
 }
 
@@ -2869,8 +3234,36 @@ async fn wait_for_process_group_exit(process_group: i32) {
     }
 }
 
-async fn terminate_and_reap(child: &mut Child, pid: u32) {
+async fn wait_for_descendant_exit(descendants: &[ProcProcess]) {
+    while descendants
+        .iter()
+        .any(|process| process_is_live_at(Path::new("/proc"), *process))
+    {
+        for process in descendants {
+            if process_is_live_at(Path::new("/proc"), *process) {
+                unsafe {
+                    libc::kill(process.pid, libc::SIGKILL);
+                }
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn terminate_and_reap(child: &mut Child, pid: u32, mut descendants: Vec<ProcProcess>) {
     let process_group = i32::try_from(pid).ok();
+    if let Some(root_pid) = process_group {
+        descendants.extend(descendant_processes_at(Path::new("/proc"), root_pid));
+        descendants.sort_unstable_by_key(|process| (process.pid, process.start_time));
+        descendants.dedup_by_key(|process| (process.pid, process.start_time));
+    }
+    for descendant in &descendants {
+        if process_is_live_at(Path::new("/proc"), *descendant) {
+            unsafe {
+                libc::kill(descendant.pid, libc::SIGKILL);
+            }
+        }
+    }
     if let Some(process_group) = process_group {
         unsafe {
             libc::kill(-process_group, libc::SIGKILL);
@@ -2881,6 +3274,7 @@ async fn terminate_and_reap(child: &mut Child, pid: u32) {
     if let Some(process_group) = process_group {
         wait_for_process_group_exit(process_group).await;
     }
+    wait_for_descendant_exit(&descendants).await;
 }
 
 async fn wait_for_stderr_drain(stderr_drain: Option<tokio::task::JoinHandle<()>>) {
@@ -2901,6 +3295,27 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    fn write_proc_process(
+        proc_root: &Path,
+        pid: i32,
+        command: &str,
+        state: char,
+        parent_pid: i32,
+        process_group: i32,
+        start_time: u64,
+    ) {
+        let process = proc_root.join(pid.to_string());
+        std::fs::create_dir_all(&process).unwrap();
+        let intermediate_fields = ["0"; 16].join(" ");
+        std::fs::write(
+            process.join("stat"),
+            format!(
+                "{pid} ({command}) {state} {parent_pid} {process_group} {intermediate_fields} {start_time}\n"
+            ),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn opening_retry_window_uses_half_to_full_exponential_range_with_cap() {
@@ -2928,6 +3343,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn post_ready_mode_transition_requires_both_pinned_claude_snapshots() {
+        let mut transition = PostReadyModeTransition::default();
+
+        assert!(transition.observe(
+            ModeObservationSource::CurrentModeUpdate,
+            "default",
+            "plan",
+            true,
+        ));
+        assert!(!transition.is_stable());
+        assert!(transition.observe(
+            ModeObservationSource::ConfigOptionSnapshot,
+            "default",
+            "plan",
+            true,
+        ));
+        assert!(!transition.is_stable());
+        assert!(transition.observe(
+            ModeObservationSource::CurrentModeUpdate,
+            "default",
+            "default",
+            true,
+        ));
+        assert!(!transition.is_stable());
+        assert!(transition.observe(
+            ModeObservationSource::ConfigOptionSnapshot,
+            "default",
+            "default",
+            true,
+        ));
+        assert!(transition.is_stable());
+    }
+
+    #[test]
+    fn post_ready_mode_transition_rejects_restoration_before_plan_snapshot() {
+        let mut transition = PostReadyModeTransition::default();
+
+        assert!(transition.observe(
+            ModeObservationSource::CurrentModeUpdate,
+            "default",
+            "plan",
+            true,
+        ));
+        assert!(!transition.observe(
+            ModeObservationSource::CurrentModeUpdate,
+            "default",
+            "default",
+            true,
+        ));
+        assert!(!transition.is_stable());
+    }
+
+    #[test]
+    fn post_ready_mode_transition_cannot_advance_after_the_prompt_response() {
+        let mut transition = PostReadyModeTransition::default();
+        assert!(transition.observe(
+            ModeObservationSource::CurrentModeUpdate,
+            "default",
+            "plan",
+            true,
+        ));
+        assert!(transition.observe(
+            ModeObservationSource::ConfigOptionSnapshot,
+            "default",
+            "plan",
+            true,
+        ));
+
+        assert!(!transition.observe(
+            ModeObservationSource::CurrentModeUpdate,
+            "default",
+            "default",
+            false,
+        ));
+        assert!(!transition.is_stable());
+    }
+
     #[tokio::test]
     async fn cleanup_waits_for_the_stderr_drain_task() {
         let (release, released) = oneshot::channel();
@@ -2953,9 +3446,7 @@ mod tests {
             "troupe-process-group-test-{}",
             uuid::Uuid::new_v4()
         ));
-        let member = proc_root.join("41001");
-        std::fs::create_dir_all(&member).unwrap();
-        std::fs::write(member.join("stat"), "41001 (mock agent) R 1 41000 41000\n").unwrap();
+        write_proc_process(&proc_root, 41001, "mock agent", 'R', 1, 41000, 101);
 
         let mut wait = std::pin::pin!(wait_for_process_group_exit_at(&proc_root, 41000));
         tokio::select! {
@@ -2964,8 +3455,81 @@ mod tests {
             () = tokio::task::yield_now() => {}
         }
 
-        std::fs::write(member.join("stat"), "41001 (mock agent) Z 1 41000 41000\n").unwrap();
+        write_proc_process(&proc_root, 41001, "mock agent", 'Z', 1, 41000, 101);
         wait.await;
+        std::fs::remove_dir_all(&proc_root).unwrap();
+    }
+
+    #[test]
+    fn descendant_scan_crosses_process_groups_and_rejects_reused_pids() {
+        let proc_root = std::env::temp_dir().join(format!(
+            "troupe-descendant-scan-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        write_proc_process(&proc_root, 42000, "agent", 'R', 1, 42000, 200);
+        write_proc_process(&proc_root, 42001, "tool wrapper", 'R', 42000, 42000, 201);
+        write_proc_process(
+            &proc_root,
+            42002,
+            "detached) worker",
+            'S',
+            42001,
+            42002,
+            202,
+        );
+        write_proc_process(&proc_root, 42003, "unrelated", 'R', 1, 42003, 203);
+
+        let descendants = descendant_processes_at(&proc_root, 42000);
+        assert_eq!(
+            descendants
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>(),
+            vec![42002, 42001],
+        );
+        let detached_identity = descendants[0];
+        assert!(process_is_live_at(&proc_root, detached_identity));
+
+        write_proc_process(&proc_root, 42002, "reused pid", 'R', 1, 42002, 999);
+        assert!(!process_is_live_at(&proc_root, detached_identity));
+
+        std::fs::remove_dir_all(&proc_root).unwrap();
+    }
+
+    #[test]
+    fn retained_descendant_identity_remains_a_scan_root_after_the_agent_exits() {
+        let proc_root = std::env::temp_dir().join(format!(
+            "troupe-retained-descendant-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        write_proc_process(&proc_root, 43000, "agent", 'R', 1, 43000, 300);
+        write_proc_process(&proc_root, 43001, "detached worker", 'S', 43000, 43001, 301);
+
+        let retained = descendant_processes_at(&proc_root, 43000);
+        assert_eq!(
+            retained
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>(),
+            vec![43001],
+        );
+
+        std::fs::remove_dir_all(proc_root.join("43000")).unwrap();
+        write_proc_process(&proc_root, 43001, "detached worker", 'S', 1, 43001, 301);
+        write_proc_process(&proc_root, 43002, "nested tool", 'S', 43001, 43002, 302);
+
+        let discovered = descendant_processes_from_live_roots_at(&proc_root, &retained);
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>(),
+            vec![43002],
+        );
+
+        write_proc_process(&proc_root, 43001, "reused pid", 'R', 1, 43001, 999);
+        assert!(descendant_processes_from_live_roots_at(&proc_root, &retained).is_empty());
+
         std::fs::remove_dir_all(&proc_root).unwrap();
     }
 
@@ -3140,6 +3704,7 @@ mod tests {
                 effective_effort: None,
             },
             None,
+            None,
         );
         slot.next_turn_index.store(u64::MAX, Ordering::Release);
 
@@ -3172,6 +3737,7 @@ mod tests {
                 effective_model: "test-model".to_owned(),
                 effective_effort: None,
             },
+            None,
             None,
         );
         let (_, session_turn, _) = slot.claim_session_turn().await.unwrap();

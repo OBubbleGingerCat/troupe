@@ -13,10 +13,12 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::act_schema::{ValidatedActValue, ValidationIssue};
-use crate::agent_adapter::{AcpAgentAdapter, RemotePromptErrorSettlement};
+use crate::agent_adapter::{
+    AcpAgentAdapter, RemotePromptErrorSettlement, SupervisorResponseSettlement,
+};
 use crate::agent_error::AgentSessionFailure;
 #[cfg(feature = "agent-test-support")]
-use crate::agent_launch::{TestOpeningGate, TestTurnGates};
+use crate::agent_launch::TestTurnGates;
 use crate::agent_session::{ActAdmissionLease, AgentSessionSlot, SessionTurnLease};
 use crate::result_mcp::{
     ArmedResultLease, MAX_REPAIRABLE_INVALID_CALLS, PreparedResultSettlement, ResultAtSettlement,
@@ -408,13 +410,7 @@ impl AgentTurnControl {
         boundary_protocol_violation: bool,
         adapter: &'static dyn AcpAgentAdapter,
         authoritative_error_codes: &[i32],
-        #[cfg(feature = "agent-test-support")] settlement_gate: Option<&TestOpeningGate>,
     ) -> AgentTurnCompletion {
-        #[cfg(feature = "agent-test-support")]
-        if let Some(gate) = settlement_gate {
-            gate.wait_blocking();
-            gate.mark_completed();
-        }
         let settlement = self.slot.commit_turn_transition(|terminal_failure| {
             let mut state = lock(&self.state);
             if matches!(
@@ -433,6 +429,10 @@ impl AgentTurnControl {
                 .armed_result
                 .take()
                 .map(ArmedResultLease::prepare_settlement);
+            let configuration_is_restored = state
+                .session_turn
+                .as_ref()
+                .is_none_or(SessionTurnLease::configuration_is_restored);
             let result = prepared_result
                 .as_mut()
                 .map_or(ResultAtSettlement::Unavailable, |prepared| {
@@ -440,7 +440,15 @@ impl AgentTurnControl {
                 });
             let (caller_outcome, proposed_failure) = if supervisor_owned {
                 let failure = match response {
-                    Ok(_) => None,
+                    Ok(response) => {
+                        if adapter.classify_supervisor_response(&response)
+                            == SupervisorResponseSettlement::Uncertain
+                        {
+                            Some(AgentSessionFailure::uncertain_settlement())
+                        } else {
+                            None
+                        }
+                    }
                     Err(error) => {
                         match classify_prompt_error(
                             &error,
@@ -527,6 +535,9 @@ impl AgentTurnControl {
                 };
                 (Some(outcome), failure)
             };
+            let proposed_failure = proposed_failure.or_else(|| {
+                (!configuration_is_restored).then(AgentSessionFailure::protocol_violation)
+            });
             let broken_failure = terminal_failure.or_else(|| proposed_failure.clone());
             let local_failure_committed = matches!(
                 caller_outcome.as_ref(),
@@ -855,14 +866,17 @@ pub(crate) async fn run_agent_turn_worker(
         let remote_error = response
             .as_ref()
             .is_err_and(|_| response_provenance.take_remote_error(&request_id));
+        #[cfg(feature = "agent-test-support")]
+        if let Some(gate) = &turn_gates.settlement {
+            gate.wait().await;
+            gate.mark_completed();
+        }
         let completion = request.control.complete_response(
             response,
             remote_error,
             boundary_protocol_violation.load(Ordering::Acquire),
             adapter,
             &authoritative_error_codes,
-            #[cfg(feature = "agent-test-support")]
-            turn_gates.settlement.as_deref(),
         );
         #[cfg(feature = "agent-test-support")]
         if let Some(gate) = &turn_gates.outcome {
@@ -1006,6 +1020,8 @@ fn outcome_from_settlement(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "agent-test-support")]
+    use crate::agent_launch::TestOpeningGate;
     use pyo3::Python;
     use pyo3::exceptions::PyValueError;
     use serde_json::json;
@@ -1073,8 +1089,6 @@ mod tests {
             false,
             adapter,
             &[-32603, -32700],
-            #[cfg(feature = "agent-test-support")]
-            None,
         );
         assert!(completion.broken);
         control.publish_caller_outcome();
