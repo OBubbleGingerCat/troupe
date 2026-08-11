@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import os
+import signal
 import socket
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def _events(path: Path) -> list[dict[str, Any]]:
 def _process_is_running(pid: int) -> bool:
     try:
         status = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
     state = status[status.rfind(")") + 2 :].split(maxsplit=1)[0]
     return state not in {"X", "Z"}
@@ -46,6 +47,11 @@ async def _wait_for_attempts(events: Path, count: int) -> None:
 
 async def _wait_for_event(path: Path, event: str) -> None:
     while not any(row["event"] == event for row in _events(path)):
+        await asyncio.sleep(0)
+
+
+async def _wait_for_process_reap(pid: int) -> None:
+    while Path(f"/proc/{pid}").exists():
         await asyncio.sleep(0)
 
 
@@ -955,6 +961,160 @@ def test_agent_process_exit_still_terminates_a_previously_observed_detached_desc
     async def scenario() -> None:
         await asyncio.wait_for(
             asyncio.shield(runtime.run(ProcessExitProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_pre_ready_root_exit_cannot_orphan_an_unobserved_detached_descendant(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    attempts = tmp_path / "attempts"
+    release = tmp_path / "exit.fifo"
+    os.mkfifo(release)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        "spawn_unobserved_detached_before_initialize_then_exit",
+        attempts,
+        release,
+    )
+    _native()._agent_test_hold_opening_backoff(random_words=[126])
+    runtime = _native()._Runtime()
+
+    class PreReadyExitProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                troupe.Actor,
+                name="pre-ready-detached-exit",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            await _wait_for_event(events, "descendant_started")
+            descendant_pid = int(
+                next(
+                    row["descendant_pid"]
+                    for row in _events(events)
+                    if row["event"] == "descendant_started"
+                )
+            )
+            try:
+                await _signal_fifo(release)
+                await _wait_for_event(events, "process_exiting_before_initialize")
+                await _wait_for_backoff_arrivals(1)
+                await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+                assert not _process_is_running(descendant_pid)
+            finally:
+                if _process_is_running(descendant_pid):
+                    os.kill(descendant_pid, signal.SIGKILL)
+            del handle
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(PreReadyExitProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_post_ready_root_exit_cannot_orphan_a_new_detached_descendant(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    attempts = tmp_path / "attempts"
+    release = tmp_path / "exit.fifo"
+    os.mkfifo(release)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        "spawn_late_detached_descendant_then_exit",
+        attempts,
+        release,
+    )
+    runtime = _native()._Runtime()
+
+    class PostReadyExitProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                troupe.Actor,
+                name="post-ready-detached-exit",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            await handle._agent_ready_for_test()  # type: ignore[attr-defined]
+            await _signal_fifo(release)
+            await _wait_for_event(events, "descendant_started")
+            descendant_pid = int(
+                next(
+                    row["descendant_pid"]
+                    for row in _events(events)
+                    if row["event"] == "descendant_started"
+                )
+            )
+            try:
+                while handle._agent_state_for_test() == "ready":  # type: ignore[attr-defined]
+                    await asyncio.sleep(0)
+                assert handle._agent_state_for_test() == "broken"  # type: ignore[attr-defined]
+                await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+                assert not _process_is_running(descendant_pid)
+            finally:
+                if _process_is_running(descendant_pid):
+                    os.kill(descendant_pid, signal.SIGKILL)
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(PostReadyExitProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_guardian_reaps_an_adopted_orphan_while_the_agent_remains_ready(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    attempts = tmp_path / "attempts"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, "spawn_short_lived_orphan", attempts)
+    runtime = _native()._Runtime()
+
+    class OrphanReapProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                troupe.Actor,
+                name="short-lived-orphan",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            await handle._agent_ready_for_test()  # type: ignore[attr-defined]
+            await _wait_for_event(events, "short_lived_orphan_started")
+            descendant_pid = int(
+                next(
+                    row["descendant_pid"]
+                    for row in _events(events)
+                    if row["event"] == "short_lived_orphan_started"
+                )
+            )
+            await _wait_for_process_reap(descendant_pid)
+            assert handle._agent_state_for_test() == "ready"  # type: ignore[attr-defined]
+            await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(OrphanReapProduction([]))),
             HARNESS_TIMEOUT,
         )
 

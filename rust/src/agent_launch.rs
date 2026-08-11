@@ -214,7 +214,29 @@ pub(crate) struct AgentLaunchSpec {
     pub(crate) authoritative_prompt_error_codes: &'static [i32],
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct NpxPreparationKey {
+    agent: AgentKind,
+    package: &'static str,
+    exact_version: &'static str,
+}
+
 impl AgentLaunchSpec {
+    pub(crate) const fn npx_preparation_key(&self) -> Option<NpxPreparationKey> {
+        match self.runner {
+            LaunchRunner::Npx {
+                package,
+                exact_version,
+                ..
+            } => Some(NpxPreparationKey {
+                agent: self.agent,
+                package,
+                exact_version,
+            }),
+            LaunchRunner::Command { .. } => None,
+        }
+    }
+
     pub(crate) const fn required_agent_info_version(&self) -> Option<&'static str> {
         match self.runner {
             LaunchRunner::Npx { .. } => None,
@@ -1172,4 +1194,23 @@ pub(crate) fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3
         snapshot.set_item(spec.agent.name(), value)?;
     }
     Ok(snapshot.into_any().unbind())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_preparation_keys_partition_npx_adapters_and_exclude_commands() {
+        let codex = CODEX
+            .npx_preparation_key()
+            .expect("Codex uses a pinned npx package");
+        let claude = CLAUDE
+            .npx_preparation_key()
+            .expect("Claude uses a pinned npx package");
+
+        assert_ne!(codex, claude);
+        assert_eq!(codex, CODEX.npx_preparation_key().unwrap());
+        assert!(KIMI.npx_preparation_key().is_none());
+    }
 }

@@ -20,6 +20,7 @@ mod actor_registry;
 mod agent_adapter;
 mod agent_error;
 mod agent_launch;
+mod agent_process;
 mod agent_profile;
 mod agent_session;
 mod agent_supervisor;

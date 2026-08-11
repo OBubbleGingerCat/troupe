@@ -3,9 +3,6 @@ use std::ffi::CString;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::process::CommandExt as _;
-use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -25,7 +22,6 @@ use agent_client_protocol::{
 };
 use futures::{AsyncBufReadExt as _, AsyncWriteExt as _, StreamExt as _};
 use tokio::io::AsyncReadExt as _;
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 use tokio_util::sync::CancellationToken;
@@ -38,12 +34,12 @@ use crate::agent_launch::TestOpeningGate;
 use crate::agent_launch::{
     AgentLaunchSpec, OpeningRequestPhaseV1, ResolvedAgentCommand, ResolvedModeApplication,
 };
+use crate::agent_process::{SpawnedAgent, spawn_agent, terminate_and_reap};
 use crate::agent_profile::{ResolvedAgentProfile, WorkspaceLeaseV1};
 use crate::agent_turn::{
     AgentTurnControl, AgentTurnOutcome, AgentTurnRequest, PromptResponseProvenance,
     run_agent_turn_worker,
 };
-use crate::fork_fd_registry::{ForkExecGuard, ForkTracked};
 use crate::result_mcp::{ResultMcpService, ResultRoute, fill_secure_random};
 use crate::schema_validation_bridge::PythonSchemaValidationBridge;
 
@@ -110,6 +106,97 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) struct NpxPreparationGate {
+    state: Mutex<NpxPreparationState>,
+    changed: Notify,
+}
+
+#[derive(Default)]
+struct NpxPreparationState {
+    ready: bool,
+    leader: Option<u64>,
+    next_generation: u64,
+}
+
+pub(crate) enum NpxPreparationAdmission {
+    Prepared,
+    Leader(NpxPreparationLeader),
+    Cancelled,
+}
+
+pub(crate) struct NpxPreparationLeader {
+    gate: Arc<NpxPreparationGate>,
+    generation: u64,
+    completed: AtomicBool,
+}
+
+impl NpxPreparationGate {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(NpxPreparationState::default()),
+            changed: Notify::new(),
+        })
+    }
+
+    pub(crate) async fn enter(
+        self: &Arc<Self>,
+        cancellation: &CancellationToken,
+    ) -> NpxPreparationAdmission {
+        loop {
+            let changed = self.changed.notified();
+            {
+                let mut state = lock(&self.state);
+                if state.ready {
+                    return NpxPreparationAdmission::Prepared;
+                }
+                if state.leader.is_none() {
+                    let generation = state.next_generation;
+                    state.next_generation = state.next_generation.wrapping_add(1);
+                    state.leader = Some(generation);
+                    return NpxPreparationAdmission::Leader(NpxPreparationLeader {
+                        gate: Arc::clone(self),
+                        generation,
+                        completed: AtomicBool::new(false),
+                    });
+                }
+            }
+            tokio::select! {
+                () = changed => {}
+                () = cancellation.cancelled() => {
+                    return NpxPreparationAdmission::Cancelled;
+                }
+            }
+        }
+    }
+}
+
+impl NpxPreparationLeader {
+    fn mark_ready(&self) {
+        let mut state = lock(&self.gate.state);
+        if state.leader == Some(self.generation) {
+            state.ready = true;
+            state.leader = None;
+            self.completed.store(true, Ordering::Release);
+        }
+        drop(state);
+        self.gate.changed.notify_waiters();
+    }
+}
+
+impl Drop for NpxPreparationLeader {
+    fn drop(&mut self) {
+        if self.completed.load(Ordering::Acquire) {
+            return;
+        }
+        let mut state = lock(&self.gate.state);
+        if state.leader == Some(self.generation) {
+            state.leader = None;
+        }
+        drop(state);
+        self.gate.changed.notify_waiters();
+    }
 }
 
 struct AcpFrameLimitedReader<R> {
@@ -1078,8 +1165,6 @@ pub(crate) struct AgentSessionSlot {
     next_turn_index: AtomicU64,
     turn_registry: Mutex<AgentTurnRegistry>,
     turn_requested: Notify,
-    owned_process: Mutex<Option<ProcProcess>>,
-    shutdown_descendants: Mutex<Vec<ProcProcess>>,
     #[cfg(feature = "agent-test-support")]
     turn_registration_gate: Mutex<Option<Arc<TestOpeningGate>>>,
     #[cfg(all(feature = "agent-test-support", test))]
@@ -1139,8 +1224,6 @@ impl AgentSessionSlot {
                 submitted_session: None,
             }),
             turn_requested: Notify::new(),
-            owned_process: Mutex::new(None),
-            shutdown_descendants: Mutex::new(Vec::new()),
             #[cfg(feature = "agent-test-support")]
             turn_registration_gate: Mutex::new(None),
             #[cfg(all(feature = "agent-test-support", test))]
@@ -1512,7 +1595,6 @@ impl AgentSessionSlot {
         };
         drop(state);
         if committed {
-            self.capture_shutdown_descendants();
             self.terminal_fault.cancel();
         }
         failure
@@ -1541,9 +1623,6 @@ impl AgentSessionSlot {
             self.changed.notify_waiters();
         }
         drop(state);
-        if entered_broken {
-            self.capture_shutdown_descendants();
-        }
         result
     }
 
@@ -1559,7 +1638,6 @@ impl AgentSessionSlot {
     }
 
     pub(crate) fn cancel(&self) {
-        self.capture_shutdown_descendants();
         self.cancellation.cancel();
         let delivery = {
             let mut state = lock(&self.state);
@@ -1597,32 +1675,6 @@ impl AgentSessionSlot {
         }
         self.terminal_fault.cancel();
         self.turn_requested.notify_waiters();
-    }
-
-    fn record_owned_process(&self, pid: u32) {
-        let Some(pid) = i32::try_from(pid).ok() else {
-            return;
-        };
-        *lock(&self.owned_process) = read_proc_process_at(Path::new("/proc"), pid);
-        self.capture_shutdown_descendants();
-    }
-
-    fn capture_shutdown_descendants(&self) {
-        let root = *lock(&self.owned_process);
-        let mut descendants = lock(&self.shutdown_descendants);
-        let mut roots = descendants.clone();
-        roots.extend(root);
-        if roots.is_empty() {
-            return;
-        }
-        let discovered = descendant_processes_from_live_roots_at(Path::new("/proc"), &roots);
-        descendants.extend(discovered);
-        descendants.sort_unstable_by_key(|process| (process.pid, process.start_time));
-        descendants.dedup_by_key(|process| (process.pid, process.start_time));
-    }
-
-    fn take_shutdown_descendants(&self) -> Vec<ProcProcess> {
-        std::mem::take(&mut *lock(&self.shutdown_descendants))
     }
 
     #[cfg(feature = "agent-test-support")]
@@ -1804,7 +1856,6 @@ impl AgentSessionSlot {
             self.changed.notify_waiters();
             delivery
         };
-        self.capture_shutdown_descendants();
         self.turn_requested.notify_waiters();
         #[cfg(feature = "agent-test-support")]
         if delivery.is_some()
@@ -1959,7 +2010,6 @@ impl Drop for SessionTurnLease {
 
 impl Drop for AgentSessionSlot {
     fn drop(&mut self) {
-        self.capture_shutdown_descendants();
         self.cancellation.cancel();
         *lock(&self.state) = AgentSessionState::Closed;
         self.changed.notify_waiters();
@@ -1972,12 +2022,23 @@ pub(crate) fn spawn_opening(
     spec: &'static AgentLaunchSpec,
     command: ResolvedAgentCommand,
     result_service: Arc<ResultMcpService>,
+    package_preparation: Option<Arc<NpxPreparationGate>>,
+    cleanup_complete: Box<dyn FnOnce(Arc<AgentSessionSlot>) + Send>,
 ) {
     let slot = Arc::downgrade(slot);
     pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
-        open_agent_session(slot.clone(), profile, spec, command, result_service).await;
+        open_agent_session(
+            slot.clone(),
+            profile,
+            spec,
+            command,
+            result_service,
+            package_preparation,
+        )
+        .await;
         if let Some(slot) = slot.upgrade() {
             slot.mark_cleanup_complete();
+            cleanup_complete(slot);
         }
     });
 }
@@ -1988,6 +2049,7 @@ async fn open_agent_session(
     spec: &'static AgentLaunchSpec,
     command: ResolvedAgentCommand,
     result_service: Arc<ResultMcpService>,
+    package_preparation: Option<Arc<NpxPreparationGate>>,
 ) {
     let Some(strong_slot) = slot.upgrade() else {
         return;
@@ -2019,6 +2081,18 @@ async fn open_agent_session(
         return;
     }
 
+    let package_leader = match package_preparation {
+        Some(gate) => match gate.enter(&cancellation).await {
+            NpxPreparationAdmission::Prepared => None,
+            NpxPreparationAdmission::Leader(leader) => Some(leader),
+            NpxPreparationAdmission::Cancelled => return,
+        },
+        None => None,
+    };
+    if cancellation.is_cancelled() {
+        return;
+    }
+
     let mut generation = 1_u64;
     let mut retry_ordinal = 0_u32;
     let mut previous_ambiguous = None;
@@ -2033,6 +2107,7 @@ async fn open_agent_session(
             &endpoint,
             generation,
             &cancellation,
+            package_leader.as_ref(),
         )
         .await;
         match outcome {
@@ -2220,6 +2295,7 @@ async fn run_opening_attempt(
     endpoint: &str,
     generation: u64,
     cancellation: &CancellationToken,
+    package_leader: Option<&NpxPreparationLeader>,
 ) -> OpeningAttemptOutcome {
     if cancellation.is_cancelled() {
         return OpeningAttemptOutcome::Cancelled;
@@ -2228,17 +2304,18 @@ async fn run_opening_attempt(
         return OpeningAttemptOutcome::Terminal(failure);
     }
 
-    let spawned = match spawn_child(command, &profile.workspace) {
+    let spawned = match spawn_agent(command, &profile.workspace) {
         Ok(spawned) => spawned,
         Err(failure) => return OpeningAttemptOutcome::Terminal(failure),
     };
     let SpawnedAgent {
-        mut child,
+        mut guardian,
+        adapter_pid: pid,
         stdin,
         stdout,
         mut stderr,
+        mut shutdown,
     } = spawned;
-    let pid = child.id().expect("a running agent child has a process id");
     let stderr_drain = Some({
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             let mut buffer = [0_u8; 8192];
@@ -2323,7 +2400,6 @@ async fn run_opening_attempt(
         });
     let transport = Lines::new(outgoing, incoming);
     let listener_failure = result_service.listener_failure();
-    let mut tracked_descendants = Vec::new();
     let completion = {
         let connection = Client
             .builder()
@@ -2526,6 +2602,7 @@ async fn run_opening_attempt(
                             &response_observed_for_connection,
                             &configuration_monitor_for_connection,
                             generation,
+                            package_leader,
                         ) => Some(result),
                         () = connection.incoming_closed() => None,
                         () = configuration_invalidated.cancelled() => {
@@ -2580,7 +2657,7 @@ async fn run_opening_attempt(
                 },
             );
         tokio::pin!(connection);
-        let child_wait = child.wait();
+        let child_wait = guardian.wait();
         tokio::pin!(child_wait);
         tokio::select! {
             result = &mut connection => {
@@ -2592,17 +2669,7 @@ async fn run_opening_attempt(
             },
             _ = &mut child_wait => OpeningAttemptCompletion::Child,
             () = listener_failure.cancelled() => OpeningAttemptCompletion::ResultServiceLost,
-            () = cancellation.cancelled() => {
-                tracked_descendants = slot
-                    .upgrade()
-                    .map(|slot| slot.take_shutdown_descendants())
-                    .unwrap_or_default();
-                tracked_descendants.extend(i32::try_from(pid)
-                    .ok()
-                    .map(|root_pid| descendant_processes_at(Path::new("/proc"), root_pid))
-                    .unwrap_or_default());
-                OpeningAttemptCompletion::Cancelled
-            },
+            () = cancellation.cancelled() => OpeningAttemptCompletion::Cancelled,
         }
     };
     let cancelled =
@@ -2629,16 +2696,11 @@ async fn run_opening_attempt(
             }
         }
     }
-    tracked_descendants.extend(
-        slot.upgrade()
-            .map(|slot| slot.take_shutdown_descendants())
-            .unwrap_or_default(),
-    );
     let route = { lock(&current_route).take() };
     if let Some(route) = route {
         result_service.revoke_route(&route).await;
     }
-    terminate_and_reap(&mut child, pid, tracked_descendants).await;
+    terminate_and_reap(&mut guardian, &mut shutdown).await;
     wait_for_stderr_drain(stderr_drain).await;
 
     if cancelled {
@@ -2703,6 +2765,7 @@ async fn open_handshake(
     response_observed: &AtomicBool,
     configuration_monitor: &Arc<OpeningConfigurationMonitor>,
     generation: u64,
+    package_leader: Option<&NpxPreparationLeader>,
 ) -> Result<Option<SessionId>, OpeningHandshakeFailure> {
     if !spec.supports_step1_opening(profile.agent) {
         return Err(AgentStartupFailure::start(
@@ -2748,6 +2811,9 @@ async fn open_handshake(
             "agent does not support the required protocol",
         )
         .into());
+    }
+    if let Some(package_leader) = package_leader {
+        package_leader.mark_ready();
     }
     let agent_info = initialized.agent_info;
     let agent_capabilities = initialized.agent_capabilities;
@@ -2827,7 +2893,6 @@ async fn open_handshake(
     let Some(slot) = slot.upgrade() else {
         return Ok(None);
     };
-    slot.record_owned_process(pid);
     let committed = configuration_monitor.commit_ready(
         &slot,
         AgentReadySnapshot {
@@ -3247,273 +3312,6 @@ fn revalidate_workspace(
     Ok(())
 }
 
-struct SpawnedAgent {
-    child: Child,
-    stdin: ForkTracked<ChildStdin>,
-    stdout: ForkTracked<ChildStdout>,
-    stderr: ForkTracked<ChildStderr>,
-}
-
-fn spawn_child(
-    command: &ResolvedAgentCommand,
-    workspace: &WorkspaceLeaseV1,
-) -> Result<SpawnedAgent, AgentStartupFailure> {
-    let mut standard = std::process::Command::new(&command.program);
-    standard
-        .args(&command.args)
-        .envs(command.environment.iter().cloned())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for name in &command.removed_environment {
-        standard.env_remove(name);
-    }
-    standard.process_group(0);
-    let directory = workspace.directory.as_raw_fd();
-    unsafe {
-        standard.pre_exec(move || {
-            if libc::fchdir(directory) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
-    let guard = ForkExecGuard::begin();
-    let mut child = Command::from(standard).spawn().map_err(|_| {
-        AgentStartupFailure::start("spawn_failed", "spawn", "agent process could not start")
-    })?;
-    let stdin = child.stdin.take().expect("agent stdin was configured");
-    let stdout = child.stdout.take().expect("agent stdout was configured");
-    let stderr = child.stderr.take().expect("agent stderr was configured");
-    let spawned = SpawnedAgent {
-        child,
-        stdin: guard.track(stdin),
-        stdout: guard.track(stdout),
-        stderr: guard.track(stderr),
-    };
-    drop(guard);
-    Ok(spawned)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ProcProcess {
-    pid: i32,
-    state: char,
-    parent_pid: i32,
-    process_group: i32,
-    start_time: u64,
-}
-
-fn parse_proc_process(pid: i32, stat: &str) -> Option<ProcProcess> {
-    let command_end = stat.rfind(')')?;
-    let mut fields = stat[command_end + 1..].split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let parent_pid = fields.next()?.parse::<i32>().ok()?;
-    let process_group = fields.next()?.parse::<i32>().ok()?;
-    // Linux /proc/<pid>/stat starttime is field 22, sixteen fields after pgrp.
-    let start_time = fields.nth(16)?.parse::<u64>().ok()?;
-    Some(ProcProcess {
-        pid,
-        state,
-        parent_pid,
-        process_group,
-        start_time,
-    })
-}
-
-fn read_proc_process(entry: &std::fs::DirEntry) -> Option<ProcProcess> {
-    let name = entry.file_name();
-    let name = name.to_str()?;
-    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let pid = name.parse::<i32>().ok()?;
-    let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
-    parse_proc_process(pid, &stat)
-}
-
-fn read_proc_process_at(proc_root: &Path, pid: i32) -> Option<ProcProcess> {
-    let stat = std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
-    parse_proc_process(pid, &stat)
-}
-
-fn process_table_at(proc_root: &Path) -> Option<Vec<ProcProcess>> {
-    Some(
-        std::fs::read_dir(proc_root)
-            .ok()?
-            .filter_map(Result::ok)
-            .filter_map(|entry| read_proc_process(&entry))
-            .collect(),
-    )
-}
-
-fn process_group_has_live_members_at(proc_root: &Path, process_group: i32) -> bool {
-    let Some(processes) = process_table_at(proc_root) else {
-        return true;
-    };
-    processes.into_iter().any(|process| {
-        process.process_group == process_group && !matches!(process.state, 'X' | 'Z')
-    })
-}
-
-fn descendant_processes_at(proc_root: &Path, root_pid: i32) -> Vec<ProcProcess> {
-    let Some(processes) = process_table_at(proc_root) else {
-        return Vec::new();
-    };
-    let mut depths = std::collections::HashMap::from([(root_pid, 0_usize)]);
-    loop {
-        let mut changed = false;
-        for process in &processes {
-            let Some(parent_depth) = depths.get(&process.parent_pid).copied() else {
-                continue;
-            };
-            if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(process.pid) {
-                entry.insert(parent_depth + 1);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut descendants = processes
-        .into_iter()
-        .filter_map(|process| {
-            depths
-                .get(&process.pid)
-                .copied()
-                .filter(|_| process.pid != root_pid)
-                .map(|depth| (process, depth))
-        })
-        .collect::<Vec<_>>();
-    descendants.sort_unstable_by(|left, right| right.1.cmp(&left.1));
-    descendants
-        .into_iter()
-        .map(|(process, _)| process)
-        .collect()
-}
-
-fn descendant_processes_from_live_roots_at(
-    proc_root: &Path,
-    roots: &[ProcProcess],
-) -> Vec<ProcProcess> {
-    let Some(processes) = process_table_at(proc_root) else {
-        return Vec::new();
-    };
-    let root_pids = roots
-        .iter()
-        .filter(|root| {
-            processes.iter().any(|process| {
-                process.pid == root.pid
-                    && process.start_time == root.start_time
-                    && !matches!(process.state, 'X' | 'Z')
-            })
-        })
-        .map(|root| root.pid)
-        .collect::<std::collections::HashSet<_>>();
-    let mut depths = root_pids
-        .iter()
-        .copied()
-        .map(|pid| (pid, 0_usize))
-        .collect::<std::collections::HashMap<_, _>>();
-    loop {
-        let mut changed = false;
-        for process in &processes {
-            let Some(parent_depth) = depths.get(&process.parent_pid).copied() else {
-                continue;
-            };
-            if let std::collections::hash_map::Entry::Vacant(entry) = depths.entry(process.pid) {
-                entry.insert(parent_depth + 1);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut descendants = processes
-        .into_iter()
-        .filter_map(|process| {
-            depths
-                .get(&process.pid)
-                .copied()
-                .filter(|_| !root_pids.contains(&process.pid))
-                .map(|depth| (process, depth))
-        })
-        .collect::<Vec<_>>();
-    descendants.sort_unstable_by(|left, right| right.1.cmp(&left.1));
-    descendants
-        .into_iter()
-        .map(|(process, _)| process)
-        .collect()
-}
-
-fn process_is_live_at(proc_root: &Path, identity: ProcProcess) -> bool {
-    read_proc_process_at(proc_root, identity.pid).is_some_and(|process| {
-        process.start_time == identity.start_time && !matches!(process.state, 'X' | 'Z')
-    })
-}
-
-#[cfg(test)]
-async fn wait_for_process_group_exit_at(proc_root: &Path, process_group: i32) {
-    while process_group_has_live_members_at(proc_root, process_group) {
-        tokio::task::yield_now().await;
-    }
-}
-
-async fn wait_for_process_group_exit(process_group: i32) {
-    while process_group_has_live_members_at(Path::new("/proc"), process_group) {
-        unsafe {
-            libc::kill(-process_group, libc::SIGKILL);
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
-async fn wait_for_descendant_exit(descendants: &[ProcProcess]) {
-    while descendants
-        .iter()
-        .any(|process| process_is_live_at(Path::new("/proc"), *process))
-    {
-        for process in descendants {
-            if process_is_live_at(Path::new("/proc"), *process) {
-                unsafe {
-                    libc::kill(process.pid, libc::SIGKILL);
-                }
-            }
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
-async fn terminate_and_reap(child: &mut Child, pid: u32, mut descendants: Vec<ProcProcess>) {
-    let process_group = i32::try_from(pid).ok();
-    if let Some(root_pid) = process_group {
-        descendants.extend(descendant_processes_at(Path::new("/proc"), root_pid));
-        descendants.sort_unstable_by_key(|process| (process.pid, process.start_time));
-        descendants.dedup_by_key(|process| (process.pid, process.start_time));
-    }
-    for descendant in &descendants {
-        if process_is_live_at(Path::new("/proc"), *descendant) {
-            unsafe {
-                libc::kill(descendant.pid, libc::SIGKILL);
-            }
-        }
-    }
-    if let Some(process_group) = process_group {
-        unsafe {
-            libc::kill(-process_group, libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-    if let Some(process_group) = process_group {
-        wait_for_process_group_exit(process_group).await;
-    }
-    wait_for_descendant_exit(&descendants).await;
-}
-
 async fn wait_for_stderr_drain(stderr_drain: Option<tokio::task::JoinHandle<()>>) {
     if let Some(stderr_drain) = stderr_drain {
         let _ = stderr_drain.await;
@@ -3532,27 +3330,6 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
-
-    fn write_proc_process(
-        proc_root: &Path,
-        pid: i32,
-        command: &str,
-        state: char,
-        parent_pid: i32,
-        process_group: i32,
-        start_time: u64,
-    ) {
-        let process = proc_root.join(pid.to_string());
-        std::fs::create_dir_all(&process).unwrap();
-        let intermediate_fields = ["0"; 16].join(" ");
-        std::fs::write(
-            process.join("stat"),
-            format!(
-                "{pid} ({command}) {state} {parent_pid} {process_group} {intermediate_fields} {start_time}\n"
-            ),
-        )
-        .unwrap();
-    }
 
     #[test]
     fn opening_retry_window_uses_half_to_full_exponential_range_with_cap() {
@@ -3578,6 +3355,54 @@ mod tests {
             sample_opening_retry_delay_ms(0, || Ok::<u64, ()>(125)),
             Ok(250)
         );
+    }
+
+    #[tokio::test]
+    async fn npx_preparation_waiters_release_only_after_initialize_succeeds() {
+        let gate = NpxPreparationGate::new();
+        let cancellation = CancellationToken::new();
+        let leader = match gate.enter(&cancellation).await {
+            NpxPreparationAdmission::Leader(leader) => leader,
+            _ => panic!("the first preparation admission must lead"),
+        };
+        let waiter = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            let cancellation = cancellation.clone();
+            async move { gate.enter(&cancellation).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        leader.mark_ready();
+
+        assert!(matches!(
+            waiter.await.unwrap(),
+            NpxPreparationAdmission::Prepared
+        ));
+    }
+
+    #[tokio::test]
+    async fn abandoned_npx_preparation_leader_hands_leadership_to_a_waiter() {
+        let gate = NpxPreparationGate::new();
+        let cancellation = CancellationToken::new();
+        let leader = match gate.enter(&cancellation).await {
+            NpxPreparationAdmission::Leader(leader) => leader,
+            _ => panic!("the first preparation admission must lead"),
+        };
+        let waiter = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            let cancellation = cancellation.clone();
+            async move { gate.enter(&cancellation).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(leader);
+
+        assert!(matches!(
+            waiter.await.unwrap(),
+            NpxPreparationAdmission::Leader(_)
+        ));
     }
 
     #[test]
@@ -3675,99 +3500,6 @@ mod tests {
             .expect("stderr drain receiver remains live");
 
         cleanup.await.expect("cleanup task completes");
-    }
-
-    #[tokio::test]
-    async fn process_group_wait_requires_os_confirmed_no_live_members() {
-        let proc_root = std::env::temp_dir().join(format!(
-            "troupe-process-group-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        write_proc_process(&proc_root, 41001, "mock agent", 'R', 1, 41000, 101);
-
-        let mut wait = std::pin::pin!(wait_for_process_group_exit_at(&proc_root, 41000));
-        tokio::select! {
-            biased;
-            () = &mut wait => panic!("cleanup accepted a live process-group member"),
-            () = tokio::task::yield_now() => {}
-        }
-
-        write_proc_process(&proc_root, 41001, "mock agent", 'Z', 1, 41000, 101);
-        wait.await;
-        std::fs::remove_dir_all(&proc_root).unwrap();
-    }
-
-    #[test]
-    fn descendant_scan_crosses_process_groups_and_rejects_reused_pids() {
-        let proc_root = std::env::temp_dir().join(format!(
-            "troupe-descendant-scan-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        write_proc_process(&proc_root, 42000, "agent", 'R', 1, 42000, 200);
-        write_proc_process(&proc_root, 42001, "tool wrapper", 'R', 42000, 42000, 201);
-        write_proc_process(
-            &proc_root,
-            42002,
-            "detached) worker",
-            'S',
-            42001,
-            42002,
-            202,
-        );
-        write_proc_process(&proc_root, 42003, "unrelated", 'R', 1, 42003, 203);
-
-        let descendants = descendant_processes_at(&proc_root, 42000);
-        assert_eq!(
-            descendants
-                .iter()
-                .map(|process| process.pid)
-                .collect::<Vec<_>>(),
-            vec![42002, 42001],
-        );
-        let detached_identity = descendants[0];
-        assert!(process_is_live_at(&proc_root, detached_identity));
-
-        write_proc_process(&proc_root, 42002, "reused pid", 'R', 1, 42002, 999);
-        assert!(!process_is_live_at(&proc_root, detached_identity));
-
-        std::fs::remove_dir_all(&proc_root).unwrap();
-    }
-
-    #[test]
-    fn retained_descendant_identity_remains_a_scan_root_after_the_agent_exits() {
-        let proc_root = std::env::temp_dir().join(format!(
-            "troupe-retained-descendant-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        write_proc_process(&proc_root, 43000, "agent", 'R', 1, 43000, 300);
-        write_proc_process(&proc_root, 43001, "detached worker", 'S', 43000, 43001, 301);
-
-        let retained = descendant_processes_at(&proc_root, 43000);
-        assert_eq!(
-            retained
-                .iter()
-                .map(|process| process.pid)
-                .collect::<Vec<_>>(),
-            vec![43001],
-        );
-
-        std::fs::remove_dir_all(proc_root.join("43000")).unwrap();
-        write_proc_process(&proc_root, 43001, "detached worker", 'S', 1, 43001, 301);
-        write_proc_process(&proc_root, 43002, "nested tool", 'S', 43001, 43002, 302);
-
-        let discovered = descendant_processes_from_live_roots_at(&proc_root, &retained);
-        assert_eq!(
-            discovered
-                .iter()
-                .map(|process| process.pid)
-                .collect::<Vec<_>>(),
-            vec![43002],
-        );
-
-        write_proc_process(&proc_root, 43001, "reused pid", 'R', 1, 43001, 999);
-        assert!(descendant_processes_from_live_roots_at(&proc_root, &retained).is_empty());
-
-        std::fs::remove_dir_all(&proc_root).unwrap();
     }
 
     #[tokio::test]

@@ -4,6 +4,11 @@ These examples exercise provider CLIs and are intentionally excluded from the
 ordinary deterministic example suite. The provider must already be logged in;
 Troupe does not perform authentication.
 
+Codex and Claude require Node.js with npm and `npx` because Troupe launches
+their pinned ACP adapter packages through `npx`. Kimi requires the pinned Kimi
+Code 0.31.1 CLI. All three CLIs must be installed and logged in before the
+Production starts.
+
 For Codex, provide an explicit profile whose workspace is an existing writable
 directory. The live harness creates and removes its own child workspace there.
 `effort` is required but may be `null`.

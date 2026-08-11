@@ -49,6 +49,7 @@ def _configure_mock(
     scenario: str = "ready",
     provider: Literal["codex", "claude", "kimi"] | None = None,
     release: Path | None = None,
+    attempt_file: Path | None = None,
     legacy_mode_id: str | None = None,
     authoritative_prompt_error_codes: list[int] | None = None,
 ) -> None:
@@ -60,6 +61,8 @@ def _configure_mock(
         args.extend(["--mcp-revision", "2025-11-25"])
     if release is not None:
         args.extend(["--release", str(release)])
+    if attempt_file is not None:
+        args.extend(["--attempt-file", str(attempt_file)])
     launch: dict[str, object] = {
         "program": sys.executable,
         "args": args,
@@ -96,7 +99,7 @@ def _events(path: Path) -> list[dict[str, Any]]:
 def _process_is_running(pid: int) -> bool:
     try:
         status = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
     state = status[status.rfind(")") + 2 :].split(maxsplit=1)[0]
     return state not in {"X", "Z"}
@@ -304,6 +307,74 @@ def test_ready_two_actors_get_distinct_processes_sessions_and_routes(tmp_path: P
                 workspace_identity.st_dev,
                 workspace_identity.st_ino,
             )
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_same_npx_launch_spec_coalesces_the_first_package_preparation(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        attempts = tmp_path / "attempts"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(
+            events,
+            scenario="opening_crash_twice_then_ready",
+            attempt_file=attempts,
+        )
+        _native()._agent_test_hold_opening_backoff(random_words=[126, 251])
+
+        production = troupe.Production([])
+        first = _cast(production, workspace, "cold-first")
+        second = _cast(production, workspace, "cold-second")
+        while _native()._agent_test_opening_backoff_state()["arrivals"] < 1:
+            await asyncio.sleep(0)
+        for _ in range(100):
+            await asyncio.sleep(0)
+        assert sum(
+            row["event"] == "process_started" for row in _events(events)
+        ) == 1
+
+        _native()._agent_test_release_opening_backoff()
+        while _native()._agent_test_opening_backoff_state()["arrivals"] < 2:
+            await asyncio.sleep(0)
+        assert sum(
+            row["event"] == "process_started" for row in _events(events)
+        ) == 2
+        _native()._agent_test_release_opening_backoff()
+        first_ready, second_ready = await asyncio.gather(_ready(first), _ready(second))
+        assert first_ready["pid"] != second_ready["pid"]
+        assert sum(
+            row["event"] == "process_started" for row in _events(events)
+        ) == 4
+        await production._agent_shutdown_for_test()  # type: ignore[attr-defined]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_npx_preparation_releases_after_initialize_not_session_readiness(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(events)
+        _native()._agent_test_hold_configuration_ready()
+        _native()._agent_test_hold_mcp_ready()
+
+        production = troupe.Production([])
+        first = _cast(production, workspace, "prepared-first")
+        await _wait_for_readiness_gate("configuration", "arrived")
+        second = _cast(production, workspace, "prepared-second")
+        await _wait_for_event(events, "process_started", 2)
+        assert sum(
+            row["event"] == "process_started" for row in _events(events)
+        ) == 2
+        await production._agent_shutdown_for_test()  # type: ignore[attr-defined]
+        del first, second
 
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
 
@@ -2005,6 +2076,7 @@ def test_capability_destruction_kills_opening_process(tmp_path: Path) -> None:
         production = troupe.Production([])
         handle = _cast(production, workspace, "closing")
         await _wait_for_event(events, "ready_blocked")
+        assert production._agent_tracked_sessions_for_test() == 1  # type: ignore[attr-defined]
         pid = next(row["pid"] for row in _events(events) if row["event"] == "process_started")
         del handle
         for _ in range(3):
@@ -2015,9 +2087,48 @@ def test_capability_destruction_kills_opening_process(tmp_path: Path) -> None:
             except ProcessLookupError:
                 break
             await asyncio.sleep(0)
+        while production._agent_tracked_sessions_for_test() != 0:  # type: ignore[attr-defined]
+            await asyncio.sleep(0)
         assert production.get_actor("closing") is None
 
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux fork is required")
+def test_fork_child_rejects_cast_before_profile_or_launcher_work(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events)
+    production = troupe.Production([])
+    read_fd, write_fd = os.pipe()
+    child_pid = os.fork()
+    if child_pid == 0:
+        os.close(read_fd)
+        try:
+            production.cast_actor(
+                SessionActor,
+                name="fork-child-cast",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+        except BaseException as error:
+            payload = f"{type(error).__name__}:{error}".encode("utf-8")
+        else:
+            payload = b"cast unexpectedly succeeded"
+        os.write(write_fd, payload)
+        os.close(write_fd)
+        os._exit(0)
+
+    os.close(write_fd)
+    payload = os.read(read_fd, 4096).decode("utf-8")
+    os.close(read_fd)
+    waited_pid, status = os.waitpid(child_pid, 0)
+    assert waited_pid == child_pid
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert payload == "RuntimeError:Production belongs to another process"
+    assert not events.exists()
 
 
 def test_opening_production_shutdown_reaps_child_and_rejects_later_cast(

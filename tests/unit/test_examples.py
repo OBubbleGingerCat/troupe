@@ -182,6 +182,8 @@ def test_examples_are_documented_public_production_packages() -> None:
     examples_readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
 
     assert "[Progressive examples](examples/README.md)" in root_readme
+    for prerequisite in ("Node.js", "npm", "`npx`", "logged in"):
+        assert prerequisite in examples_readme
     for name in EXAMPLE_NAMES:
         package = EXAMPLES / name
         assert name.isidentifier()
@@ -275,6 +277,64 @@ def test_mixed_oracle_waits_for_failed_production_descendants(
     pid = int(child_pid.read_text(encoding="ascii"))
     assert oracle._process_identity(pid) is None
     assert settings.read_text(encoding="utf-8") == "{}\n"
+
+
+def test_mixed_oracle_cleans_descendants_before_reporting_settings_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_tests = ROOT / "tests" / "live"
+    monkeypatch.syspath_prepend(str(live_tests))
+    spec = importlib.util.spec_from_file_location(
+        "troupe_mixed_agent_oracle_settings_test",
+        live_tests / "mixed_agent_oracle.py",
+    )
+    assert spec is not None and spec.loader is not None
+    oracle = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(oracle)
+
+    workspace = tmp_path / "workspace"
+    repository = workspace / "repository"
+    workspace.mkdir()
+    repository.mkdir()
+    child_pid = workspace / "child.pid"
+    settings = workspace / "settings.json"
+    settings.write_text("{}\n", encoding="utf-8")
+    script = (
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import signal; signal.pause()'],\n"
+        "    start_new_session=True,\n"
+        ")\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\n"
+        "pathlib.Path(sys.argv[2]).write_text('{\\\"changed\\\": true}\\n', encoding='utf-8')\n"
+        "time.sleep(0.2)\n"
+        "raise SystemExit(3)\n"
+    )
+
+    def production_command(**_: object) -> tuple[list[str], dict[str, str], tuple[Path, bytes]]:
+        return (
+            [sys.executable, "-c", script, str(child_pid), str(settings)],
+            _environment(),
+            (settings, settings.read_bytes()),
+        )
+
+    monkeypatch.setattr(oracle, "_production_command", production_command)
+    monkeypatch.setattr(oracle, "PROCESS_CLEANUP_SECONDS", 0.05)
+    pid: int | None = None
+    try:
+        with pytest.raises(oracle.AcceptanceFailure):
+            oracle._run_production(
+                workspace=workspace,
+                repository=repository,
+                report=workspace / "report.json",
+                profiles={},
+            )
+        pid = int(child_pid.read_text(encoding="ascii"))
+        assert oracle._process_identity(pid) is None
+    finally:
+        if pid is not None and oracle._process_identity(pid) is not None:
+            os.kill(pid, signal.SIGKILL)
 
 
 def test_hello_actor_runs_through_the_literal_console() -> None:

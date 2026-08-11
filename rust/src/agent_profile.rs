@@ -11,7 +11,7 @@ use pyo3::types::{PyAny, PyString};
 
 use crate::fork_fd_registry::ForkTracked;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum AgentKind {
     Codex,
     Claude,

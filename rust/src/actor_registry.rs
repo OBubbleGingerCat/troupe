@@ -276,6 +276,13 @@ impl ProductionState {
     }
 
     pub(crate) fn begin_agent_cast(&self) -> Result<AgentCastPermit, AgentStartupFailure> {
+        if !self.pid_matches() {
+            return Err(AgentStartupFailure::start(
+                "preparation_failed",
+                "preparation",
+                "Production belongs to another process",
+            ));
+        }
         self.agent_supervisor.begin_cast()
     }
 
@@ -300,6 +307,21 @@ impl ProductionState {
     #[cfg(feature = "agent-test-support")]
     pub(crate) fn fail_agent_result_listener_for_test(&self) {
         self.agent_supervisor.fail_result_listener_for_test();
+    }
+
+    pub(crate) fn ensure_owner_process(&self) -> PyResult<()> {
+        if self.pid_matches() {
+            Ok(())
+        } else {
+            Err(PyRuntimeError::new_err(
+                "Production belongs to another process",
+            ))
+        }
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn tracked_agent_session_count(&self) -> usize {
+        self.agent_supervisor.tracked_session_count()
     }
 
     fn pid_matches(&self) -> bool {

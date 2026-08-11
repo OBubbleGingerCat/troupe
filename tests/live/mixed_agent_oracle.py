@@ -304,13 +304,28 @@ def _run_production(
     except BaseException as error:
         run_error = error
     user_settings_target, original_user_settings = user_settings_audit
-    current_user_settings = (
-        user_settings_target.read_bytes() if user_settings_target.is_file() else None
-    )
-    if current_user_settings != original_user_settings:
-        raise AcceptanceFailure("mixed live isolation modified Claude user settings")
+    settings_error: BaseException | None = None
+    try:
+        current_user_settings = (
+            user_settings_target.read_bytes() if user_settings_target.is_file() else None
+        )
+    except BaseException as error:
+        settings_error = error
+    else:
+        if current_user_settings != original_user_settings:
+            settings_error = AcceptanceFailure(
+                "mixed live isolation modified Claude user settings"
+            )
+    cleanup_error: BaseException | None = None
     if process is not None:
-        _require_process_cleanup(identities, repository)
+        try:
+            _require_process_cleanup(identities, repository)
+        except BaseException as error:
+            cleanup_error = error
+    if cleanup_error is not None:
+        raise cleanup_error
+    if settings_error is not None:
+        raise settings_error
     if run_error is not None:
         raise run_error
     if process is None:

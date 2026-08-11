@@ -47,6 +47,7 @@ EXPECTED_RUST_SOURCES = [
     "agent_adapter.rs",
     "agent_error.rs",
     "agent_launch.rs",
+    "agent_process.rs",
     "agent_profile.rs",
     "agent_session.rs",
     "agent_supervisor.rs",

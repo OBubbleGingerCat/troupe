@@ -1,12 +1,13 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::Notify;
 
 use crate::agent_adapter::agent_adapter;
 use crate::agent_error::AgentStartupFailure;
-use crate::agent_launch::{ResolvedLaunch, resolve_launch};
+use crate::agent_launch::{NpxPreparationKey, ResolvedLaunch, resolve_launch};
 use crate::agent_profile::ResolvedAgentProfile;
-use crate::agent_session::{AgentSessionSlot, spawn_opening};
+use crate::agent_session::{AgentSessionSlot, NpxPreparationGate, spawn_opening};
 use crate::result_mcp::ResultMcpService;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -29,6 +30,7 @@ struct SupervisorState {
     shutting_down: bool,
     active_casts: usize,
     sessions: Vec<Arc<AgentSessionSlot>>,
+    package_preparations: HashMap<NpxPreparationKey, Arc<NpxPreparationGate>>,
 }
 
 pub(crate) struct AgentCastPermit {
@@ -44,6 +46,7 @@ impl AgentSupervisor {
                     shutting_down: false,
                     active_casts: 0,
                     sessions: Vec::new(),
+                    package_preparations: HashMap::new(),
                 }),
                 changed: Notify::new(),
             }),
@@ -86,7 +89,6 @@ impl AgentSupervisor {
         #[cfg(feature = "agent-test-support")]
         if matches!(launch, ResolvedLaunch::Inert) {
             let slot = AgentSessionSlot::inert(&profile);
-            self.track(&slot);
             return slot;
         }
         let command = match launch {
@@ -94,18 +96,28 @@ impl AgentSupervisor {
             ResolvedLaunch::Inert => unreachable!("inert launch returned after its early branch"),
         };
         let spec = agent_adapter(profile.agent).launch_spec();
+        let package_preparation = spec
+            .npx_preparation_key()
+            .map(|key| self.package_preparation(key));
         let slot = AgentSessionSlot::new();
         #[cfg(feature = "agent-test-support")]
         slot.install_test_turn_registration_gate(command.turn_gates.registration.clone());
         #[cfg(feature = "agent-test-support")]
         slot.install_test_turn_terminal_delivery_gate(command.turn_gates.terminal_delivery.clone());
         self.track(&slot);
+        let control = Arc::downgrade(&self.control);
         spawn_opening(
             &slot,
             profile,
             spec,
             *command,
             Arc::clone(&self.result_service),
+            package_preparation,
+            Box::new(move |slot| {
+                if let Some(control) = control.upgrade() {
+                    control.release(&slot);
+                }
+            }),
         );
         slot
     }
@@ -116,6 +128,15 @@ impl AgentSupervisor {
             .sessions
             .retain(|session| !session.cleanup_is_complete());
         state.sessions.push(Arc::clone(slot));
+    }
+
+    fn package_preparation(&self, key: NpxPreparationKey) -> Arc<NpxPreparationGate> {
+        Arc::clone(
+            lock(&self.control.state)
+                .package_preparations
+                .entry(key)
+                .or_insert_with(NpxPreparationGate::new),
+        )
     }
 
     fn begin_shutdown(&self) -> Vec<Arc<AgentSessionSlot>> {
@@ -161,6 +182,20 @@ impl AgentSupervisor {
     #[cfg(feature = "agent-test-support")]
     pub(crate) fn fail_result_listener_for_test(&self) {
         self.result_service.fail_listener_for_test();
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn tracked_session_count(&self) -> usize {
+        lock(&self.control.state).sessions.len()
+    }
+}
+
+impl SupervisorControl {
+    fn release(&self, slot: &Arc<AgentSessionSlot>) {
+        lock(&self.state)
+            .sessions
+            .retain(|tracked| !Arc::ptr_eq(tracked, slot));
+        self.changed.notify_waiters();
     }
 }
 

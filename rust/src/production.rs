@@ -103,6 +103,7 @@ impl Production {
         actor_kwargs: &Bound<'_, PyAny>,
     ) -> PyResult<Py<ActorHandle>> {
         let py = slf.py();
+        slf.state.ensure_owner_process()?;
         let actor_type = actor_type
             .cast::<PyType>()
             .map_err(|_| PyTypeError::new_err(ACTOR_TYPE_ERROR))?;
@@ -168,6 +169,11 @@ impl Production {
     #[cfg(feature = "agent-test-support")]
     fn _agent_fail_result_listener_for_test(&self) {
         self.state.fail_agent_result_listener_for_test();
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_tracked_sessions_for_test(&self) -> usize {
+        self.state.tracked_agent_session_count()
     }
 
     #[pyo3(

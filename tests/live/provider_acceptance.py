@@ -979,25 +979,31 @@ def _run_claude(base: Path, configured_profile: dict[str, object]) -> None:
     ownership_marker = workspace / ".troupe-live-owned"
     ownership_marker.write_text("claude\n", encoding="ascii")
     seed_token = f"ctx-{secrets.token_hex(8)}"
-    config_dir = Path(
-        os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
-    ).expanduser()
-    if not config_dir.is_absolute():
-        raise AcceptanceFailure("CLAUDE_CONFIG_DIR must be absolute for live isolation")
-    user_settings_target = config_dir / "settings.json"
-    if not config_dir.is_dir():
-        raise AcceptanceFailure("Claude config directory is unavailable")
-    original_user_settings = (
-        user_settings_target.read_bytes() if user_settings_target.is_file() else None
-    )
-    user_settings = workspace / "isolated-user-settings.json"
-    markers = {
-        source: workspace / f"{source}-hook.txt"
-        for source in ("user", "project", "local")
-    }
-    precedence_marker = workspace / "settings-precedence.txt"
-    correction_audit = workspace / "schema-correction-audit.jsonl"
+    user_settings_target: Path | None = None
+    original_user_settings: bytes | None = None
     try:
+        config_dir = Path(
+            os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))
+        ).expanduser()
+        if not config_dir.is_absolute():
+            raise AcceptanceFailure(
+                "CLAUDE_CONFIG_DIR must be absolute for live isolation"
+            )
+        user_settings_target = config_dir / "settings.json"
+        if not config_dir.is_dir():
+            raise AcceptanceFailure("Claude config directory is unavailable")
+        original_user_settings = (
+            user_settings_target.read_bytes()
+            if user_settings_target.is_file()
+            else None
+        )
+        user_settings = workspace / "isolated-user-settings.json"
+        markers = {
+            source: workspace / f"{source}-hook.txt"
+            for source in ("user", "project", "local")
+        }
+        precedence_marker = workspace / "settings-precedence.txt"
+        correction_audit = workspace / "schema-correction-audit.jsonl"
         live_profile = {**configured_profile, "workspace": str(workspace)}
         (workspace / "seed.txt").write_text(seed_token + "\n", encoding="utf-8")
         _write_json(
@@ -1130,16 +1136,40 @@ def _run_claude(base: Path, configured_profile: dict[str, object]) -> None:
             phase=None,
         )
     finally:
-        current_user_settings = (
-            user_settings_target.read_bytes() if user_settings_target.is_file() else None
-        )
-        if current_user_settings != original_user_settings:
-            raise AcceptanceFailure("live isolation modified real Claude user settings")
-        if ownership_marker.read_text(encoding="ascii") != "claude\n":
-            raise AcceptanceFailure("refusing to clean an unowned live workspace")
-        shutil.rmtree(workspace)
-    if workspace.exists():
-        raise AcceptanceFailure("live Claude workspace survived cleanup")
+        cleanup_error: BaseException | None = None
+        if user_settings_target is not None:
+            try:
+                current_user_settings = (
+                    user_settings_target.read_bytes()
+                    if user_settings_target.is_file()
+                    else None
+                )
+            except BaseException as error:
+                cleanup_error = error
+            else:
+                if current_user_settings != original_user_settings:
+                    cleanup_error = AcceptanceFailure(
+                        "live isolation modified real Claude user settings"
+                    )
+        try:
+            owned = ownership_marker.read_text(encoding="ascii") == "claude\n"
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        else:
+            if not owned:
+                if cleanup_error is None:
+                    cleanup_error = AcceptanceFailure(
+                        "refusing to clean an unowned live workspace"
+                    )
+            else:
+                shutil.rmtree(workspace)
+                if workspace.exists() and cleanup_error is None:
+                    cleanup_error = AcceptanceFailure(
+                        "live Claude workspace survived cleanup"
+                    )
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def main(argv: list[str]) -> int:

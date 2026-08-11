@@ -116,6 +116,10 @@ def test_readme_documents_actor_act_schema_and_callback_boundaries() -> None:
         "`Actor.act()`",
         "one persistent ACP session",
         "already be logged in",
+        "Node.js",
+        "npm",
+        "`npx`",
+        "Kimi Code 0.31.1",
         "`description`",
         "`choices`",
         "`ObjectValue`",
@@ -140,6 +144,25 @@ def test_readme_documents_actor_act_schema_and_callback_boundaries() -> None:
     )
     assert "Validation callbacks may be synchronous or asynchronous" in schema_stub
     assert "Return one validated JSON object from this Actor's persistent agent session" in public_stub
+
+
+def test_formal_actor_agent_documents_match_the_implemented_v1_scope() -> None:
+    design = (ROOT / "docs" / "design" / "actor-agent-session.md").read_text(
+        encoding="utf-8"
+    )
+    plan = (
+        ROOT / "docs" / "plan" / "actor-act-acp-implementation-plan.md"
+    ).read_text(encoding="utf-8")
+
+    assert "实现状态：实现完成" in design
+    assert "状态：实现完成" in plan
+    assert "diagnostic sink" not in design
+    assert "diagnostic sink" not in plan
+    assert "agent_diagnostics.rs" not in plan
+    assert "每次 Opening attempt 至少记录" not in design
+    assert "token/usage（若 provider 提供）" not in design
+    assert "manifest-fixed" not in design
+    assert "后续独立设计" in design
 
 
 def test_readme_names_all_four_package_identity_rules_and_linux_scope() -> None:

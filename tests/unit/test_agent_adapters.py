@@ -617,6 +617,27 @@ def test_claude_live_example_and_isolated_acceptance_runner_are_wired() -> None:
     assert "setproxy" not in harness_source
 
 
+def test_claude_live_acceptance_cleans_workspace_before_config_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acceptance = _live_acceptance_module()
+    workspace = tmp_path / ".troupe-live-claude-test"
+
+    def make_workspace(**_: object) -> str:
+        workspace.mkdir()
+        return str(workspace)
+
+    monkeypatch.setattr(acceptance.tempfile, "mkdtemp", make_workspace)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "relative-claude-config")
+    with pytest.raises(
+        acceptance.AcceptanceFailure,
+        match="CLAUDE_CONFIG_DIR must be absolute",
+    ):
+        acceptance._run_claude(tmp_path, {})
+    assert not workspace.exists()
+
+
 def test_kimi_live_example_and_isolated_acceptance_runner_are_wired() -> None:
     expected = [
         ROOT / "examples" / "live_agents" / "README.md",

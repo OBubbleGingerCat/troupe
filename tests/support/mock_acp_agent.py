@@ -980,6 +980,7 @@ def main() -> int:
         "spawn_descendant",
         "spawn_detached_descendant",
         "spawn_detached_descendant_then_exit",
+        "spawn_unobserved_detached_before_initialize_then_exit",
     }:
         descendant = subprocess.Popen(
             [sys.executable, "-c", "import signal; signal.pause()"],
@@ -989,6 +990,39 @@ def main() -> int:
             start_new_session=args.scenario != "spawn_descendant",
         )
         _record(args.events, "descendant_started", descendant_pid=descendant.pid)
+        if args.scenario == "spawn_unobserved_detached_before_initialize_then_exit":
+            assert args.release is not None
+            with args.release.open("rb", buffering=0) as release:
+                assert release.read(1) == b"1"
+            _record(args.events, "process_exiting_before_initialize")
+            os._exit(0)
+    if args.scenario == "spawn_short_lived_orphan":
+        orphan_pid_file = args.events.with_name(f"{args.events.name}.orphan-pid")
+        launcher = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, pathlib, sys, time; "
+                    "pid = os.fork(); "
+                    "(os._exit(0) if pid else None); "
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii'); "
+                    "time.sleep(0.05); os._exit(0)"
+                ),
+                str(orphan_pid_file),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        launcher.wait()
+        while not orphan_pid_file.is_file():
+            time.sleep(0.001)
+        _record(
+            args.events,
+            "short_lived_orphan_started",
+            descendant_pid=int(orphan_pid_file.read_text(encoding="ascii")),
+        )
     effort_id = {
         "codex": "reasoning_effort",
         "claude": "effort",
@@ -1526,6 +1560,7 @@ def main() -> int:
                 "exit_before_turn_intake",
                 "idle_clean_eof",
                 "spawn_detached_descendant_then_exit",
+                "spawn_late_detached_descendant_then_exit",
             }:
                 assert args.release is not None
 
@@ -1533,9 +1568,23 @@ def main() -> int:
                     assert args.release is not None
                     with args.release.open("rb", buffering=0) as release:
                         assert release.read(1) == b"1"
+                    if args.scenario == "spawn_late_detached_descendant_then_exit":
+                        descendant = subprocess.Popen(
+                            [sys.executable, "-c", "import signal; signal.pause()"],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                        _record(
+                            args.events,
+                            "descendant_started",
+                            descendant_pid=descendant.pid,
+                        )
                     if args.scenario in {
                         "exit_before_turn_intake",
                         "spawn_detached_descendant_then_exit",
+                        "spawn_late_detached_descendant_then_exit",
                     }:
                         _record(args.events, "process_exiting_before_turn_intake")
                         os._exit(0)
