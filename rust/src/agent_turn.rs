@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, ErrorCode, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, StopReason, TextContent,
+    CancelNotification, ContentBlock, PromptRequest, PromptResponse, RequestId,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, SessionId,
+    StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, ConnectionTo, Error, Responder, is_incoming_transport_closed};
 use pyo3::PyErr;
@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::act_schema::{ValidatedActValue, ValidationIssue};
+use crate::agent_adapter::{AcpAgentAdapter, RemotePromptErrorSettlement};
 use crate::agent_error::AgentSessionFailure;
 #[cfg(feature = "agent-test-support")]
 use crate::agent_launch::{TestOpeningGate, TestTurnGates};
@@ -339,6 +340,7 @@ impl AgentTurnControl {
         &self,
         request: &RequestPermissionRequest,
         responder: Responder<RequestPermissionResponse>,
+        adapter: &'static dyn AcpAgentAdapter,
     ) -> (bool, Result<(), Error>) {
         let state = lock(&self.state);
         let attributable = !state.prompt_response_observed
@@ -349,7 +351,7 @@ impl AgentTurnControl {
                     | AgentTurnControlPhase::SupervisorOwnedFailed
             );
         let outcome = if attributable && state.phase == AgentTurnControlPhase::Submitted {
-            reject_unmapped_permission(request)
+            adapter.resolve_permission(request)
         } else {
             RequestPermissionOutcome::Cancelled
         };
@@ -404,6 +406,7 @@ impl AgentTurnControl {
         response: Result<PromptResponse, Error>,
         remote_error: bool,
         boundary_protocol_violation: bool,
+        adapter: &'static dyn AcpAgentAdapter,
         authoritative_error_codes: &[i32],
         #[cfg(feature = "agent-test-support")] settlement_gate: Option<&TestOpeningGate>,
     ) -> AgentTurnCompletion {
@@ -443,6 +446,7 @@ impl AgentTurnControl {
                             &error,
                             remote_error,
                             boundary_protocol_violation,
+                            adapter,
                             authoritative_error_codes,
                         ) {
                             PromptErrorSettlement::AuthoritativeRequestFailure => None,
@@ -477,6 +481,7 @@ impl AgentTurnControl {
                             &error,
                             remote_error,
                             boundary_protocol_violation,
+                            adapter,
                             authoritative_error_codes,
                         ) {
                             PromptErrorSettlement::AuthoritativeRequestFailure => {
@@ -761,6 +766,7 @@ pub(crate) async fn run_agent_turn_worker(
     slot: Arc<AgentSessionSlot>,
     session_id: SessionId,
     response_provenance: &PromptResponseProvenance,
+    adapter: &'static dyn AcpAgentAdapter,
     authoritative_error_codes: Arc<[i32]>,
     boundary_protocol_violation: Arc<AtomicBool>,
     cancellation: &CancellationToken,
@@ -853,6 +859,7 @@ pub(crate) async fn run_agent_turn_worker(
             response,
             remote_error,
             boundary_protocol_violation.load(Ordering::Acquire),
+            adapter,
             &authoritative_error_codes,
             #[cfg(feature = "agent-test-support")]
             turn_gates.settlement.as_deref(),
@@ -869,34 +876,23 @@ pub(crate) async fn run_agent_turn_worker(
     }
 }
 
-fn reject_unmapped_permission(request: &RequestPermissionRequest) -> RequestPermissionOutcome {
-    let mut reject_once = request
-        .options
-        .iter()
-        .filter(|option| option.kind == PermissionOptionKind::RejectOnce);
-    let selected = reject_once.next();
-    if let Some(option) = selected
-        && reject_once.next().is_none()
-    {
-        return RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-            option.option_id.clone(),
-        ));
-    }
-    RequestPermissionOutcome::Cancelled
-}
-
 fn classify_prompt_error(
     error: &Error,
     remote_error: bool,
     boundary_protocol_violation: bool,
+    adapter: &'static dyn AcpAgentAdapter,
     authoritative_error_codes: &[i32],
 ) -> PromptErrorSettlement {
     if boundary_protocol_violation {
         return PromptErrorSettlement::ProtocolViolation;
     }
     if remote_error {
-        if error.code == ErrorCode::AuthRequired {
+        let adapter_settlement = adapter.classify_remote_prompt_error(error);
+        if adapter_settlement == RemotePromptErrorSettlement::AuthenticationLost {
             return PromptErrorSettlement::AuthenticationLost;
+        }
+        if adapter_settlement == RemotePromptErrorSettlement::AuthoritativeRequestFailure {
+            return PromptErrorSettlement::AuthoritativeRequestFailure;
         }
         let code = i32::from(error.code);
         return if authoritative_error_codes.contains(&code) {
@@ -1057,6 +1053,7 @@ mod tests {
     fn terminal_response_before_result_failure_handoff(
         failure: ResultFailureAtHandoff,
     ) -> AgentTurnOutcome {
+        let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Codex);
         let slot = AgentSessionSlot::new();
         let control = AgentTurnControl::new(slot);
         let (response, mut caller) = oneshot::channel();
@@ -1074,6 +1071,7 @@ mod tests {
             }))),
             false,
             false,
+            adapter,
             &[-32603, -32700],
             #[cfg(feature = "agent-test-support")]
             None,
@@ -1087,9 +1085,10 @@ mod tests {
 
     #[test]
     fn prompt_error_classifier_uses_response_provenance_not_peer_controlled_payloads() {
+        let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Codex);
         let remote = Error::new(-32603, "remote request failure");
         assert_eq!(
-            classify_prompt_error(&remote, true, false, &[-32603, -32700]),
+            classify_prompt_error(&remote, true, false, adapter, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
@@ -1098,11 +1097,11 @@ mod tests {
             "method": "session/prompt",
         }));
         assert_eq!(
-            classify_prompt_error(&incoming_closed, false, false, &[-32603, -32700]),
+            classify_prompt_error(&incoming_closed, false, false, adapter, &[-32603, -32700],),
             PromptErrorSettlement::TransportLost
         );
         assert_eq!(
-            classify_prompt_error(&incoming_closed, true, false, &[-32603, -32700]),
+            classify_prompt_error(&incoming_closed, true, false, adapter, &[-32603, -32700],),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
@@ -1111,22 +1110,22 @@ mod tests {
             "json": {"stopReason": "unknown"},
         }));
         assert_eq!(
-            classify_prompt_error(&malformed, false, false, &[-32603, -32700]),
+            classify_prompt_error(&malformed, false, false, adapter, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
         assert_eq!(
-            classify_prompt_error(&malformed, true, false, &[-32603, -32700]),
+            classify_prompt_error(&malformed, true, false, adapter, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
         let dropped = Error::internal_error()
             .data("response to `session/prompt` never received: channel closed");
         assert_eq!(
-            classify_prompt_error(&dropped, false, false, &[-32603, -32700]),
+            classify_prompt_error(&dropped, false, false, adapter, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
         assert_eq!(
-            classify_prompt_error(&dropped, true, false, &[-32603, -32700]),
+            classify_prompt_error(&dropped, true, false, adapter, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
@@ -1134,20 +1133,32 @@ mod tests {
             "failed to send outgoing request `session/prompt`: connection is no longer running",
         );
         assert_eq!(
-            classify_prompt_error(&outgoing_closed, false, false, &[-32603, -32700]),
+            classify_prompt_error(&outgoing_closed, false, false, adapter, &[-32603, -32700],),
             PromptErrorSettlement::ProtocolViolation
         );
 
         assert_eq!(
-            classify_prompt_error(&Error::auth_required(), true, false, &[-32603, -32700],),
+            classify_prompt_error(
+                &Error::auth_required(),
+                true,
+                false,
+                adapter,
+                &[-32603, -32700],
+            ),
             PromptErrorSettlement::AuthenticationLost
         );
         assert_eq!(
-            classify_prompt_error(&Error::request_cancelled(), true, false, &[-32603, -32700],),
+            classify_prompt_error(
+                &Error::request_cancelled(),
+                true,
+                false,
+                adapter,
+                &[-32603, -32700],
+            ),
             PromptErrorSettlement::Uncertain
         );
         assert_eq!(
-            classify_prompt_error(&remote, true, true, &[-32603, -32700]),
+            classify_prompt_error(&remote, true, true, adapter, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
     }

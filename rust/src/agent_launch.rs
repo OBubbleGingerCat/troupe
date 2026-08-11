@@ -46,12 +46,14 @@ impl AcpWireProtocolVersion {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum McpWireProtocolVersion {
+    V2025_06_18,
     V2025_11_25,
 }
 
 impl McpWireProtocolVersion {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::V2025_06_18 => "2025-06-18",
             Self::V2025_11_25 => "2025-11-25",
         }
     }
@@ -198,6 +200,7 @@ pub(crate) struct AgentLaunchSpec {
     pub(crate) runner: LaunchRunner,
     pub(crate) environment_policy: LaunchEnvironmentPolicy,
     pub(crate) fixed_environment: &'static [(&'static str, &'static str)],
+    pub(crate) removed_environment: &'static [&'static str],
     pub(crate) initial_mode: &'static str,
     pub(crate) mode_application: ModeApplicationV1,
     pub(crate) model_config_id: &'static str,
@@ -220,7 +223,10 @@ impl AgentLaunchSpec {
         self.agent == agent
             && self.acp_wire_protocol.as_str() == "stable-v1"
             && self.client_sdk_version == ACP_CLIENT_SDK_VERSION
-            && self.mcp_wire_protocol.as_str() == "2025-11-25"
+            && matches!(
+                self.mcp_wire_protocol,
+                McpWireProtocolVersion::V2025_06_18 | McpWireProtocolVersion::V2025_11_25
+            )
             && self.mcp_transport_profile.as_str() == "McpTransportProfileV1"
             && self.environment_policy.as_str() == "inherit_parent"
             && mode_matches
@@ -237,15 +243,17 @@ impl AgentLaunchSpec {
 
 const NO_ARGS: &[&str] = &[];
 const NO_ENVIRONMENT: &[(&str, &str)] = &[];
+const NO_REMOVED_ENVIRONMENT: &[&str] = &[];
 const NO_ERROR_CODES: &[i32] = &[];
 const NO_TRANSIENT_OPENING_ERRORS: &[OpeningTransientErrorV1] = &[];
 const CODEX_ENVIRONMENT: &[(&str, &str)] = &[("INITIAL_AGENT_MODE", "agent")];
+const CODEX_REMOVED_ENVIRONMENT: &[&str] = &["CODEX_PATH"];
 
 const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     agent: AgentKind::Codex,
     acp_wire_protocol: AcpWireProtocolVersion::StableV1,
     client_sdk_version: ACP_CLIENT_SDK_VERSION,
-    mcp_wire_protocol: McpWireProtocolVersion::V2025_11_25,
+    mcp_wire_protocol: McpWireProtocolVersion::V2025_06_18,
     mcp_transport_profile: McpTransportProfileId::V1,
     runner: LaunchRunner::Npx {
         package: "@agentclientprotocol/codex-acp",
@@ -254,6 +262,7 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
     fixed_environment: CODEX_ENVIRONMENT,
+    removed_environment: CODEX_REMOVED_ENVIRONMENT,
     initial_mode: "agent",
     mode_application: ModeApplicationV1::SessionConfigOption {
         config_id: "mode",
@@ -283,6 +292,7 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
     fixed_environment: NO_ENVIRONMENT,
+    removed_environment: NO_REMOVED_ENVIRONMENT,
     initial_mode: "default",
     mode_application: ModeApplicationV1::SessionConfigOption {
         config_id: "mode",
@@ -313,6 +323,7 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
     fixed_environment: NO_ENVIRONMENT,
+    removed_environment: NO_REMOVED_ENVIRONMENT,
     initial_mode: "default",
     mode_application: ModeApplicationV1::SessionConfigOption {
         config_id: "mode",
@@ -342,6 +353,7 @@ pub(crate) struct ResolvedAgentCommand {
     pub(crate) program: PathBuf,
     pub(crate) args: Vec<OsString>,
     pub(crate) environment: Vec<(OsString, OsString)>,
+    pub(crate) removed_environment: Vec<OsString>,
     pub(crate) mode_application: ResolvedModeApplication,
     pub(crate) opening_transient_errors: Vec<OpeningTransientErrorV1>,
     pub(crate) authoritative_prompt_error_codes: Arc<[i32]>,
@@ -433,6 +445,11 @@ fn production_command(
         program: resolve_program(&program)?,
         args,
         environment,
+        removed_environment: spec
+            .removed_environment
+            .iter()
+            .map(OsString::from)
+            .collect(),
         mode_application: spec.mode_application.into(),
         opening_transient_errors: spec.opening_transient_errors.to_vec(),
         authoritative_prompt_error_codes: Arc::from(spec.authoritative_prompt_error_codes),
@@ -461,6 +478,7 @@ struct TestLaunch {
     turn_gates: TestTurnGates,
     legacy_mode_id: Option<String>,
     transient_opening_errors: Vec<OpeningTransientErrorV1>,
+    authoritative_prompt_error_codes: Vec<i32>,
 }
 
 #[cfg(feature = "agent-test-support")]
@@ -616,15 +634,20 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
         let Some(configured) = configured else {
             return Ok(ResolvedLaunch::Inert);
         };
-        let mut authoritative_prompt_error_codes =
-            launch_spec(agent).authoritative_prompt_error_codes.to_vec();
-        authoritative_prompt_error_codes.extend([-32603, -32700]);
+        let mut authoritative_prompt_error_codes = configured.authoritative_prompt_error_codes;
+        authoritative_prompt_error_codes
+            .extend_from_slice(launch_spec(agent).authoritative_prompt_error_codes);
         authoritative_prompt_error_codes.sort_unstable();
         authoritative_prompt_error_codes.dedup();
         Ok(ResolvedLaunch::Process(Box::new(ResolvedAgentCommand {
             program: resolve_program(&configured.program)?,
             args: configured.args,
             environment: Vec::new(),
+            removed_environment: launch_spec(agent)
+                .removed_environment
+                .iter()
+                .map(OsString::from)
+                .collect(),
             mode_application: configured.legacy_mode_id.map_or_else(
                 || launch_spec(agent).mode_application.into(),
                 |mode_id| ResolvedModeApplication::LegacySessionMode { mode_id },
@@ -649,12 +672,13 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_set_launch")]
-#[pyo3(signature = (*, program, args, legacy_mode_id=None, transient_opening_errors=None))]
+#[pyo3(signature = (*, program, args, legacy_mode_id=None, transient_opening_errors=None, authoritative_prompt_error_codes=None))]
 pub(crate) fn set_test_launch(
     program: PathBuf,
     args: Vec<OsString>,
     legacy_mode_id: Option<String>,
     transient_opening_errors: Option<Vec<(String, i32)>>,
+    authoritative_prompt_error_codes: Option<Vec<i32>>,
 ) -> pyo3::PyResult<()> {
     let transient_opening_errors = transient_opening_errors
         .unwrap_or_default()
@@ -679,6 +703,8 @@ pub(crate) fn set_test_launch(
         turn_gates: TestTurnGates::default(),
         legacy_mode_id,
         transient_opening_errors,
+        authoritative_prompt_error_codes: authoritative_prompt_error_codes
+            .unwrap_or_else(|| vec![-32603, -32700]),
     });
     Ok(())
 }
@@ -1065,6 +1091,7 @@ pub(crate) fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3
             fixed_environment.set_item(name, environment_value)?;
         }
         value.set_item("fixed_environment", fixed_environment)?;
+        value.set_item("removed_environment", spec.removed_environment)?;
         value.set_item("initial_mode", spec.initial_mode)?;
         let mode_application = PyDict::new(py);
         match spec.mode_application {

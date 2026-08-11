@@ -31,6 +31,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 use tokio_util::sync::CancellationToken;
 
 use crate::act_schema::CompiledActSchema;
+use crate::agent_adapter::agent_adapter;
 use crate::agent_error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
 use crate::agent_launch::TestOpeningGate;
@@ -602,6 +603,7 @@ struct OpeningConfigurationMonitor {
 
 #[derive(Default)]
 struct OpeningConfigurationState {
+    session_id: Option<SessionId>,
     pending_contract: Option<PendingConfigurationContract>,
     mode_contract: Option<ModeConfigurationContract>,
     contract: Option<ReadyConfigurationContract>,
@@ -632,6 +634,13 @@ impl OpeningConfigurationMonitor {
         debug_assert!(state.pending_contract.is_none());
         debug_assert!(state.mode_contract.is_none());
         debug_assert!(state.contract.is_none());
+        debug_assert!(
+            state
+                .session_id
+                .as_ref()
+                .is_none_or(|session_id| session_id == &contract.session_id)
+        );
+        state.session_id = Some(contract.session_id.clone());
         state.pending_contract = Some(PendingConfigurationContract::Mode(contract));
     }
 
@@ -681,6 +690,41 @@ impl OpeningConfigurationMonitor {
                 self.invalidated.cancel();
             }
         }
+    }
+
+    fn observe_session_response(
+        &self,
+        method: &str,
+        result: &Result<serde_json::Value, agent_client_protocol::Error>,
+    ) {
+        if method != "session/new" {
+            return;
+        }
+        let Ok(value) = result else {
+            return;
+        };
+        let Ok(response) = serde_json::from_value::<NewSessionResponse>(value.clone()) else {
+            return;
+        };
+        let mut state = lock(&self.state);
+        if state
+            .session_id
+            .as_ref()
+            .is_some_and(|session_id| session_id != &response.session_id)
+        {
+            state.invalid = true;
+            drop(state);
+            self.invalidated.cancel();
+            return;
+        }
+        state.session_id = Some(response.session_id);
+    }
+
+    fn owns_session(&self, session_id: &SessionId) -> bool {
+        lock(&self.state)
+            .session_id
+            .as_ref()
+            .is_some_and(|current| current == session_id)
     }
 
     fn observe(&self, notification: &SessionNotification) -> ConfigurationObservation {
@@ -1926,7 +1970,8 @@ async fn run_opening_attempt(
                         protocol_violation_for_permissions.cancel();
                         return response;
                     };
-                    let (attributable, response) = control.respond_permission(&request, responder);
+                    let (attributable, response) =
+                        control.respond_permission(&request, responder, agent_adapter(spec.agent));
                     if !attributable {
                         protocol_violation_observed_for_permissions.store(true, Ordering::Release);
                         let phase = OpeningPhase::load(&opening_phase_for_permissions).name();
@@ -1947,6 +1992,12 @@ async fn run_opening_attempt(
                                     SessionUpdate::ConfigOptionUpdate(_)
                                         | SessionUpdate::CurrentModeUpdate(_)
                                 );
+                                let session_scoped_update = matches!(
+                                    &notification.update,
+                                    SessionUpdate::AvailableCommandsUpdate(_)
+                                        | SessionUpdate::SessionInfoUpdate(_)
+                                        | SessionUpdate::UsageUpdate(_)
+                                );
                                 let invalid_after_ready = matches!(
                                     configuration_monitor_for_handler.observe(&notification),
                                     ConfigurationObservation::InvalidAfterReady
@@ -1956,12 +2007,17 @@ async fn run_opening_attempt(
                                         slot.commit_protocol_violation("configure");
                                     }
                                 } else if !configuration_update {
-                                    let accepted = slot_for_updates
-                                        .upgrade()
-                                        .and_then(|slot| {
-                                            slot.submitted_turn(&notification.session_id)
-                                        })
-                                        .is_some_and(|control| control.accepts_ordinary_update());
+                                    let accepted = (session_scoped_update
+                                        && configuration_monitor_for_handler
+                                            .owns_session(&notification.session_id))
+                                        || slot_for_updates
+                                            .upgrade()
+                                            .and_then(|slot| {
+                                                slot.submitted_turn(&notification.session_id)
+                                            })
+                                            .is_some_and(|control| {
+                                                control.accepts_ordinary_update()
+                                            });
                                     if !accepted {
                                         protocol_violation_observed_for_handler
                                             .store(true, Ordering::Release);
@@ -1989,6 +2045,8 @@ async fn run_opening_attempt(
                     }
                     Dispatch::Response(result, router) => {
                         response_observed_for_handler.store(true, Ordering::Release);
+                        configuration_monitor_for_handler
+                            .observe_session_response(router.method(), &result);
                         configuration_monitor_for_handler
                             .observe_configuration_response(router.method(), &result);
                         if router.method() == "session/prompt" {
@@ -2062,6 +2120,7 @@ async fn run_opening_attempt(
                                     slot,
                                     session_id,
                                     &prompt_response_provenance,
+                                    agent_adapter(spec.agent),
                                     Arc::clone(
                                         &command_for_connection.authoritative_prompt_error_codes,
                                     ),
@@ -2240,6 +2299,7 @@ async fn open_handshake(
 
     let route = result_service.register_route(
         generation,
+        spec.mcp_wire_protocol.as_str(),
         #[cfg(feature = "agent-test-support")]
         command.mcp_ready_gate.clone(),
     )?;
@@ -2730,6 +2790,9 @@ fn spawn_child(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for name in &command.removed_environment {
+        standard.env_remove(name);
+    }
     standard.process_group(0);
     let directory = workspace.directory.as_raw_fd();
     unsafe {

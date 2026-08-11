@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-MCP_REVISION = "2025-11-25"
+MCP_REVISION = "2025-06-18"
 RESULT_TOOL = "troupe_submit_result"
 MCP_BODY_MAX_BYTES = 8 * 1024 * 1024
 ACP_FRAME_MAX_BYTES = 16 * 1024 * 1024
@@ -199,6 +199,158 @@ def _permission_params(session_id: str) -> dict[str, object]:
             },
         ],
     }
+
+
+def _codex_option(
+    option_id: str,
+    kind: str,
+    *,
+    decision: str | None = None,
+) -> dict[str, object]:
+    option: dict[str, object] = {
+        "optionId": option_id,
+        "name": f"mock display text for {option_id}",
+        "kind": kind,
+    }
+    if decision is not None:
+        option["_meta"] = {"codex": {"decision": decision}}
+    return option
+
+
+def _codex_permission_cases(
+    session_id: str,
+) -> list[tuple[str, dict[str, object], dict[str, object]]]:
+    def request(
+        *,
+        kind: str,
+        options: list[dict[str, object]],
+        meta: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        value: dict[str, object] = {
+            "sessionId": session_id,
+            "toolCall": {
+                "toolCallId": "codex-permission-tool",
+                "kind": kind,
+                "status": "pending",
+            },
+            "options": options,
+        }
+        if meta is not None:
+            value["_meta"] = meta
+        return value
+
+    def selected(option_id: str) -> dict[str, object]:
+        return {"outcome": {"outcome": "selected", "optionId": option_id}}
+
+    return [
+        (
+            "command",
+            request(
+                kind="execute",
+                options=[
+                    _codex_option("reject_once", "reject_once", decision="decline"),
+                    _codex_option("allow_once", "allow_once", decision="accept"),
+                    _codex_option(
+                        "allow_always",
+                        "allow_always",
+                        decision="acceptForSession",
+                    ),
+                ],
+                meta={"codex": {"params": {"itemId": "command-item"}}},
+            ),
+            selected("allow_once"),
+        ),
+        (
+            "permissions",
+            request(
+                kind="other",
+                options=[
+                    _codex_option(
+                        "allow_permissions_session",
+                        "allow_always",
+                        decision="allowPermissionsForSession",
+                    ),
+                    _codex_option(
+                        "allow_permissions_turn",
+                        "allow_once",
+                        decision="allowPermissionsForTurn",
+                    ),
+                    _codex_option(
+                        "reject_permissions",
+                        "reject_once",
+                        decision="rejectPermissions",
+                    ),
+                ],
+                meta={"codex": {"params": {"itemId": "permissions-item"}}},
+            ),
+            selected("allow_permissions_turn"),
+        ),
+        (
+            "mcp_tool",
+            request(
+                kind="execute",
+                options=[
+                    _codex_option("decline", "reject_once"),
+                    _codex_option("allow_once", "allow_once"),
+                    _codex_option("allow_session", "allow_always"),
+                ],
+                meta={"is_mcp_tool_approval": True},
+            ),
+            selected("allow_once"),
+        ),
+        (
+            "plan_review",
+            request(
+                kind="switch_mode",
+                options=[
+                    _codex_option("revise_plan", "reject_once"),
+                    _codex_option("implement_plan", "allow_once"),
+                ],
+                meta={
+                    "codex": {
+                        "kind": "plan_review",
+                        "planItemId": "plan-item",
+                    }
+                },
+            ),
+            selected("implement_plan"),
+        ),
+        (
+            "provider_question",
+            request(
+                kind="other",
+                options=[
+                    _codex_option("accept", "allow_once"),
+                    _codex_option("decline", "reject_once"),
+                ],
+            ),
+            selected("decline"),
+        ),
+        (
+            "unknown",
+            request(
+                kind="execute",
+                options=[
+                    _codex_option("unknown-allow", "allow_once"),
+                    _codex_option("unknown-reject", "reject_once"),
+                ],
+                meta={"future_adapter_shape": True},
+            ),
+            selected("unknown-reject"),
+        ),
+        (
+            "ambiguous",
+            request(
+                kind="execute",
+                options=[
+                    _codex_option("reject-a", "reject_once"),
+                    _codex_option("reject-b", "reject_once"),
+                ],
+                meta={"future_adapter_shape": True},
+            ),
+            {"outcome": {"outcome": "cancelled"}},
+        ),
+    ]
 
 
 def _write_oversized_acp_frame() -> None:
@@ -607,6 +759,12 @@ def main() -> int:
         cwd_ino=cwd_metadata.st_ino,
         attempt=attempt,
     )
+    if args.scenario == "codex_path_scrubbed":
+        _record(
+            args.events,
+            "codex_path_observed",
+            value=os.environ.get("CODEX_PATH"),
+        )
     if args.scenario == "spawn_descendant":
         descendant = subprocess.Popen(
             [sys.executable, "-c", "import signal; signal.pause()"],
@@ -630,6 +788,11 @@ def main() -> int:
     remembered_token: str | None = None
     pending_prompt_id: object | None = None
     pending_permission_id: object | None = None
+    pending_permission_expected: dict[str, object] | None = None
+    pending_permission_case: str | None = None
+    codex_permission_queue: list[
+        tuple[str, dict[str, object], dict[str, object]]
+    ] = []
     background_threads: list[threading.Thread] = []
 
     for raw_line in sys.stdin:
@@ -640,6 +803,45 @@ def main() -> int:
         _record(args.events, "acp_request", method=method)
 
         if method is None and request_id == pending_permission_id:
+            if args.scenario == "codex_permission_matrix":
+                assert request.get("result") == pending_permission_expected, request
+                assert pending_permission_case is not None
+                _record(
+                    args.events,
+                    "codex_permission_response_received",
+                    permission_case=pending_permission_case,
+                    result=request.get("result"),
+                )
+                if codex_permission_queue:
+                    (
+                        pending_permission_case,
+                        permission_params,
+                        pending_permission_expected,
+                    ) = codex_permission_queue.pop(0)
+                    pending_permission_id = (
+                        f"codex-permission-{pending_permission_case}"
+                    )
+                    _request(
+                        pending_permission_id,
+                        "session/request_permission",
+                        permission_params,
+                    )
+                    continue
+                assert current_mcp_server is not None
+                assert pending_prompt_id is not None
+                accepted = _submit_result(
+                    current_mcp_server,
+                    990,
+                    {"value": 7},
+                )
+                assert accepted["result"]["isError"] is False, accepted
+                _record(args.events, "result_submitted", turn=prompt_turn, value={"value": 7})
+                _response(pending_prompt_id, {"stopReason": "end_turn"})
+                pending_permission_id = None
+                pending_permission_expected = None
+                pending_permission_case = None
+                pending_prompt_id = None
+                continue
             if args.scenario in {
                 "act_late_permission_after_terminal",
                 "act_terminal_then_permission_batch",
@@ -848,6 +1050,23 @@ def main() -> int:
                     ),
                 },
             )
+            if args.scenario == "opening_session_scoped_update":
+                _notification(
+                    "session/update",
+                    {
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [
+                                {
+                                    "name": "codex-command",
+                                    "description": "mock Codex command",
+                                }
+                            ],
+                        },
+                    },
+                )
+                _record(args.events, "opening_session_scoped_update_sent")
             if args.scenario in {"exit_before_turn_intake", "idle_clean_eof"}:
                 assert args.release is not None
 
@@ -902,12 +1121,16 @@ def main() -> int:
                 "act_request_error_internal_collision_then_success",
                 "act_request_error_parse_collision_then_success",
                 "act_request_error_transport_collision_then_success",
+                "codex_authentication_lost",
                 "act_result_matrix",
                 "act_result_rejected_then_reuse",
                 "act_settle_during_callback",
                 "act_submit_results",
                 "act_submit_concurrent",
                 "act_two_turns",
+                "codex_permission_matrix",
+                "codex_uncertain_prompt_error",
+                "codex_usage_limit_then_success",
                 "act_terminal_then_permission_batch",
                 "act_unknown_prompt_response_id",
                 "opening_crash_twice_then_ready",
@@ -929,6 +1152,22 @@ def main() -> int:
                 session_id=params["sessionId"],
                 prompt=prompt_text,
             )
+            if args.scenario == "codex_permission_matrix":
+                assert current_session_id is not None
+                pending_prompt_id = request_id
+                codex_permission_queue = _codex_permission_cases(current_session_id)
+                (
+                    pending_permission_case,
+                    permission_params,
+                    pending_permission_expected,
+                ) = codex_permission_queue.pop(0)
+                pending_permission_id = f"codex-permission-{pending_permission_case}"
+                _request(
+                    pending_permission_id,
+                    "session/request_permission",
+                    permission_params,
+                )
+                continue
             cancellation_scenarios = {
                 "act_cancel_after_result_then_reuse",
                 "act_cancel_during_callback_then_reuse",
@@ -1078,6 +1317,31 @@ def main() -> int:
                 )
                 _record(args.events, "prompt_terminal_error_sent", code=code)
                 _error(request_id, code, "mock terminal prompt error")
+                continue
+            if args.scenario in {
+                "codex_authentication_lost",
+                "codex_uncertain_prompt_error",
+                "codex_usage_limit_then_success",
+            } and (args.scenario != "codex_usage_limit_then_success" or prompt_turn == 1):
+                data: object | None
+                if args.scenario == "codex_authentication_lost":
+                    data = {"codexErrorInfo": "unauthorized"}
+                elif args.scenario == "codex_usage_limit_then_success":
+                    data = {"codexErrorInfo": "usageLimitExceeded"}
+                else:
+                    data = None
+                _record(
+                    args.events,
+                    "codex_prompt_error_sent",
+                    scenario=args.scenario,
+                    data=data,
+                )
+                _error(
+                    request_id,
+                    -32603,
+                    "mock Codex prompt failure",
+                    data=data,
+                )
                 continue
             request_error_scenarios = {
                 "act_callback_fault_then_request_error",
@@ -1388,6 +1652,7 @@ def main() -> int:
                 "act_request_error_internal_collision_then_success",
                 "act_request_error_parse_collision_then_success",
                 "act_request_error_transport_collision_then_success",
+                "codex_usage_limit_then_success",
             }:
                 value = {"value": 7}
                 accepted = _submit_result(

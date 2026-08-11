@@ -2,8 +2,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::Notify;
 
+use crate::agent_adapter::agent_adapter;
 use crate::agent_error::AgentStartupFailure;
-use crate::agent_launch::{ResolvedLaunch, launch_spec, resolve_launch};
+use crate::agent_launch::{ResolvedLaunch, resolve_launch};
 use crate::agent_profile::ResolvedAgentProfile;
 use crate::agent_session::{AgentSessionSlot, spawn_opening};
 use crate::result_mcp::ResultMcpService;
@@ -92,7 +93,7 @@ impl AgentSupervisor {
             ResolvedLaunch::Process(command) => command,
             ResolvedLaunch::Inert => unreachable!("inert launch returned after its early branch"),
         };
-        let spec = launch_spec(profile.agent);
+        let spec = agent_adapter(profile.agent).launch_spec();
         let slot = AgentSessionSlot::new();
         #[cfg(feature = "agent-test-support")]
         slot.install_test_turn_registration_gate(command.turn_gates.registration.clone());

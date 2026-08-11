@@ -33,6 +33,7 @@ use crate::agent_launch::TestOpeningGate;
 use crate::fork_fd_registry::ForkTracked;
 use crate::schema_validation_bridge::{CustomValidationOutcome, PythonSchemaValidationBridge};
 
+#[cfg(any(test, feature = "agent-test-support"))]
 const MCP_REVISION: &str = "2025-11-25";
 const MCP_PATH: &str = "/mcp";
 const RESULT_TOOL: &str = "troupe_submit_result";
@@ -535,6 +536,7 @@ pub(crate) struct ResultRoute {
     token: String,
     pub(crate) server_name: String,
     pub(crate) generation: u64,
+    mcp_revision: &'static str,
     endpoint: String,
     result_epoch: Arc<ResultRouteEpoch>,
     phase: Mutex<RoutePhase>,
@@ -1115,10 +1117,20 @@ impl Drop for ArmedResultLease {
 
 #[cfg(any(test, feature = "agent-test-support"))]
 fn route_for_test(token: &str, generation: u64) -> Arc<ResultRoute> {
+    route_for_test_with_revision(token, generation, MCP_REVISION)
+}
+
+#[cfg(any(test, feature = "agent-test-support"))]
+fn route_for_test_with_revision(
+    token: &str,
+    generation: u64,
+    mcp_revision: &'static str,
+) -> Arc<ResultRoute> {
     Arc::new(ResultRoute {
         token: token.to_owned(),
         server_name: "test-server".to_owned(),
         generation,
+        mcp_revision,
         endpoint: "http://127.0.0.1:1/mcp".to_owned(),
         result_epoch: ResultRouteEpoch::new(generation),
         phase: Mutex::new(RoutePhase::New),
@@ -1843,6 +1855,7 @@ impl ResultMcpService {
     pub(crate) fn register_route(
         &self,
         generation: u64,
+        mcp_revision: &'static str,
         #[cfg(feature = "agent-test-support")] ready_gate: Option<Arc<TestOpeningGate>>,
     ) -> Result<Arc<ResultRoute>, AgentStartupFailure> {
         let endpoint = match &*lock(&self.state) {
@@ -1869,6 +1882,7 @@ impl ResultMcpService {
             token: token.clone(),
             server_name: format!("troupe-result-{suffix}"),
             generation,
+            mcp_revision,
             endpoint,
             result_epoch: ResultRouteEpoch::new(generation),
             phase: Mutex::new(RoutePhase::New),
@@ -1980,7 +1994,7 @@ impl ResultMcpService {
         let Some(phase) = route.wait_stable_phase().await else {
             return DispatchOutcome::plain(empty(StatusCode::GONE));
         };
-        if !protocol_header_valid(request.headers(), phase) {
+        if !protocol_header_valid(request.headers(), phase, route.mcp_revision) {
             return DispatchOutcome::plain(empty(StatusCode::BAD_REQUEST));
         }
         let body = match collect_bounded_body(request.into_body()).await {
@@ -2134,7 +2148,11 @@ fn quality_is_positive(value: &str) -> Option<bool> {
     }
 }
 
-fn protocol_header_valid(headers: &hyper::HeaderMap, phase: RoutePhase) -> bool {
+fn protocol_header_valid(
+    headers: &hyper::HeaderMap,
+    phase: RoutePhase,
+    mcp_revision: &str,
+) -> bool {
     let versions: Vec<_> = headers.get_all("mcp-protocol-version").iter().collect();
     match phase {
         RoutePhase::New => versions.is_empty(),
@@ -2142,7 +2160,7 @@ fn protocol_header_valid(headers: &hyper::HeaderMap, phase: RoutePhase) -> bool 
         | RoutePhase::ClientInitialized
         | RoutePhase::ReadyPending
         | RoutePhase::Ready => {
-            versions.len() == 1 && versions[0].to_str().ok() == Some(MCP_REVISION)
+            versions.len() == 1 && versions[0].to_str().ok() == Some(mcp_revision)
         }
         RoutePhase::InitializeWriting
         | RoutePhase::InitializedNotificationWriting
@@ -2478,7 +2496,7 @@ fn dispatch(route: &Arc<ResultRoute>, message: Value) -> DispatchOutcome {
             let revision = params
                 .and_then(|params| params.get("protocolVersion"))
                 .and_then(Value::as_str);
-            if revision != Some(MCP_REVISION) {
+            if revision != Some(route.mcp_revision) {
                 return DispatchOutcome::plain(json_rpc_error(
                     id,
                     -32602,
@@ -2505,7 +2523,7 @@ fn dispatch(route: &Arc<ResultRoute>, message: Value) -> DispatchOutcome {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": MCP_REVISION,
+                    "protocolVersion": route.mcp_revision,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "troupe", "version": env!("CARGO_PKG_VERSION")}
                 }
@@ -2939,6 +2957,14 @@ mod tests {
 
     fn route_with(token: &str, generation: u64) -> Arc<ResultRoute> {
         route_for_test(token, generation)
+    }
+
+    fn route_with_revision(
+        token: &str,
+        generation: u64,
+        mcp_revision: &'static str,
+    ) -> Arc<ResultRoute> {
+        route_for_test_with_revision(token, generation, mcp_revision)
     }
 
     fn origin_request<B>(body: B, origins: &[&'static str]) -> Request<B> {
@@ -4066,6 +4092,61 @@ mod tests {
             assert!(outcome.transition.is_some());
             assert_eq!(*lock(&route.phase), RoutePhase::InitializeWriting);
         }
+    }
+
+    #[tokio::test]
+    async fn route_enforces_its_adapter_pinned_protocol_revision() {
+        const CODEX_REVISION: &str = "2025-06-18";
+        let route = route_with_revision("test-token", 1, CODEX_REVISION);
+        let outcome = dispatch(
+            &route,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": CODEX_REVISION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "codex-mcp-client", "version": "0.145.0"},
+                },
+            }),
+        );
+        let transition = outcome
+            .transition
+            .expect("the adapter-pinned revision initializes the route");
+        let body = outcome
+            .response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            response.pointer("/result/protocolVersion"),
+            Some(&json!(CODEX_REVISION)),
+        );
+        transition.finish(true);
+
+        let matching = hyper::HeaderMap::from_iter([(
+            hyper::header::HeaderName::from_static("mcp-protocol-version"),
+            hyper::header::HeaderValue::from_static(CODEX_REVISION),
+        )]);
+        assert!(protocol_header_valid(
+            &matching,
+            RoutePhase::Initialized,
+            route.mcp_revision,
+        ));
+
+        let wrong = hyper::HeaderMap::from_iter([(
+            hyper::header::HeaderName::from_static("mcp-protocol-version"),
+            hyper::header::HeaderValue::from_static(MCP_REVISION),
+        )]);
+        assert!(!protocol_header_valid(
+            &wrong,
+            RoutePhase::Initialized,
+            route.mcp_revision,
+        ));
     }
 
     #[test]

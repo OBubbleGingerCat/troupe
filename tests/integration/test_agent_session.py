@@ -44,6 +44,7 @@ def _configure_mock(
     scenario: str = "ready",
     release: Path | None = None,
     legacy_mode_id: str | None = None,
+    authoritative_prompt_error_codes: list[int] | None = None,
 ) -> None:
     args = [str(MOCK_AGENT), "--events", str(events), "--scenario", scenario]
     if release is not None:
@@ -54,6 +55,8 @@ def _configure_mock(
     }
     if legacy_mode_id is not None:
         launch["legacy_mode_id"] = legacy_mode_id
+    if authoritative_prompt_error_codes is not None:
+        launch["authoritative_prompt_error_codes"] = authoritative_prompt_error_codes
     _native()._agent_test_set_launch(
         **launch,
     )
@@ -186,6 +189,57 @@ def test_ready_retains_initialize_agent_info_and_capability_snapshot(
             "mcp_http": True,
         }
         assert "auth_methods" not in ready
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_opening_session_scoped_update_does_not_require_an_active_turn(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(events, scenario="opening_session_scoped_update")
+
+        handle = _cast(troupe.Production([]), workspace, "opening-update")
+        ready = await _ready(handle)
+
+        assert ready["state"] == "ready"
+        assert any(
+            row["event"] == "opening_session_scoped_update_sent"
+            for row in _events(events)
+        )
+        assert handle._agent_state_for_test() == "ready"  # type: ignore[attr-defined]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_codex_launch_scrubs_an_ambient_codex_path_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        forbidden = tmp_path / "unverified-codex"
+        monkeypatch.setenv("CODEX_PATH", str(forbidden))
+        _configure_mock(events, scenario="codex_path_scrubbed")
+
+        ready = await _ready(_cast(troupe.Production([]), workspace, "codex-path"))
+
+        assert ready["state"] == "ready"
+        observed = [
+            row for row in _events(events) if row["event"] == "codex_path_observed"
+        ]
+        assert observed == [
+            {
+                "event": "codex_path_observed",
+                "pid": observed[0]["pid"],
+                "value": None,
+            }
+        ]
 
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
 
@@ -645,6 +699,215 @@ def test_auth_required_closes_an_accepted_route_connection_before_publication(
         )
 
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_codex_adapter_handles_the_pinned_permission_matrix_in_one_turn(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, scenario="codex_permission_matrix")
+    observed: list[dict[str, object]] = []
+    runtime = _native()._Runtime()
+
+    class CodexPermissionActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            observed.append(
+                await self.act(
+                    script="Complete the task without asking a human for approval.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the completed task value"
+                        )
+                    },
+                )
+            )
+            return ()
+
+    class CodexPermissionProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                CodexPermissionActor,
+                name="codex-permissions",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            assert await handle.cue({}) == ()
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(CodexPermissionProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert observed == [{"value": 7}]
+    responses = [
+        row
+        for row in _events(events)
+        if row["event"] == "codex_permission_response_received"
+    ]
+    assert [row["permission_case"] for row in responses] == [
+        "command",
+        "permissions",
+        "mcp_tool",
+        "plan_review",
+        "provider_question",
+        "unknown",
+        "ambiguous",
+    ]
+
+
+def test_codex_usage_limit_error_is_authoritative_and_keeps_the_session(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        scenario="codex_usage_limit_then_success",
+        authoritative_prompt_error_codes=[],
+    )
+    errors: list[troupe.AgentTurnError] = []
+    observed: list[dict[str, object]] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class CodexUsageActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            if cue.instruction["turn"] == 1:
+                try:
+                    await self.act(
+                        script="Attempt the task under the current quota.",
+                        output_schema={
+                            "value": troupe.act_schema.Int64Value(
+                                description="the task value"
+                            )
+                        },
+                    )
+                except troupe.AgentTurnError as error:
+                    errors.append(error)
+                else:
+                    raise AssertionError("usage limit unexpectedly returned a result")
+            else:
+                observed.append(
+                    await self.act(
+                        script="Retry the task in the same session.",
+                        output_schema={
+                            "value": troupe.act_schema.Int64Value(
+                                description="the task value"
+                            )
+                        },
+                    )
+                )
+            return ()
+
+    class CodexUsageProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                CodexUsageActor,
+                name="codex-usage",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            assert await handle.cue({"turn": 1}) == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            assert await handle.cue({"turn": 2}) == ()
+            states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(CodexUsageProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert len(errors) == 1
+    assert type(errors[0]) is troupe.AgentTurnError
+    assert errors[0].code == "request_failed"
+    assert observed == [{"value": 7}]
+    assert states == ["ready", "ready"]
+    prompts = [row for row in _events(events) if row["event"] == "prompt_received"]
+    assert len(prompts) == 2
+    assert len({row["session_id"] for row in prompts}) == 1
+
+
+@pytest.mark.parametrize(
+    ("scenario_name", "expected_code"),
+    [
+        ("codex_authentication_lost", "authentication_lost"),
+        ("codex_uncertain_prompt_error", "uncertain_settlement"),
+    ],
+)
+def test_codex_non_authoritative_prompt_errors_break_and_latch_the_session(
+    tmp_path: Path,
+    scenario_name: str,
+    expected_code: str,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(
+        events,
+        scenario=scenario_name,
+        authoritative_prompt_error_codes=[],
+    )
+    errors: list[troupe.AgentSessionBrokenError] = []
+    states: list[str] = []
+    runtime = _native()._Runtime()
+
+    class CodexBrokenActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            try:
+                await self.act(
+                    script="Attempt the Codex task.",
+                    output_schema={
+                        "value": troupe.act_schema.Int64Value(
+                            description="the task value"
+                        )
+                    },
+                )
+            except troupe.AgentSessionBrokenError as error:
+                errors.append(error)
+            else:
+                raise AssertionError("broken Codex session unexpectedly succeeded")
+            return ()
+
+    class CodexBrokenProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                CodexBrokenActor,
+                name=f"codex-broken-{scenario_name}",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            for turn in (1, 2):
+                assert await handle.cue({"turn": turn}) == ()
+                states.append(handle._agent_state_for_test())  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(CodexBrokenProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+
+    assert [error.code for error in errors] == [expected_code, expected_code]
+    assert all(error.__cause__ is None for error in errors)
+    assert states == ["broken", "broken"]
+    assert sum(row["event"] == "prompt_received" for row in _events(events)) == 1
 
 
 @pytest.mark.parametrize(
