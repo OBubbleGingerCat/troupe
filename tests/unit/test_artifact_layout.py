@@ -215,7 +215,8 @@ EXPECTED_STUB = (
     b"        *,\n"
     b"        script: str,\n"
     b"        output_schema: dict[str, act_schema.FieldSpec],\n"
-    b"    ) -> dict[str, _JsonValue]: ...\n"
+    b"    ) -> dict[str, _JsonValue]:\n"
+    b'        """Return one validated JSON object from this Actor\'s persistent agent session."""\n'
     b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
     b"\n"
     b"@final\n"

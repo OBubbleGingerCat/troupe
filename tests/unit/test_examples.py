@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -187,6 +188,93 @@ def test_examples_are_documented_public_production_packages() -> None:
         assert (package / "__init__.py").read_bytes() == b""
         assert (package / "production.py").is_file()
         assert f"troupe --production examples/{name}" in examples_readme
+
+
+def test_mixed_repository_repair_live_example_and_oracle_are_wired() -> None:
+    production = EXAMPLES / "live_agents" / "mixed_repository_repair"
+    runner = ROOT / "scripts" / "test_live_mixed_agents.sh"
+    oracle = ROOT / "tests" / "live" / "mixed_agent_oracle.py"
+    live_readme = EXAMPLES / "live_agents" / "README.md"
+
+    assert (production / "__init__.py").read_bytes() == b""
+    source = (production / "production.py").read_text(encoding="utf-8")
+    assert all(
+        marker in source
+        for marker in (
+            "TROUPE_LIVE_CODEX_PROFILE",
+            "TROUPE_LIVE_CLAUDE_PROFILE",
+            "TROUPE_LIVE_KIMI_PROFILE",
+            "codex-investigator",
+            "claude-reviewer",
+            "kimi-repairer",
+            '"operation": "recall"',
+            "ObjectValue",
+        )
+    )
+    assert runner.is_file() and os.access(runner, os.X_OK)
+    runner_source = runner.read_text(encoding="utf-8")
+    assert "mixed_agent_oracle.py" in runner_source
+    assert "maturin build" in runner_source
+    assert "agent-test-support" not in runner_source
+    assert oracle.is_file()
+    assert "mixed_repository_repair" in oracle.read_text(encoding="utf-8")
+    assert "scripts/test_live_mixed_agents.sh" in live_readme.read_text(encoding="utf-8")
+
+
+def test_mixed_oracle_waits_for_failed_production_descendants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_tests = ROOT / "tests" / "live"
+    monkeypatch.syspath_prepend(str(live_tests))
+    spec = importlib.util.spec_from_file_location(
+        "troupe_mixed_agent_oracle_test",
+        live_tests / "mixed_agent_oracle.py",
+    )
+    assert spec is not None and spec.loader is not None
+    oracle = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(oracle)
+
+    workspace = tmp_path / "workspace"
+    repository = workspace / "repository"
+    workspace.mkdir()
+    repository.mkdir()
+    child_pid = workspace / "child.pid"
+    settings = workspace / "settings.json"
+    settings.write_text("{}\n", encoding="utf-8")
+    script = (
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(0.4)'],\n"
+        "    start_new_session=True,\n"
+        ")\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\n"
+        "time.sleep(0.2)\n"
+        "raise SystemExit(3)\n"
+    )
+
+    def production_command(**_: object) -> tuple[list[str], dict[str, str], tuple[Path, bytes]]:
+        return (
+            [sys.executable, "-c", script, str(child_pid)],
+            _environment(),
+            (settings, settings.read_bytes()),
+        )
+
+    monkeypatch.setattr(oracle, "_production_command", production_command)
+    with pytest.raises(
+        oracle.AcceptanceFailure,
+        match="exited before publishing its report",
+    ):
+        oracle._run_production(
+            workspace=workspace,
+            repository=repository,
+            report=workspace / "report.json",
+            profiles={},
+        )
+
+    pid = int(child_pid.read_text(encoding="ascii"))
+    assert oracle._process_identity(pid) is None
+    assert settings.read_text(encoding="utf-8") == "{}\n"
 
 
 def test_hello_actor_runs_through_the_literal_console() -> None:

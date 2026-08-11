@@ -51,3 +51,24 @@ harness, unattended permission handling, contextual turns, both schema
 correction paths, authoritative cancellation recovery, typed configuration and
 authentication failures, wire evidence, and process cleanup. Troupe never
 starts a Kimi authentication flow.
+
+The mixed repository-repair example runs all three providers in one real
+Production. Codex investigates a deterministic defect, Claude reviews the
+behavior contract, Kimi repairs and commits the implementation, and the same
+Codex Actor later recalls a random investigation identifier from its persistent
+session. All three CLIs must already be logged in, and `bubblewrap` is required
+to isolate Claude's user settings during the run.
+
+```console
+export TROUPE_LIVE_CODEX_PROFILE='{"workspace":"/tmp","model":"gpt-5.6-sol","effort":"max"}'
+export TROUPE_LIVE_CLAUDE_PROFILE='{"workspace":"/tmp","model":"sonnet","effort":"max"}'
+export TROUPE_LIVE_KIMI_PROFILE='{"workspace":"/tmp","model":"kimi-code/k3","effort":"max"}'
+scripts/test_live_mixed_agents.sh
+```
+
+The external oracle creates and removes its own temporary Git repository under
+the Codex profile workspace. It verifies typed results, Effect ownership,
+context retention, the exact one-file commit, repository tests, clean shutdown,
+and child-process cleanup. The three profile workspace fields are base
+directories for this harness; the Production receives profiles rewritten to
+the temporary repository itself.

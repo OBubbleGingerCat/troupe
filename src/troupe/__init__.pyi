@@ -72,7 +72,8 @@ class Actor:
         *,
         script: str,
         output_schema: dict[str, act_schema.FieldSpec],
-    ) -> dict[str, _JsonValue]: ...
+    ) -> dict[str, _JsonValue]:
+        """Return one validated JSON object from this Actor's persistent agent session."""
     async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...
 
 @final

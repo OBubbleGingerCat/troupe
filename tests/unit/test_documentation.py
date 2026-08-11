@@ -110,6 +110,38 @@ def test_readme_documents_scene_lineage_and_cue_runner_boundaries() -> None:
         assert boundary in text
 
 
+def test_readme_documents_actor_act_schema_and_callback_boundaries() -> None:
+    text = _readme()
+    boundaries = (
+        "`Actor.act()`",
+        "one persistent ACP session",
+        "already be logged in",
+        "`description`",
+        "`choices`",
+        "`ObjectValue`",
+        "multiple disjoint ranges",
+        "async database validator",
+        "`ValueRejected`",
+        "idempotent",
+        "no Runtime timeout",
+        "`asyncio.CancelledError`",
+        "`SchemaCallbackError`",
+        "`phase`",
+        "`path`",
+    )
+    for boundary in boundaries:
+        assert boundary in text
+
+    schema_stub = (ROOT / "src" / "troupe" / "act_schema.pyi").read_text(
+        encoding="utf-8"
+    )
+    public_stub = (ROOT / "src" / "troupe" / "__init__.pyi").read_text(
+        encoding="utf-8"
+    )
+    assert "Validation callbacks may be synchronous or asynchronous" in schema_stub
+    assert "Return one validated JSON object from this Actor's persistent agent session" in public_stub
+
+
 def test_readme_names_all_four_package_identity_rules_and_linux_scope() -> None:
     text = _readme()
     identity_rules = (

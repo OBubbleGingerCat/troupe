@@ -569,13 +569,10 @@ def _config_options(
     invalid_domain: str | None = None,
     include_mode: bool = True,
 ) -> list[dict[str, object]]:
-    effort_id = next(
-        (
-            identifier
-            for identifier in ("effort", "reasoning_effort", "thinking")
-            if identifier in values
-        ),
-        None,
+    effort_ids = tuple(
+        identifier
+        for identifier in ("effort", "reasoning_effort", "thinking")
+        if identifier in values
     )
 
     def choices(identifier: str, values_: tuple[str, ...]) -> tuple[str, ...]:
@@ -584,7 +581,9 @@ def _config_options(
         return tuple(value for value in values_ if value != values[identifier])
 
     mode_values = (
-        ("default", "plan", "auto", "yolo")
+        ("default", "agent", "plan", "auto", "yolo")
+        if len(effort_ids) > 1
+        else ("default", "plan", "auto", "yolo")
         if "thinking" in values
         else ("default", "plan")
         if "effort" in values
@@ -606,7 +605,7 @@ def _config_options(
             "model",
         ),
     ]
-    if effort_id is not None:
+    for effort_id in effort_ids:
         options.append(
             _select_option(
                 effort_id,
@@ -995,11 +994,15 @@ def main() -> int:
         "claude": "effort",
         "kimi": "thinking",
     }[args.provider]
-    config = {
-        "mode": "default",
-        "model": "default-model",
-        effort_id: "medium",
-    }
+    config = {"mode": "default", "model": "default-model", effort_id: "medium"}
+    if args.scenario == "mixed_agents":
+        config.update(
+            {
+                "reasoning_effort": "medium",
+                "effort": "medium",
+                "thinking": "medium",
+            }
+        )
     if args.scenario in {
         "claude_effort_option_absent",
         "kimi_thinking_option_absent",
@@ -1013,6 +1016,7 @@ def main() -> int:
     current_session_id: str | None = None
     prompt_turn = 0
     remembered_token: str | None = None
+    mixed_provider: str | None = None
     pending_prompt_id: object | None = None
     pending_permission_id: object | None = None
     pending_permission_expected: dict[str, object] | None = None
@@ -1363,7 +1367,7 @@ def main() -> int:
                                 "0.31.2"
                                 if args.scenario == "kimi_agent_version_mismatch"
                                 else "0.31.1"
-                                if args.provider == "kimi"
+                                if args.provider == "kimi" or args.scenario == "mixed_agents"
                                 else "1"
                             ),
                         }
@@ -1409,6 +1413,7 @@ def main() -> int:
                 _record(args.events, "mcp_http_10_rejected", status=status)
                 assert status == 505
             delayed_mcp = args.scenario in {
+                "mixed_agents",
                 "mcp_before_configuration",
                 "mcp_between_configuration",
                 "mcp_after_configuration",
@@ -1600,6 +1605,7 @@ def main() -> int:
                 "kimi_permission_matrix",
                 "kimi_terminal_then_unsupported_reverse_batch",
                 "kimi_unsupported_reverse_request",
+                "mixed_agents",
                 "act_terminal_then_permission_batch",
                 "act_unknown_prompt_response_id",
                 "opening_crash_twice_then_ready",
@@ -1620,7 +1626,106 @@ def main() -> int:
                 turn=prompt_turn,
                 session_id=params["sessionId"],
                 prompt=prompt_text,
+                **(
+                    {"provider": mixed_provider}
+                    if args.scenario == "mixed_agents"
+                    else {}
+                ),
             )
+            if args.scenario == "mixed_agents":
+                assert current_mcp_server is not None
+                assert mixed_provider is not None
+                if "ROLE: investigator." in prompt_text:
+                    assert mixed_provider == "codex" and prompt_turn == 1
+                    issue = Path("ISSUE.md").read_text(encoding="utf-8").splitlines()
+                    remembered_token = issue[0].split(":", 1)[1].strip()
+                    value = {
+                        "role": "investigator",
+                        "investigation_id": remembered_token,
+                        "target_file": "repair.py",
+                        "root_cause": "normalize_title returns its input unchanged",
+                        "expected_behavior": (
+                            "strip surrounding whitespace and title-case each word"
+                        ),
+                    }
+                elif "ROLE: reviewer." in prompt_text:
+                    assert mixed_provider == "claude" and prompt_turn == 1
+                    value = {
+                        "role": "reviewer",
+                        "approved": True,
+                        "contract": {
+                            "input": "arbitrary title text",
+                            "output": "trimmed title-cased text",
+                        },
+                    }
+                elif "ROLE: repairer." in prompt_text:
+                    assert mixed_provider == "kimi" and prompt_turn == 1
+                    Path("repair.py").write_text(
+                        "def normalize_title(value: str) -> str:\n"
+                        "    return value.strip().title()\n",
+                        encoding="utf-8",
+                    )
+                    subprocess.run(
+                        [sys.executable, "-m", "unittest", "-q"],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True,
+                    )
+                    subprocess.run(["git", "add", "repair.py"], check=True)
+                    subprocess.run(
+                        [
+                            "git",
+                            "-c",
+                            "user.name=Troupe Mock",
+                            "-c",
+                            "user.email=troupe@example.invalid",
+                            "commit",
+                            "-q",
+                            "-m",
+                            "fix: normalize titles",
+                        ],
+                        check=True,
+                    )
+                    commit = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    ).stdout.strip()
+                    value = {
+                        "role": "implementer",
+                        "commit": commit,
+                        "changed_files": ["repair.py"],
+                        "tests_passed": True,
+                    }
+                else:
+                    assert "ROLE: investigator recall." in prompt_text
+                    assert mixed_provider == "codex" and prompt_turn == 2
+                    assert remembered_token is not None
+                    assert not Path("ISSUE.md").exists()
+                    value = {
+                        "role": "investigator",
+                        "investigation_id": remembered_token,
+                        "remembered_root_cause": (
+                            "normalize_title returns its input unchanged"
+                        ),
+                    }
+                accepted = _submit_result(
+                    current_mcp_server,
+                    700 + prompt_turn,
+                    value,
+                )
+                assert accepted["result"]["isError"] is False, accepted
+                _record(
+                    args.events,
+                    "result_submitted",
+                    turn=prompt_turn,
+                    provider=mixed_provider,
+                    value=value,
+                )
+                _response(request_id, {"stopReason": "end_turn"})
+                continue
             if args.scenario == "codex_permission_matrix":
                 assert current_session_id is not None
                 pending_prompt_id = request_id
@@ -2475,6 +2580,26 @@ def main() -> int:
                 continue
             config_id = params["configId"]
             config[config_id] = params["value"]
+            if args.scenario == "mixed_agents" and config_id in {
+                "reasoning_effort",
+                "effort",
+                "thinking",
+            }:
+                identified = {
+                    "reasoning_effort": "codex",
+                    "effort": "claude",
+                    "thinking": "kimi",
+                }[config_id]
+                assert mixed_provider in {None, identified}
+                mixed_provider = identified
+                MCP_REVISION = (
+                    "2025-06-18" if identified == "codex" else "2025-11-25"
+                )
+                _record(
+                    args.events,
+                    "mixed_provider_identified",
+                    provider=identified,
+                )
             if args.scenario == "mode_drift_after_model" and config_id == "model":
                 config["mode"] = "default"
             _record(
@@ -2518,6 +2643,18 @@ def main() -> int:
                 _record(args.events, "final_config_response_then_drift_sent")
             else:
                 _response(request_id, config_response)
+            if args.scenario == "mixed_agents" and config_id in {
+                "reasoning_effort",
+                "effort",
+                "thinking",
+            }:
+                assert pending_mcp_server is not None
+                _discover_mcp(
+                    pending_mcp_server,
+                    args.events,
+                    pending_mcp_invocation,
+                )
+                pending_mcp_server = None
             if config_id == "reasoning_effort" and args.scenario in {
                 "pre_ready_config_model_drift",
                 "post_ready_config_exact",

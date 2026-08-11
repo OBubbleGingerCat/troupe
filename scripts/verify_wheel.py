@@ -173,7 +173,8 @@ EXPECTED_STUB = (
     b"        *,\n"
     b"        script: str,\n"
     b"        output_schema: dict[str, act_schema.FieldSpec],\n"
-    b"    ) -> dict[str, _JsonValue]: ...\n"
+    b"    ) -> dict[str, _JsonValue]:\n"
+    b'        """Return one validated JSON object from this Actor\'s persistent agent session."""\n'
     b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
     b"\n"
     b"@final\n"
@@ -246,7 +247,7 @@ EXPECTED_STUB = (
     b"]\n"
 )
 EXPECTED_ACT_SCHEMA_STUB_SHA256 = (
-    "4f016e1b3076e02058e80baece6d1981bde4f6695b4ca3eb5110222aac9325f1"
+    "3236d84d315e43785d82edb677fb1c50ade695aeafc7ec22e469a9e52d85a75b"
 )
 EXPECTED_PY_TYPED = b""
 PUBLIC_EXPORTS = [
