@@ -9,6 +9,8 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
 
+use crate::fork_fd_registry::ForkTracked;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentKind {
     Codex,
@@ -54,7 +56,7 @@ pub(crate) struct WorkspaceLeaseV1 {
     pub(crate) owner_pid: u32,
     pub(crate) st_dev: u64,
     pub(crate) st_ino: u64,
-    pub(crate) directory: OwnedFd,
+    pub(crate) directory: ForkTracked<OwnedFd>,
     pub(crate) acp_cwd_alias: PathBuf,
 }
 
@@ -149,6 +151,7 @@ pub(crate) fn resolve_agent_profile(profile: &Bound<'_, PyAny>) -> PyResult<Reso
     let raw_fd = file.as_raw_fd();
     let acp_cwd_alias = PathBuf::from(format!("/proc/{owner_pid}/fd/{raw_fd}"));
     let directory: OwnedFd = file.into();
+    let directory = ForkTracked::new(directory);
 
     Ok(ResolvedAgentProfile {
         agent,

@@ -1,24 +1,31 @@
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt as _;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, ClientCapabilities, ClientSessionCapabilities, ErrorCode, Implementation,
-    InitializeRequest, McpCapabilities, NewSessionRequest, NewSessionResponse,
+    InitializeRequest, McpCapabilities, NewSessionRequest, NewSessionResponse, RequestId,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelect,
-    SessionConfigSelectOptions, SessionId, SessionModeState, SetSessionConfigOptionRequest,
-    SetSessionModeRequest,
+    SessionConfigSelectOptions, SessionId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo, Dispatch, Handled};
+use agent_client_protocol::{
+    Agent, Client, ConnectionTo, Dispatch, Handled, Lines, RawJsonRpcMessage, TransportBatchEntry,
+    TransportFrame,
+};
+use futures::{AsyncBufReadExt as _, AsyncWriteExt as _, StreamExt as _};
 use tokio::io::AsyncReadExt as _;
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 use tokio_util::sync::CancellationToken;
@@ -27,17 +34,42 @@ use crate::act_schema::CompiledActSchema;
 use crate::agent_error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
 use crate::agent_launch::TestOpeningGate;
-use crate::agent_launch::{AgentLaunchSpec, ResolvedAgentCommand, ResolvedModeApplication};
+use crate::agent_launch::{
+    AgentLaunchSpec, OpeningRequestPhaseV1, ResolvedAgentCommand, ResolvedModeApplication,
+};
 use crate::agent_profile::{ResolvedAgentProfile, WorkspaceLeaseV1};
 use crate::agent_turn::{
     AgentTurnControl, AgentTurnOutcome, AgentTurnRequest, PromptResponseProvenance,
     run_agent_turn_worker,
 };
-use crate::result_mcp::{ResultMcpService, ResultRoute};
+use crate::fork_fd_registry::{ForkExecGuard, ForkTracked};
+use crate::result_mcp::{ResultMcpService, ResultRoute, fill_secure_random};
 use crate::schema_validation_bridge::PythonSchemaValidationBridge;
 
 const ACP_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
 const ACP_JSON_MAX_DEPTH: usize = 64;
+const OPENING_CRASH_LOOP_THRESHOLD: u8 = 3;
+
+fn opening_retry_window_ms(ordinal: u32) -> (u64, u64) {
+    let exponent = ordinal.min(7);
+    let window = (250_u64 << exponent).min(30_000);
+    (window.div_ceil(2), window)
+}
+
+fn sample_opening_retry_delay_ms<E>(
+    ordinal: u32,
+    mut next_random_word: impl FnMut() -> Result<u64, E>,
+) -> Result<u64, E> {
+    let (lower, upper) = opening_retry_window_ms(ordinal);
+    let span = upper - lower + 1;
+    let rejected_prefix = span.wrapping_neg() % span;
+    loop {
+        let word = next_random_word()?;
+        if word >= rejected_prefix {
+            return Ok(lower + word % span);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -85,25 +117,33 @@ struct AcpFrameLimitedReader<R> {
     frame: Vec<u8>,
     pending: Vec<u8>,
     pending_offset: usize,
-    terminal_error: bool,
+    terminal_failure: Option<AcpFrameFailure>,
     inner_eof: bool,
     exceeded: Arc<AtomicBool>,
+    protocol_violation: Arc<AtomicBool>,
     json_depth: usize,
     in_json_string: bool,
     escaped_json_byte: bool,
 }
 
+#[derive(Clone, Copy)]
+enum AcpFrameFailure {
+    ResourceLimit,
+    ProtocolViolation,
+}
+
 impl<R> AcpFrameLimitedReader<R> {
-    fn new(inner: R, exceeded: Arc<AtomicBool>) -> Self {
+    fn new(inner: R, exceeded: Arc<AtomicBool>, protocol_violation: Arc<AtomicBool>) -> Self {
         Self {
             inner,
             frame_bytes: 0,
             frame: Vec::new(),
             pending: Vec::new(),
             pending_offset: 0,
-            terminal_error: false,
+            terminal_failure: None,
             inner_eof: false,
             exceeded,
+            protocol_violation,
             json_depth: 0,
             in_json_string: false,
             escaped_json_byte: false,
@@ -117,14 +157,13 @@ impl<R> AcpFrameLimitedReader<R> {
         self.escaped_json_byte = false;
     }
 
-    fn parsed_frame_within_depth(&self) -> bool {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&self.frame) else {
-            return true;
-        };
+    fn parsed_frame_within_depth(&self) -> Result<bool, AcpFrameFailure> {
+        let value = serde_json::from_slice::<serde_json::Value>(&self.frame)
+            .map_err(|_| AcpFrameFailure::ProtocolViolation)?;
         let mut pending = vec![(&value, 1_usize)];
         while let Some((value, depth)) = pending.pop() {
             if depth > ACP_JSON_MAX_DEPTH {
-                return false;
+                return Ok(false);
             }
             match value {
                 serde_json::Value::Array(values) => {
@@ -139,19 +178,35 @@ impl<R> AcpFrameLimitedReader<R> {
                 | serde_json::Value::String(_) => {}
             }
         }
-        true
+        let wire =
+            std::str::from_utf8(&self.frame).map_err(|_| AcpFrameFailure::ProtocolViolation)?;
+        match TransportFrame::parse_json(wire) {
+            TransportFrame::Single(_) => {}
+            TransportFrame::Malformed { .. } => {
+                return Err(AcpFrameFailure::ProtocolViolation);
+            }
+            TransportFrame::Batch(batch)
+                if batch
+                    .entries()
+                    .any(|entry| matches!(entry, TransportBatchEntry::Malformed { .. })) =>
+            {
+                return Err(AcpFrameFailure::ProtocolViolation);
+            }
+            TransportFrame::Batch(_) => {}
+        }
+        Ok(true)
     }
 
-    fn finish_frame(&mut self, newline: bool) -> bool {
-        if !self.parsed_frame_within_depth() {
-            return false;
+    fn finish_frame(&mut self, newline: bool) -> Result<(), AcpFrameFailure> {
+        if !self.parsed_frame_within_depth()? {
+            return Err(AcpFrameFailure::ResourceLimit);
         }
         self.pending.append(&mut self.frame);
         if newline {
             self.pending.push(b'\n');
         }
         self.reset_frame();
-        true
+        Ok(())
     }
 
     fn json_byte_within_limit(&mut self, byte: u8) -> bool {
@@ -197,12 +252,105 @@ impl<R> AcpFrameLimitedReader<R> {
         count != 0
     }
 
-    fn limit_error() -> std::io::Error {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "ACP frame exceeds ResourceLimitsV1",
-        )
+    fn record_failure(&mut self, failure: AcpFrameFailure) {
+        self.terminal_failure = Some(failure);
+        match failure {
+            AcpFrameFailure::ResourceLimit => self.exceeded.store(true, Ordering::Release),
+            AcpFrameFailure::ProtocolViolation => {
+                self.protocol_violation.store(true, Ordering::Release);
+            }
+        }
     }
+
+    fn failure_error(failure: AcpFrameFailure) -> std::io::Error {
+        let message = match failure {
+            AcpFrameFailure::ResourceLimit => "ACP frame exceeds ResourceLimitsV1",
+            AcpFrameFailure::ProtocolViolation => "ACP frame is not valid JSON-RPC",
+        };
+        std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+    }
+}
+
+struct AcpResponseTracker {
+    pending: Mutex<HashSet<RequestId>>,
+    protocol_violation: Arc<AtomicBool>,
+}
+
+impl AcpResponseTracker {
+    fn new(protocol_violation: Arc<AtomicBool>) -> Self {
+        Self {
+            pending: Mutex::new(HashSet::new()),
+            protocol_violation,
+        }
+    }
+
+    fn observe_outgoing(&self, line: &str) -> std::io::Result<()> {
+        self.observe_with_provenance(line, AcpFrameDirection::Outgoing)
+    }
+
+    fn observe_incoming(&self, line: &str) -> std::io::Result<()> {
+        self.observe_with_provenance(line, AcpFrameDirection::Incoming)
+    }
+
+    fn observe_with_provenance(
+        &self,
+        line: &str,
+        direction: AcpFrameDirection,
+    ) -> std::io::Result<()> {
+        let result = self.observe(line, direction);
+        if result.is_err() {
+            self.protocol_violation.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    fn observe(&self, line: &str, direction: AcpFrameDirection) -> std::io::Result<()> {
+        let frame = TransportFrame::parse_json(line);
+        let mut pending = lock(&self.pending);
+        let mut observe_message = |message: &RawJsonRpcMessage| -> std::io::Result<()> {
+            match (direction, message) {
+                (AcpFrameDirection::Outgoing, RawJsonRpcMessage::Request(request)) => {
+                    if !pending.insert(request.id.clone()) {
+                        return Err(acp_protocol_error("duplicate outgoing ACP request id"));
+                    }
+                }
+                (AcpFrameDirection::Incoming, RawJsonRpcMessage::Response(response)) => {
+                    let response_id = match response {
+                        agent_client_protocol::schema::v1::Response::Result { id, .. }
+                        | agent_client_protocol::schema::v1::Response::Error { id, .. } => id,
+                    };
+                    if !pending.remove(response_id) {
+                        return Err(acp_protocol_error("unknown or duplicate ACP response id"));
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        };
+        match frame {
+            TransportFrame::Single(message) => observe_message(&message),
+            TransportFrame::Batch(batch) => {
+                for entry in batch.entries() {
+                    let TransportBatchEntry::Message(message) = entry else {
+                        return Err(acp_protocol_error("malformed ACP batch entry"));
+                    };
+                    observe_message(message)?;
+                }
+                Ok(())
+            }
+            TransportFrame::Malformed { .. } => Err(acp_protocol_error("malformed ACP frame")),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AcpFrameDirection {
+    Incoming,
+    Outgoing,
+}
+
+fn acp_protocol_error(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
 impl<R> tokio::io::AsyncRead for AcpFrameLimitedReader<R>
@@ -218,8 +366,8 @@ where
         if output.remaining() == 0 || this.copy_pending(output) {
             return std::task::Poll::Ready(Ok(()));
         }
-        if this.terminal_error {
-            return std::task::Poll::Ready(Err(Self::limit_error()));
+        if let Some(failure) = this.terminal_failure {
+            return std::task::Poll::Ready(Err(Self::failure_error(failure)));
         }
         if this.inner_eof {
             return std::task::Poll::Ready(Ok(()));
@@ -235,15 +383,16 @@ where
                 }
                 std::task::Poll::Ready(Ok(())) if read.filled().is_empty() => {
                     this.inner_eof = true;
-                    if !this.frame.is_empty() && !this.finish_frame(false) {
-                        this.terminal_error = true;
-                        this.exceeded.store(true, Ordering::Release);
+                    if !this.frame.is_empty()
+                        && let Err(failure) = this.finish_frame(false)
+                    {
+                        this.record_failure(failure);
                     }
                     if this.copy_pending(output) {
                         return std::task::Poll::Ready(Ok(()));
                     }
-                    return if this.terminal_error {
-                        std::task::Poll::Ready(Err(Self::limit_error()))
+                    return if let Some(failure) = this.terminal_failure {
+                        std::task::Poll::Ready(Err(Self::failure_error(failure)))
                     } else {
                         std::task::Poll::Ready(Ok(()))
                     };
@@ -255,16 +404,14 @@ where
                 let input = read.filled();
                 for byte in input.iter().copied() {
                     if byte == b'\n' {
-                        if !this.finish_frame(true) {
-                            this.terminal_error = true;
-                            this.exceeded.store(true, Ordering::Release);
+                        if let Err(failure) = this.finish_frame(true) {
+                            this.record_failure(failure);
                             break;
                         }
                     } else if this.frame_bytes == ACP_FRAME_MAX_BYTES
                         || !this.json_byte_within_limit(byte)
                     {
-                        this.terminal_error = true;
-                        this.exceeded.store(true, Ordering::Release);
+                        this.record_failure(AcpFrameFailure::ResourceLimit);
                         break;
                     } else {
                         this.frame_bytes += 1;
@@ -273,8 +420,8 @@ where
                 }
                 if this.copy_pending(output) {
                     return std::task::Poll::Ready(Ok(()));
-                } else if this.terminal_error {
-                    return std::task::Poll::Ready(Err(Self::limit_error()));
+                } else if let Some(failure) = this.terminal_failure {
+                    return std::task::Poll::Ready(Err(Self::failure_error(failure)));
                 }
             }
         }
@@ -299,8 +446,291 @@ struct AgentReadySession {
     route: Option<Arc<ResultRoute>>,
 }
 
+#[derive(Clone)]
+struct ReadyConfigurationContract {
+    session_id: SessionId,
+    mode_application: ResolvedModeApplication,
+    model_config_id: &'static str,
+    effort_config_id: &'static str,
+    requested_model: String,
+    effective_effort: Option<String>,
+}
+
+#[derive(Clone)]
+struct PendingReadyConfigurationContract {
+    session_id: SessionId,
+    mode_application: ResolvedModeApplication,
+    model_config_id: &'static str,
+    effort_config_id: &'static str,
+    requested_model: String,
+    requested_effort: Option<String>,
+}
+
+#[derive(Clone)]
+struct ModeConfigurationContract {
+    session_id: SessionId,
+    mode_application: ResolvedModeApplication,
+}
+
+enum PendingConfigurationContract {
+    Mode(ModeConfigurationContract),
+    Ready(PendingReadyConfigurationContract),
+}
+
+impl PendingConfigurationContract {
+    fn response_method(&self) -> &'static str {
+        match self {
+            Self::Mode(ModeConfigurationContract {
+                mode_application: ResolvedModeApplication::LegacySessionMode { .. },
+                ..
+            }) => "session/set_mode",
+            Self::Mode(ModeConfigurationContract {
+                mode_application: ResolvedModeApplication::SessionConfigOption { .. },
+                ..
+            })
+            | Self::Ready(_) => "session/set_config_option",
+        }
+    }
+}
+
+impl PendingReadyConfigurationContract {
+    fn resolve(
+        self,
+        options: &[SessionConfigOption],
+    ) -> Result<ReadyConfigurationContract, AgentStartupFailure> {
+        require_applied_mode(options, &self.mode_application)?;
+        require_current(options, self.model_config_id, &self.requested_model)?;
+        let effective_effort = match &self.requested_effort {
+            Some(requested) => {
+                require_current(options, self.effort_config_id, requested)?;
+                Some(requested.clone())
+            }
+            None => Some(current_select(options, self.effort_config_id)?.to_owned()),
+        };
+        Ok(ReadyConfigurationContract {
+            session_id: self.session_id,
+            mode_application: self.mode_application,
+            model_config_id: self.model_config_id,
+            effort_config_id: self.effort_config_id,
+            requested_model: self.requested_model,
+            effective_effort,
+        })
+    }
+}
+
+impl ReadyConfigurationContract {
+    fn accepts(&self, notification: &SessionNotification) -> bool {
+        if notification.session_id != self.session_id {
+            return false;
+        }
+        match &notification.update {
+            SessionUpdate::ConfigOptionUpdate(update) => {
+                self.accepts_config_options(&update.config_options)
+            }
+            SessionUpdate::CurrentModeUpdate(update) => {
+                update.current_mode_id.0.as_ref() == self.expected_mode()
+            }
+            _ => true,
+        }
+    }
+
+    fn accepts_config_options(&self, options: &[SessionConfigOption]) -> bool {
+        let valid = || -> Result<(), AgentStartupFailure> {
+            require_applied_mode(options, &self.mode_application)?;
+            require_current(options, self.model_config_id, &self.requested_model)?;
+            if let Some(effective_effort) = &self.effective_effort {
+                require_current(options, self.effort_config_id, effective_effort)?;
+            } else if options
+                .iter()
+                .any(|option| option.id.to_string() == self.effort_config_id)
+            {
+                return Err(configuration_invalid());
+            }
+            Ok(())
+        };
+        valid().is_ok()
+    }
+
+    fn expected_mode(&self) -> &str {
+        match &self.mode_application {
+            ResolvedModeApplication::SessionConfigOption { value, .. } => value,
+            ResolvedModeApplication::LegacySessionMode { mode_id } => mode_id,
+        }
+    }
+}
+
+impl ModeConfigurationContract {
+    fn validate_response(&self, value: &serde_json::Value) -> Result<(), AgentStartupFailure> {
+        let ResolvedModeApplication::SessionConfigOption {
+            config_id,
+            value: expected,
+        } = &self.mode_application
+        else {
+            return Ok(());
+        };
+        let response = serde_json::from_value::<SetSessionConfigOptionResponse>(value.clone())
+            .map_err(|_| configuration_invalid())?;
+        require_current(&response.config_options, config_id, expected)
+    }
+
+    fn accepts(&self, notification: &SessionNotification) -> bool {
+        if notification.session_id != self.session_id {
+            return false;
+        }
+        match (&self.mode_application, &notification.update) {
+            (
+                ResolvedModeApplication::SessionConfigOption { config_id, value },
+                SessionUpdate::ConfigOptionUpdate(update),
+            ) => require_current(&update.config_options, config_id, value).is_ok(),
+            (
+                ResolvedModeApplication::SessionConfigOption { value, .. },
+                SessionUpdate::CurrentModeUpdate(update),
+            ) => update.current_mode_id.0.as_ref() == value,
+            (
+                ResolvedModeApplication::LegacySessionMode { mode_id },
+                SessionUpdate::CurrentModeUpdate(update),
+            ) => update.current_mode_id.0.as_ref() == mode_id,
+            _ => true,
+        }
+    }
+}
+
+struct OpeningConfigurationMonitor {
+    state: Mutex<OpeningConfigurationState>,
+    invalidated: CancellationToken,
+}
+
+#[derive(Default)]
+struct OpeningConfigurationState {
+    pending_contract: Option<PendingConfigurationContract>,
+    mode_contract: Option<ModeConfigurationContract>,
+    contract: Option<ReadyConfigurationContract>,
+    invalid: bool,
+    ready: bool,
+}
+
+enum ConfigurationObservation {
+    Accepted,
+    InvalidBeforeReady,
+    InvalidAfterReady,
+}
+
+impl OpeningConfigurationMonitor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(OpeningConfigurationState::default()),
+            invalidated: CancellationToken::new(),
+        })
+    }
+
+    fn invalidated(&self) -> CancellationToken {
+        self.invalidated.clone()
+    }
+
+    fn arm_mode(&self, contract: ModeConfigurationContract) {
+        let mut state = lock(&self.state);
+        debug_assert!(state.pending_contract.is_none());
+        debug_assert!(state.mode_contract.is_none());
+        debug_assert!(state.contract.is_none());
+        state.pending_contract = Some(PendingConfigurationContract::Mode(contract));
+    }
+
+    fn arm_ready(&self, contract: PendingReadyConfigurationContract) {
+        let mut state = lock(&self.state);
+        debug_assert!(state.pending_contract.is_none());
+        debug_assert!(state.contract.is_none());
+        state.pending_contract = Some(PendingConfigurationContract::Ready(contract));
+    }
+
+    fn observe_configuration_response(
+        &self,
+        method: &str,
+        result: &Result<serde_json::Value, agent_client_protocol::Error>,
+    ) {
+        let mut state = lock(&self.state);
+        let Some(pending) = state.pending_contract.as_ref() else {
+            return;
+        };
+        if pending.response_method() != method {
+            return;
+        }
+        let pending = state
+            .pending_contract
+            .take()
+            .expect("the matching pending configuration contract exists");
+        let Ok(value) = result else {
+            return;
+        };
+        let resolved = match pending {
+            PendingConfigurationContract::Mode(contract) => contract
+                .validate_response(value)
+                .map(|()| ConfigurationContract::Mode(contract)),
+            PendingConfigurationContract::Ready(contract) => {
+                serde_json::from_value::<SetSessionConfigOptionResponse>(value.clone())
+                    .map_err(|_| configuration_invalid())
+                    .and_then(|response| contract.resolve(&response.config_options))
+                    .map(ConfigurationContract::Ready)
+            }
+        };
+        match resolved {
+            Ok(ConfigurationContract::Mode(contract)) => state.mode_contract = Some(contract),
+            Ok(ConfigurationContract::Ready(contract)) => state.contract = Some(contract),
+            Err(_) => {
+                state.invalid = true;
+                drop(state);
+                self.invalidated.cancel();
+            }
+        }
+    }
+
+    fn observe(&self, notification: &SessionNotification) -> ConfigurationObservation {
+        let mut state = lock(&self.state);
+        let accepted = if let Some(contract) = &state.contract {
+            contract.accepts(notification)
+        } else if let Some(contract) = &state.mode_contract {
+            contract.accepts(notification)
+        } else {
+            true
+        };
+        if accepted {
+            return ConfigurationObservation::Accepted;
+        }
+        if state.ready {
+            return ConfigurationObservation::InvalidAfterReady;
+        }
+        state.invalid = true;
+        drop(state);
+        self.invalidated.cancel();
+        ConfigurationObservation::InvalidBeforeReady
+    }
+
+    fn commit_ready(
+        &self,
+        slot: &AgentSessionSlot,
+        snapshot: AgentReadySnapshot,
+        route: Arc<ResultRoute>,
+    ) -> Result<bool, AgentStartupFailure> {
+        let mut state = lock(&self.state);
+        if state.invalid {
+            return Err(configuration_invalid());
+        }
+        debug_assert!(state.contract.is_some());
+        let committed = slot.commit_ready(snapshot, Some(route));
+        if committed {
+            state.ready = true;
+        }
+        Ok(committed)
+    }
+}
+
+enum ConfigurationContract {
+    Mode(ModeConfigurationContract),
+    Ready(ReadyConfigurationContract),
+}
+
 enum AgentSessionState {
     Opening,
+    BackingOff,
     Ready(Arc<AgentReadySession>),
     Active(Arc<AgentReadySession>),
     Cancelling(Arc<AgentReadySession>),
@@ -314,6 +744,8 @@ pub(crate) struct AgentSessionSlot {
     state: Mutex<AgentSessionState>,
     changed: Notify,
     cancellation: CancellationToken,
+    terminal_fault: CancellationToken,
+    ready_committed: AtomicBool,
     caller_admission: AtomicBool,
     next_turn_index: AtomicU64,
     turn_registry: Mutex<AgentTurnRegistry>,
@@ -367,6 +799,8 @@ impl AgentSessionSlot {
             state: Mutex::new(AgentSessionState::Opening),
             changed: Notify::new(),
             cancellation: CancellationToken::new(),
+            terminal_fault: CancellationToken::new(),
+            ready_committed: AtomicBool::new(false),
             caller_admission: AtomicBool::new(false),
             next_turn_index: AtomicU64::new(0),
             turn_registry: Mutex::new(AgentTurnRegistry::Open {
@@ -409,6 +843,10 @@ impl AgentSessionSlot {
 
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
+    }
+
+    pub(crate) fn terminal_fault(&self) -> CancellationToken {
+        self.terminal_fault.clone()
     }
 
     #[cfg(feature = "agent-test-support")]
@@ -550,6 +988,7 @@ impl AgentSessionSlot {
                         Some(Ok(session))
                     }
                     AgentSessionState::Opening
+                    | AgentSessionState::BackingOff
                     | AgentSessionState::Active(_)
                     | AgentSessionState::Cancelling(_) => None,
                     AgentSessionState::AuthRequired(failure)
@@ -706,22 +1145,43 @@ impl AgentSessionSlot {
             .and_then(|_| control.as_ref().and_then(Weak::upgrade))
     }
 
+    fn current_submitted_turn(&self) -> Option<Arc<AgentTurnControl>> {
+        let registry = lock(&self.turn_registry);
+        let AgentTurnRegistry::Open {
+            control,
+            submitted_session,
+            ..
+        } = &*registry
+        else {
+            return None;
+        };
+        submitted_session
+            .as_ref()
+            .and_then(|_| control.as_ref().and_then(Weak::upgrade))
+    }
+
     pub(crate) fn mark_broken(&self, failure: AgentSessionFailure) -> AgentSessionFailure {
         let mut state = lock(&self.state);
-        match &*state {
-            AgentSessionState::Broken(existing) => existing.clone(),
+        let (failure, committed) = match &*state {
+            AgentSessionState::Broken(existing) => (existing.clone(), false),
             AgentSessionState::Ready(_)
             | AgentSessionState::Active(_)
             | AgentSessionState::Cancelling(_) => {
                 *state = AgentSessionState::Broken(failure.clone());
                 self.changed.notify_waiters();
-                failure
+                (failure, true)
             }
             AgentSessionState::Opening
+            | AgentSessionState::BackingOff
             | AgentSessionState::AuthRequired(_)
             | AgentSessionState::StartFailed(_)
-            | AgentSessionState::Closed => failure,
+            | AgentSessionState::Closed => (failure, false),
+        };
+        drop(state);
+        if committed {
+            self.terminal_fault.cancel();
         }
+        failure
     }
 
     pub(crate) fn commit_turn_transition<R>(
@@ -761,28 +1221,41 @@ impl AgentSessionSlot {
 
     pub(crate) fn cancel(&self) {
         self.cancellation.cancel();
-        let mut state = lock(&self.state);
-        if matches!(
-            *state,
-            AgentSessionState::Opening
-                | AgentSessionState::Ready(_)
-                | AgentSessionState::Active(_)
-                | AgentSessionState::Cancelling(_)
-        ) {
-            *state = AgentSessionState::Closed;
-            self.changed.notify_waiters();
+        let delivery = {
+            let mut state = lock(&self.state);
+            let control = if matches!(
+                *state,
+                AgentSessionState::Ready(_)
+                    | AgentSessionState::Active(_)
+                    | AgentSessionState::Cancelling(_)
+            ) {
+                let (_, control) = self.freeze_turn_registry(AgentSessionFailure::transport_lost());
+                control
+            } else {
+                None
+            };
+            if matches!(
+                *state,
+                AgentSessionState::Opening
+                    | AgentSessionState::BackingOff
+                    | AgentSessionState::Ready(_)
+                    | AgentSessionState::Active(_)
+                    | AgentSessionState::Cancelling(_)
+                    | AgentSessionState::Broken(_)
+            ) {
+                *state = AgentSessionState::Closed;
+                self.changed.notify_waiters();
+            }
+            control.map(|control| {
+                let cleanup =
+                    control.prepare_terminal_delivery(AgentSessionFailure::transport_lost());
+                (control, cleanup)
+            })
+        };
+        if let Some((control, cleanup)) = delivery {
+            control.finish_terminal_delivery(cleanup);
         }
-        drop(state);
-        if let AgentTurnRegistry::Open {
-            request,
-            control,
-            submitted_session,
-        } = &mut *lock(&self.turn_registry)
-        {
-            *request = None;
-            *control = None;
-            *submitted_session = None;
-        }
+        self.terminal_fault.cancel();
         self.turn_requested.notify_waiters();
     }
 
@@ -791,7 +1264,7 @@ impl AgentSessionSlot {
         loop {
             let changed = self.changed.notified();
             match &*lock(&self.state) {
-                AgentSessionState::Opening => {}
+                AgentSessionState::Opening | AgentSessionState::BackingOff => {}
                 AgentSessionState::Ready(session) | AgentSessionState::Active(session) => {
                     return Ok(Arc::clone(&session.snapshot));
                 }
@@ -821,6 +1294,7 @@ impl AgentSessionSlot {
     pub(crate) fn state_name(&self) -> &'static str {
         match &*lock(&self.state) {
             AgentSessionState::Opening => "opening",
+            AgentSessionState::BackingOff => "backing_off",
             AgentSessionState::Ready(_) => "ready",
             AgentSessionState::Active(_) => "active",
             AgentSessionState::Cancelling(_) => "cancelling",
@@ -850,20 +1324,53 @@ impl AgentSessionSlot {
         self.cleanup_changed.notify_waiters();
     }
 
-    fn commit_ready(&self, snapshot: AgentReadySnapshot, route: Option<Arc<ResultRoute>>) {
+    fn commit_ready(&self, snapshot: AgentReadySnapshot, route: Option<Arc<ResultRoute>>) -> bool {
         let mut state = lock(&self.state);
         if matches!(*state, AgentSessionState::Opening) {
             *state = AgentSessionState::Ready(Arc::new(AgentReadySession {
                 snapshot: Arc::new(snapshot),
                 route,
             }));
+            self.ready_committed.store(true, Ordering::Release);
             self.changed.notify_waiters();
+            true
+        } else {
+            false
         }
+    }
+
+    fn enter_opening_backoff(&self) -> bool {
+        let mut state = lock(&self.state);
+        if matches!(*state, AgentSessionState::Opening) {
+            *state = AgentSessionState::BackingOff;
+            self.changed.notify_waiters();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn begin_opening_retry(&self) -> bool {
+        let mut state = lock(&self.state);
+        if matches!(*state, AgentSessionState::BackingOff) {
+            *state = AgentSessionState::Opening;
+            self.changed.notify_waiters();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn has_reached_ready(&self) -> bool {
+        self.ready_committed.load(Ordering::Acquire)
     }
 
     fn commit_failure(&self, failure: AgentStartupFailure) {
         let mut state = lock(&self.state);
-        if matches!(*state, AgentSessionState::Opening) {
+        if matches!(
+            *state,
+            AgentSessionState::Opening | AgentSessionState::BackingOff
+        ) {
             *state = if failure.authentication_required {
                 AgentSessionState::AuthRequired(failure)
             } else {
@@ -885,7 +1392,7 @@ impl AgentSessionSlot {
         let delivery = {
             let mut state = lock(&self.state);
             let failure = match &*state {
-                AgentSessionState::Opening => {
+                AgentSessionState::Opening | AgentSessionState::BackingOff => {
                     *state = AgentSessionState::StartFailed(startup_failure);
                     self.changed.notify_waiters();
                     return;
@@ -918,6 +1425,7 @@ impl AgentSessionSlot {
         if let Some((control, cleanup)) = delivery {
             control.finish_terminal_delivery(cleanup);
         }
+        self.terminal_fault.cancel();
     }
 
     fn freeze_turn_registry(
@@ -945,6 +1453,39 @@ impl AgentSessionSlot {
             "spawn",
             "agent connection closed",
         ));
+    }
+
+    fn commit_process_exit(&self) {
+        self.commit_terminal_failure(
+            AgentStartupFailure::start(
+                "spawn_failed",
+                "spawn",
+                "agent process exited during startup",
+            ),
+            AgentSessionFailure::process_exited(),
+        );
+    }
+
+    pub(crate) fn commit_protocol_violation(&self, startup_phase: &'static str) {
+        self.commit_terminal_failure(
+            AgentStartupFailure::start(
+                "protocol_incompatible",
+                startup_phase,
+                "agent session violated the protocol contract",
+            ),
+            AgentSessionFailure::protocol_violation(),
+        );
+    }
+
+    fn commit_result_channel_loss(&self) {
+        self.commit_terminal_failure(
+            AgentStartupFailure::start(
+                "result_channel_unavailable",
+                "mcp_ready",
+                "agent result channel was lost during startup",
+            ),
+            AgentSessionFailure::result_channel_lost(),
+        );
     }
 }
 
@@ -1008,7 +1549,8 @@ impl SessionTurnMarker {
 
 impl Drop for SessionTurnLease {
     fn drop(&mut self) {
-        self.release_inner();
+        // Losing the worker future is not settlement evidence and cannot publish Ready.
+        self.claimed = false;
     }
 }
 
@@ -1073,17 +1615,227 @@ async fn open_agent_session(
         return;
     }
 
-    let mut child = match spawn_child(&command, &profile.workspace) {
-        Ok(child) => child,
-        Err(failure) => {
-            commit_failure(&slot, failure);
+    let mut generation = 1_u64;
+    let mut retry_ordinal = 0_u32;
+    let mut previous_ambiguous = None;
+    let mut consecutive_ambiguous = 0_u8;
+    loop {
+        let outcome = run_opening_attempt(
+            &slot,
+            &profile,
+            spec,
+            &command,
+            &result_service,
+            &endpoint,
+            generation,
+            &cancellation,
+        )
+        .await;
+        match outcome {
+            OpeningAttemptOutcome::Cancelled | OpeningAttemptOutcome::ReadyTerminated => return,
+            OpeningAttemptOutcome::Terminal(failure) => {
+                commit_failure(&slot, failure);
+                return;
+            }
+            OpeningAttemptOutcome::Transient => {
+                previous_ambiguous = None;
+                consecutive_ambiguous = 0;
+            }
+            OpeningAttemptOutcome::Ambiguous(fingerprint) => {
+                if previous_ambiguous == Some(fingerprint) {
+                    consecutive_ambiguous += 1;
+                } else {
+                    previous_ambiguous = Some(fingerprint);
+                    consecutive_ambiguous = 1;
+                }
+                if consecutive_ambiguous >= OPENING_CRASH_LOOP_THRESHOLD {
+                    commit_failure(
+                        &slot,
+                        AgentStartupFailure::start(
+                            "crash_loop",
+                            fingerprint.phase,
+                            "agent repeatedly failed during startup",
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(strong_slot) = slot.upgrade() else {
+            return;
+        };
+        if !strong_slot.enter_opening_backoff() {
             return;
         }
+        drop(strong_slot);
+        let backoff_completed =
+            match wait_opening_backoff(&command, retry_ordinal, &cancellation).await {
+                Ok(completed) => completed,
+                Err(failure) => {
+                    commit_failure(&slot, failure);
+                    return;
+                }
+            };
+        if !backoff_completed {
+            return;
+        }
+        let Some(next_generation) = generation.checked_add(1) else {
+            commit_failure(&slot, preparation_failure());
+            return;
+        };
+        let Some(strong_slot) = slot.upgrade() else {
+            return;
+        };
+        if !strong_slot.begin_opening_retry() {
+            return;
+        }
+        drop(strong_slot);
+        generation = next_generation;
+        retry_ordinal = retry_ordinal.saturating_add(1);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpeningFailureFingerprint {
+    phase: &'static str,
+    observation: OpeningFailureObservation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpeningFailureObservation {
+    ProcessExited,
+    TransportLost,
+}
+
+enum OpeningAttemptOutcome {
+    Cancelled,
+    Terminal(AgentStartupFailure),
+    Transient,
+    Ambiguous(OpeningFailureFingerprint),
+    ReadyTerminated,
+}
+
+#[derive(Clone, Copy)]
+enum OpeningAttemptCompletion {
+    ConnectionClosed,
+    ConnectionProtocolError,
+    Child,
+    ResultServiceLost,
+    Cancelled,
+}
+
+#[derive(Clone)]
+enum OpeningHandshakeFailure {
+    Transient,
+    Terminal(AgentStartupFailure),
+}
+
+impl From<AgentStartupFailure> for OpeningHandshakeFailure {
+    fn from(failure: AgentStartupFailure) -> Self {
+        Self::Terminal(failure)
+    }
+}
+
+fn preparation_failure() -> AgentStartupFailure {
+    AgentStartupFailure::start(
+        "preparation_failed",
+        "preparation",
+        "agent session preparation failed",
+    )
+}
+
+fn opening_resource_limit_failure(phase: &'static str) -> AgentStartupFailure {
+    AgentStartupFailure::start(
+        "resource_limit",
+        phase,
+        "agent sent an ACP frame above ResourceLimitsV1",
+    )
+}
+
+fn classify_opening_request_error(
+    spec: &AgentLaunchSpec,
+    command: &ResolvedAgentCommand,
+    phase: OpeningRequestPhaseV1,
+    error: &agent_client_protocol::Error,
+    terminal: AgentStartupFailure,
+) -> OpeningHandshakeFailure {
+    let code = i32::from(error.code);
+    let transient = spec
+        .opening_transient_errors
+        .iter()
+        .chain(command.opening_transient_errors.iter())
+        .any(|matcher| matcher.phase == phase && matcher.code == code);
+    if transient {
+        OpeningHandshakeFailure::Transient
+    } else {
+        OpeningHandshakeFailure::Terminal(terminal)
+    }
+}
+
+fn opening_retry_delay_ms(
+    _command: &ResolvedAgentCommand,
+    ordinal: u32,
+) -> Result<u64, AgentStartupFailure> {
+    #[cfg(feature = "agent-test-support")]
+    if let Some(backoff) = &_command.opening_backoff {
+        return sample_opening_retry_delay_ms(ordinal, || backoff.next_random_word().ok_or(()))
+            .map_err(|()| preparation_failure());
+    }
+
+    sample_opening_retry_delay_ms(ordinal, || -> Result<u64, getrandom::Error> {
+        let mut bytes = [0_u8; size_of::<u64>()];
+        fill_secure_random(&mut bytes)?;
+        Ok(u64::from_ne_bytes(bytes))
+    })
+    .map_err(|_| preparation_failure())
+}
+
+async fn wait_opening_backoff(
+    command: &ResolvedAgentCommand,
+    ordinal: u32,
+    cancellation: &CancellationToken,
+) -> Result<bool, AgentStartupFailure> {
+    let delay_ms = opening_retry_delay_ms(command, ordinal)?;
+    #[cfg(feature = "agent-test-support")]
+    if let Some(backoff) = &command.opening_backoff {
+        return Ok(backoff.wait(delay_ms, cancellation).await);
+    }
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_millis(delay_ms)) => Ok(true),
+        () = cancellation.cancelled() => Ok(false),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_opening_attempt(
+    slot: &Weak<AgentSessionSlot>,
+    profile: &Arc<ResolvedAgentProfile>,
+    spec: &'static AgentLaunchSpec,
+    command: &ResolvedAgentCommand,
+    result_service: &Arc<ResultMcpService>,
+    endpoint: &str,
+    generation: u64,
+    cancellation: &CancellationToken,
+) -> OpeningAttemptOutcome {
+    if cancellation.is_cancelled() {
+        return OpeningAttemptOutcome::Cancelled;
+    }
+    if let Err(failure) = revalidate_workspace(&profile.workspace, "preparation") {
+        return OpeningAttemptOutcome::Terminal(failure);
+    }
+
+    let spawned = match spawn_child(command, &profile.workspace) {
+        Ok(spawned) => spawned,
+        Err(failure) => return OpeningAttemptOutcome::Terminal(failure),
     };
+    let SpawnedAgent {
+        mut child,
+        stdin,
+        stdout,
+        mut stderr,
+    } = spawned;
     let pid = child.id().expect("a running agent child has a process id");
-    let stdin = child.stdin.take().expect("agent stdin was configured");
-    let stdout = child.stdout.take().expect("agent stdout was configured");
-    let stderr_drain = child.stderr.take().map(|mut stderr| {
+    let stderr_drain = Some({
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
             let mut buffer = [0_u8; 8192];
             while stderr.read(&mut buffer).await.is_ok_and(|read| read != 0) {}
@@ -1093,128 +1845,285 @@ async fn open_agent_session(
     let current_route: Arc<Mutex<Option<Arc<ResultRoute>>>> = Arc::new(Mutex::new(None));
     let route_for_connection = Arc::clone(&current_route);
     let slot_for_connection = slot.clone();
-    let profile_for_connection = Arc::clone(&profile);
-    let service_for_connection = Arc::clone(&result_service);
+    let profile_for_connection = Arc::clone(profile);
+    let service_for_connection = Arc::clone(result_service);
     let cancellation_for_connection = cancellation.clone();
     let command_for_connection = command.clone();
+    let opening_failure: Arc<Mutex<Option<OpeningHandshakeFailure>>> = Arc::new(Mutex::new(None));
+    let opening_failure_for_connection = Arc::clone(&opening_failure);
     let frame_limit_exceeded = Arc::new(AtomicBool::new(false));
     let frame_limit_for_connection = Arc::clone(&frame_limit_exceeded);
     let opening_phase = Arc::new(AtomicU8::new(OpeningPhase::Initialize as u8));
     let opening_phase_for_connection = Arc::clone(&opening_phase);
     let prompt_response_provenance = Arc::new(PromptResponseProvenance::default());
     let provenance_for_handler = Arc::clone(&prompt_response_provenance);
+    let opening_response_observed = Arc::new(AtomicBool::new(false));
+    let response_observed_for_handler = Arc::clone(&opening_response_observed);
+    let response_observed_for_connection = Arc::clone(&opening_response_observed);
+    let configuration_monitor = OpeningConfigurationMonitor::new();
+    let configuration_monitor_for_handler = Arc::clone(&configuration_monitor);
+    let configuration_monitor_for_connection = Arc::clone(&configuration_monitor);
+    let protocol_violation = CancellationToken::new();
+    let protocol_violation_for_handler = protocol_violation.clone();
+    let protocol_violation_for_permissions = protocol_violation.clone();
+    let protocol_violation_for_connection = protocol_violation.clone();
+    let protocol_violation_observed = Arc::new(AtomicBool::new(false));
+    let protocol_violation_observed_for_handler = Arc::clone(&protocol_violation_observed);
+    let protocol_violation_observed_for_permissions = Arc::clone(&protocol_violation_observed);
+    let protocol_violation_observed_for_turn = Arc::clone(&protocol_violation_observed);
+    let opening_phase_for_handler = Arc::clone(&opening_phase);
+    let opening_phase_for_permissions = Arc::clone(&opening_phase);
     let slot_for_permissions = slot.clone();
-    let stdout = AcpFrameLimitedReader::new(stdout, Arc::clone(&frame_limit_exceeded));
-    let transport = ByteStreams::new(stdin.compat_write(), stdout.compat());
-    let connection = Client
-        .builder()
-        .name("troupe")
-        .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _connection| {
-                let Some(slot) = slot_for_permissions.upgrade() else {
-                    return responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Cancelled,
-                    ));
-                };
-                let Some(control) = slot.submitted_turn(&request.session_id) else {
-                    return responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Cancelled,
-                    ));
-                };
-                control.respond_permission(&request, responder)
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_dispatch(
-            async move |dispatch: Dispatch, _connection: ConnectionTo<Agent>| match dispatch {
-                Dispatch::Response(result, router) => {
-                    if router.method() == "session/prompt" && result.is_err() {
-                        provenance_for_handler.record_remote_error(router.id().clone());
-                    }
-                    router.route_with_result(result)?;
-                    Ok(Handled::Yes)
-                }
-                message => Ok(Handled::No {
-                    message,
-                    retry: false,
-                }),
-            },
-            agent_client_protocol::on_receive_dispatch!(),
-        )
-        .connect_with(
-            transport,
-            move |connection: ConnectionTo<Agent>| async move {
-                let result = open_handshake(
-                    &connection,
-                    &slot_for_connection,
-                    &profile_for_connection,
-                    spec,
-                    &command_for_connection,
-                    &service_for_connection,
-                    &route_for_connection,
-                    pid,
-                    &endpoint,
-                    &cancellation_for_connection,
-                    &opening_phase_for_connection,
-                )
-                .await;
-                match result {
-                    Ok(session_id) => {
-                        if let Some(slot) = slot_for_connection.upgrade() {
-                            run_agent_turn_worker(
-                                &connection,
-                                slot,
-                                session_id,
-                                &prompt_response_provenance,
-                                &cancellation_for_connection,
-                                #[cfg(feature = "agent-test-support")]
-                                command_for_connection.turn_gates.clone(),
-                            )
-                            .await;
-                        }
-                    }
-                    Err(failure) => {
-                        if frame_limit_for_connection.load(Ordering::Acquire) {
-                            commit_acp_resource_limit(
-                                &slot_for_connection,
-                                OpeningPhase::load(&opening_phase_for_connection).name(),
-                            );
-                        } else {
-                            commit_failure(&slot_for_connection, failure);
-                        }
-                    }
-                }
-                Ok(())
-            },
-        );
-    tokio::pin!(connection);
-
-    enum Completion {
-        Connection,
-        Child,
-        Cancelled,
-    }
+    let slot_for_updates = slot.clone();
+    let stdout = AcpFrameLimitedReader::new(
+        stdout,
+        Arc::clone(&frame_limit_exceeded),
+        Arc::clone(&protocol_violation_observed),
+    );
+    let response_tracker = Arc::new(AcpResponseTracker::new(Arc::clone(
+        &protocol_violation_observed,
+    )));
+    let outgoing_tracker = Arc::clone(&response_tracker);
+    let outgoing = futures::sink::unfold(stdin.compat_write(), move |mut writer, line: String| {
+        let tracker = Arc::clone(&outgoing_tracker);
+        async move {
+            tracker.observe_outgoing(&line)?;
+            writer.write_all(line.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            Ok::<_, std::io::Error>(writer)
+        }
+    });
+    let incoming_tracker = Arc::clone(&response_tracker);
+    let incoming = futures::io::BufReader::new(stdout.compat())
+        .lines()
+        .map(move |line| {
+            line.and_then(|line| {
+                incoming_tracker.observe_incoming(&line)?;
+                Ok(line)
+            })
+        });
+    let transport = Lines::new(outgoing, incoming);
+    let listener_failure = result_service.listener_failure();
     let completion = {
+        let connection = Client
+            .builder()
+            .name("troupe")
+            .on_receive_request(
+                async move |request: RequestPermissionRequest, responder, _connection| {
+                    let Some(slot) = slot_for_permissions.upgrade() else {
+                        return responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        ));
+                    };
+                    let Some(control) = slot.submitted_turn(&request.session_id) else {
+                        let response = responder.respond(RequestPermissionResponse::new(
+                            RequestPermissionOutcome::Cancelled,
+                        ));
+                        protocol_violation_observed_for_permissions.store(true, Ordering::Release);
+                        let phase = OpeningPhase::load(&opening_phase_for_permissions).name();
+                        slot.commit_protocol_violation(phase);
+                        protocol_violation_for_permissions.cancel();
+                        return response;
+                    };
+                    let (attributable, response) = control.respond_permission(&request, responder);
+                    if !attributable {
+                        protocol_violation_observed_for_permissions.store(true, Ordering::Release);
+                        let phase = OpeningPhase::load(&opening_phase_for_permissions).name();
+                        slot.commit_protocol_violation(phase);
+                        protocol_violation_for_permissions.cancel();
+                    }
+                    response
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_dispatch(
+                async move |dispatch: Dispatch, _connection: ConnectionTo<Agent>| match dispatch {
+                    message @ Dispatch::Notification(_) if message.method() == "session/update" => {
+                        match message.into_notification::<SessionNotification>() {
+                            Ok(Ok(notification)) => {
+                                let configuration_update = matches!(
+                                    &notification.update,
+                                    SessionUpdate::ConfigOptionUpdate(_)
+                                        | SessionUpdate::CurrentModeUpdate(_)
+                                );
+                                let invalid_after_ready = matches!(
+                                    configuration_monitor_for_handler.observe(&notification),
+                                    ConfigurationObservation::InvalidAfterReady
+                                );
+                                if invalid_after_ready {
+                                    if let Some(slot) = slot_for_updates.upgrade() {
+                                        slot.commit_protocol_violation("configure");
+                                    }
+                                } else if !configuration_update {
+                                    let accepted = slot_for_updates
+                                        .upgrade()
+                                        .and_then(|slot| {
+                                            slot.submitted_turn(&notification.session_id)
+                                        })
+                                        .is_some_and(|control| control.accepts_ordinary_update());
+                                    if !accepted {
+                                        protocol_violation_observed_for_handler
+                                            .store(true, Ordering::Release);
+                                        let phase =
+                                            OpeningPhase::load(&opening_phase_for_handler).name();
+                                        if let Some(slot) = slot_for_updates.upgrade() {
+                                            slot.commit_protocol_violation(phase);
+                                        }
+                                        protocol_violation_for_handler.cancel();
+                                    }
+                                }
+                            }
+                            Ok(Err(_)) => unreachable!("the notification method matched"),
+                            Err(_) => {
+                                protocol_violation_observed_for_handler
+                                    .store(true, Ordering::Release);
+                                let phase = OpeningPhase::load(&opening_phase_for_handler).name();
+                                if let Some(slot) = slot_for_updates.upgrade() {
+                                    slot.commit_protocol_violation(phase);
+                                }
+                                protocol_violation_for_handler.cancel();
+                            }
+                        }
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Response(result, router) => {
+                        response_observed_for_handler.store(true, Ordering::Release);
+                        configuration_monitor_for_handler
+                            .observe_configuration_response(router.method(), &result);
+                        if router.method() == "session/prompt" {
+                            if let Some(control) = slot_for_updates
+                                .upgrade()
+                                .and_then(|slot| slot.current_submitted_turn())
+                            {
+                                control.mark_prompt_response_observed();
+                            }
+                            if result.is_err() {
+                                provenance_for_handler.record_remote_error(router.id().clone());
+                            }
+                        }
+                        router.route_with_result(result)?;
+                        Ok(Handled::Yes)
+                    }
+                    message => Ok(Handled::No {
+                        message,
+                        retry: false,
+                    }),
+                },
+                agent_client_protocol::on_receive_dispatch!(),
+            )
+            .connect_with(
+                transport,
+                move |connection: ConnectionTo<Agent>| async move {
+                    let configuration_invalidated =
+                        configuration_monitor_for_connection.invalidated();
+                    let result = tokio::select! {
+                        biased;
+                        result = open_handshake(
+                            &connection,
+                            &slot_for_connection,
+                            &profile_for_connection,
+                            spec,
+                            &command_for_connection,
+                            &service_for_connection,
+                            &route_for_connection,
+                            pid,
+                            endpoint,
+                            &cancellation_for_connection,
+                            &opening_phase_for_connection,
+                            &response_observed_for_connection,
+                            &configuration_monitor_for_connection,
+                            generation,
+                        ) => Some(result),
+                        () = connection.incoming_closed() => None,
+                        () = configuration_invalidated.cancelled() => {
+                            Some(Err(OpeningHandshakeFailure::Terminal(
+                                configuration_invalid()
+                            )))
+                        }
+                        () = protocol_violation_for_connection.cancelled() => {
+                            Some(Err(OpeningHandshakeFailure::Terminal(
+                                AgentStartupFailure::start(
+                                    "protocol_incompatible",
+                                    OpeningPhase::load(&opening_phase_for_connection).name(),
+                                    "agent connection violated the protocol during startup",
+                                )
+                            )))
+                        }
+                    };
+                    let Some(result) = result else {
+                        return Ok(());
+                    };
+                    match result {
+                        Ok(Some(session_id)) => {
+                            if let Some(slot) = slot_for_connection.upgrade() {
+                                run_agent_turn_worker(
+                                    &connection,
+                                    slot,
+                                    session_id,
+                                    &prompt_response_provenance,
+                                    Arc::clone(
+                                        &command_for_connection.authoritative_prompt_error_codes,
+                                    ),
+                                    Arc::clone(&protocol_violation_observed_for_turn),
+                                    &cancellation_for_connection,
+                                    #[cfg(feature = "agent-test-support")]
+                                    command_for_connection.turn_gates.clone(),
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(failure) => {
+                            if !frame_limit_for_connection.load(Ordering::Acquire)
+                                && (!connection.is_incoming_closed()
+                                    || response_observed_for_connection.load(Ordering::Acquire))
+                            {
+                                *lock(&opening_failure_for_connection) = Some(failure);
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+            );
+        tokio::pin!(connection);
         let child_wait = child.wait();
         tokio::pin!(child_wait);
         tokio::select! {
-            _ = &mut connection => Completion::Connection,
-            _ = &mut child_wait => Completion::Child,
-            () = cancellation.cancelled() => Completion::Cancelled,
+            result = &mut connection => {
+                if result.is_ok() {
+                    OpeningAttemptCompletion::ConnectionClosed
+                } else {
+                    OpeningAttemptCompletion::ConnectionProtocolError
+                }
+            },
+            _ = &mut child_wait => OpeningAttemptCompletion::Child,
+            () = listener_failure.cancelled() => OpeningAttemptCompletion::ResultServiceLost,
+            () = cancellation.cancelled() => OpeningAttemptCompletion::Cancelled,
         }
     };
-    if !matches!(completion, Completion::Cancelled) {
+    let cancelled =
+        cancellation.is_cancelled() || matches!(completion, OpeningAttemptCompletion::Cancelled);
+    let phase = OpeningPhase::load(&opening_phase).name();
+    let reached_ready = slot.upgrade().is_some_and(|slot| slot.has_reached_ready());
+    if !cancelled && reached_ready {
+        let strong_slot = slot.upgrade();
         if frame_limit_exceeded.load(Ordering::Acquire) {
-            commit_acp_resource_limit(&slot, OpeningPhase::load(&opening_phase).name());
-        } else {
-            commit_connection_loss(
-                &slot,
-                AgentStartupFailure::start(
-                    "spawn_failed",
-                    "spawn",
-                    "agent process exited during startup",
-                ),
-            );
+            if let Some(slot) = strong_slot {
+                slot.mark_acp_resource_limit(phase);
+            }
+        } else if let Some(slot) = strong_slot {
+            match completion {
+                OpeningAttemptCompletion::Child => slot.commit_process_exit(),
+                OpeningAttemptCompletion::ConnectionClosed => slot.commit_transport_loss(),
+                OpeningAttemptCompletion::ConnectionProtocolError => {
+                    slot.commit_protocol_violation(phase);
+                }
+                OpeningAttemptCompletion::ResultServiceLost => {
+                    slot.commit_result_channel_loss();
+                }
+                OpeningAttemptCompletion::Cancelled => {}
+            }
         }
     }
     let route = { lock(&current_route).take() };
@@ -1223,6 +2132,51 @@ async fn open_agent_session(
     }
     terminate_and_reap(&mut child, pid).await;
     wait_for_stderr_drain(stderr_drain).await;
+
+    if cancelled {
+        return OpeningAttemptOutcome::Cancelled;
+    }
+    if reached_ready {
+        return OpeningAttemptOutcome::ReadyTerminated;
+    }
+    if frame_limit_exceeded.load(Ordering::Acquire) {
+        return OpeningAttemptOutcome::Terminal(opening_resource_limit_failure(phase));
+    }
+    if matches!(completion, OpeningAttemptCompletion::ResultServiceLost) {
+        return OpeningAttemptOutcome::Terminal(AgentStartupFailure::start(
+            "result_channel_unavailable",
+            "mcp_ready",
+            "agent result service listener failed",
+        ));
+    }
+    if let Some(failure) = lock(&opening_failure).take() {
+        return match failure {
+            OpeningHandshakeFailure::Transient => OpeningAttemptOutcome::Transient,
+            OpeningHandshakeFailure::Terminal(failure) => OpeningAttemptOutcome::Terminal(failure),
+        };
+    }
+    if matches!(
+        completion,
+        OpeningAttemptCompletion::ConnectionProtocolError
+    ) {
+        return OpeningAttemptOutcome::Terminal(AgentStartupFailure::start(
+            "protocol_incompatible",
+            phase,
+            "agent connection violated the protocol during startup",
+        ));
+    }
+    let observation = match completion {
+        OpeningAttemptCompletion::Child => OpeningFailureObservation::ProcessExited,
+        OpeningAttemptCompletion::ConnectionClosed => OpeningFailureObservation::TransportLost,
+        OpeningAttemptCompletion::ConnectionProtocolError => {
+            unreachable!("connection protocol failure returned above")
+        }
+        OpeningAttemptCompletion::ResultServiceLost => {
+            unreachable!("result service failure returned above")
+        }
+        OpeningAttemptCompletion::Cancelled => unreachable!("cancellation returned above"),
+    };
+    OpeningAttemptOutcome::Ambiguous(OpeningFailureFingerprint { phase, observation })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1238,26 +2192,37 @@ async fn open_handshake(
     endpoint: &str,
     cancellation: &CancellationToken,
     opening_phase: &AtomicU8,
-) -> Result<SessionId, AgentStartupFailure> {
+    response_observed: &AtomicBool,
+    configuration_monitor: &OpeningConfigurationMonitor,
+    generation: u64,
+) -> Result<Option<SessionId>, OpeningHandshakeFailure> {
     if !spec.supports_step1_opening(profile.agent) {
         return Err(AgentStartupFailure::start(
             "protocol_incompatible",
             "initialize",
             "agent launch contract is incompatible with this runtime",
-        ));
+        )
+        .into());
     }
     let initialize = InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(ClientCapabilities::new().session(ClientSessionCapabilities::new()))
         .client_info(Implementation::new("troupe", env!("CARGO_PKG_VERSION")));
+    response_observed.store(false, Ordering::Release);
     let initialized = connection
         .send_request(initialize)
         .block_task()
         .await
-        .map_err(|_| {
-            AgentStartupFailure::start(
-                "protocol_incompatible",
-                "initialize",
-                "agent initialization failed",
+        .map_err(|error| {
+            classify_opening_request_error(
+                spec,
+                command,
+                OpeningRequestPhaseV1::Initialize,
+                &error,
+                AgentStartupFailure::start(
+                    "protocol_incompatible",
+                    "initialize",
+                    "agent initialization failed",
+                ),
             )
         })?;
     if initialized.protocol_version != ProtocolVersion::V1
@@ -1267,36 +2232,45 @@ async fn open_handshake(
             "protocol_incompatible",
             "initialize",
             "agent does not support the required protocol",
-        ));
+        )
+        .into());
     }
     let agent_info = initialized.agent_info;
     let agent_capabilities = initialized.agent_capabilities;
 
     let route = result_service.register_route(
-        1,
+        generation,
         #[cfg(feature = "agent-test-support")]
         command.mcp_ready_gate.clone(),
     )?;
     *lock(current_route) = Some(Arc::clone(&route));
     revalidate_workspace(&profile.workspace, "session_new")?;
     OpeningPhase::SessionNew.store(opening_phase);
-    let session = send_new_session(connection, profile, &route).await;
+    let session = send_new_session(connection, profile, &route, response_observed).await;
     if session
         .as_ref()
         .is_err_and(|error| error.code == ErrorCode::AuthRequired)
     {
         result_service.revoke_route(&route).await;
         *lock(current_route) = None;
-        return Err(AgentStartupFailure::authentication_required("session_new"));
+        return Err(AgentStartupFailure::authentication_required("session_new").into());
     }
     let session = session.map_err(|error| {
         if error.code == ErrorCode::AuthRequired {
-            AgentStartupFailure::authentication_required("session_new")
-        } else {
-            AgentStartupFailure::start(
-                "protocol_incompatible",
+            OpeningHandshakeFailure::Terminal(AgentStartupFailure::authentication_required(
                 "session_new",
-                "agent session creation failed",
+            ))
+        } else {
+            classify_opening_request_error(
+                spec,
+                command,
+                OpeningRequestPhaseV1::SessionNew,
+                &error,
+                AgentStartupFailure::start(
+                    "protocol_incompatible",
+                    "session_new",
+                    "agent session creation failed",
+                ),
             )
         }
     })?;
@@ -1306,12 +2280,15 @@ async fn open_handshake(
     let (effective_model, effective_effort) = configure_session(
         connection,
         spec,
-        &command.mode_application,
         &session,
         &profile.requested_model,
         profile.requested_effort.as_deref(),
+        response_observed,
+        command,
+        configuration_monitor,
     )
     .await?;
+    let session_id = session.session_id.clone();
     #[cfg(feature = "agent-test-support")]
     if let Some(gate) = &command.configuration_ready_gate {
         tokio::select! {
@@ -1321,7 +2298,7 @@ async fn open_handshake(
                     "result_channel_unavailable",
                     "configure",
                     "agent session was closed before configuration readiness",
-                ));
+                ).into());
             }
         }
     }
@@ -1333,10 +2310,10 @@ async fn open_handshake(
     route.wait_ready(cancellation).await?;
     revalidate_workspace(&profile.workspace, "session_new")?;
     let Some(slot) = slot.upgrade() else {
-        return Ok(session.session_id);
+        return Ok(None);
     };
-    let session_id = session.session_id.clone();
-    slot.commit_ready(
+    let committed = configuration_monitor.commit_ready(
+        &slot,
         AgentReadySnapshot {
             pid,
             session_id: session.session_id.to_string(),
@@ -1348,9 +2325,9 @@ async fn open_handshake(
             effective_model,
             effective_effort,
         },
-        Some(Arc::clone(&route)),
-    );
-    Ok(session_id)
+        Arc::clone(&route),
+    )?;
+    Ok(committed.then_some(session_id))
 }
 
 fn supports_http_mcp(capabilities: &McpCapabilities) -> bool {
@@ -1361,7 +2338,9 @@ async fn send_new_session(
     connection: &ConnectionTo<Agent>,
     profile: &ResolvedAgentProfile,
     route: &ResultRoute,
+    response_observed: &AtomicBool,
 ) -> agent_client_protocol::Result<agent_client_protocol::schema::v1::NewSessionResponse> {
+    response_observed.store(false, Ordering::Release);
     connection
         .send_request(
             NewSessionRequest::new(profile.workspace.acp_cwd_alias.clone())
@@ -1371,58 +2350,134 @@ async fn send_new_session(
         .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn configure_session(
     connection: &ConnectionTo<Agent>,
     spec: &AgentLaunchSpec,
-    mode_application: &ResolvedModeApplication,
     session: &NewSessionResponse,
     requested_model: &str,
     requested_effort: Option<&str>,
-) -> Result<(String, Option<String>), AgentStartupFailure> {
+    response_observed: &AtomicBool,
+    command: &ResolvedAgentCommand,
+    configuration_monitor: &OpeningConfigurationMonitor,
+) -> Result<(String, Option<String>), OpeningHandshakeFailure> {
     let session_id = &session.session_id;
     let initial = session.config_options.as_deref().unwrap_or_default();
-    let after_mode = match mode_application {
+    let after_mode = match &command.mode_application {
         ResolvedModeApplication::SessionConfigOption { config_id, value } => {
             require_select_value(initial, config_id, value)?;
-            let after_mode = apply_select(connection, session_id, config_id, value).await?;
+            configuration_monitor.arm_mode(mode_configuration(session, command));
+            let after_mode = apply_select(
+                connection,
+                session_id,
+                config_id,
+                value,
+                response_observed,
+                spec,
+                command,
+            )
+            .await?;
             require_current(&after_mode, config_id, value)?;
             after_mode
         }
         ResolvedModeApplication::LegacySessionMode { mode_id } => {
             require_legacy_mode(session.modes.as_ref(), mode_id)?;
-            apply_legacy_mode(connection, session_id, mode_id).await?;
+            configuration_monitor.arm_mode(mode_configuration(session, command));
+            apply_legacy_mode(
+                connection,
+                session_id,
+                mode_id,
+                response_observed,
+                spec,
+                command,
+            )
+            .await?;
             initial.to_vec()
         }
     };
 
     require_select_value(&after_mode, spec.model_config_id, requested_model)?;
-    let after_model = apply_select(
-        connection,
-        session_id,
-        spec.model_config_id,
-        requested_model,
-    )
-    .await?;
-    require_applied_mode(&after_model, mode_application)?;
-    require_current(&after_model, spec.model_config_id, requested_model)?;
-
     let effective_effort = if let Some(requested_effort) = requested_effort {
+        let after_model = apply_select(
+            connection,
+            session_id,
+            spec.model_config_id,
+            requested_model,
+            response_observed,
+            spec,
+            command,
+        )
+        .await?;
+        require_applied_mode(&after_model, &command.mode_application)?;
+        require_current(&after_model, spec.model_config_id, requested_model)?;
         require_select_value(&after_model, spec.effort_config_id, requested_effort)?;
-        let after_effort = apply_select(
+        let after_effort = apply_final_select(
             connection,
             session_id,
             spec.effort_config_id,
             requested_effort,
+            response_observed,
+            spec,
+            command,
+            configuration_monitor,
+            pending_ready_configuration(
+                session,
+                spec,
+                command,
+                requested_model,
+                Some(requested_effort),
+            ),
         )
         .await?;
-        require_applied_mode(&after_effort, mode_application)?;
+        require_applied_mode(&after_effort, &command.mode_application)?;
         require_current(&after_effort, spec.model_config_id, requested_model)?;
         require_current(&after_effort, spec.effort_config_id, requested_effort)?;
         Some(requested_effort.to_owned())
     } else {
+        let after_model = apply_final_select(
+            connection,
+            session_id,
+            spec.model_config_id,
+            requested_model,
+            response_observed,
+            spec,
+            command,
+            configuration_monitor,
+            pending_ready_configuration(session, spec, command, requested_model, None),
+        )
+        .await?;
+        require_applied_mode(&after_model, &command.mode_application)?;
+        require_current(&after_model, spec.model_config_id, requested_model)?;
         Some(current_select(&after_model, spec.effort_config_id)?.to_owned())
     };
     Ok((requested_model.to_owned(), effective_effort))
+}
+
+fn pending_ready_configuration(
+    session: &NewSessionResponse,
+    spec: &AgentLaunchSpec,
+    command: &ResolvedAgentCommand,
+    requested_model: &str,
+    requested_effort: Option<&str>,
+) -> PendingReadyConfigurationContract {
+    PendingReadyConfigurationContract {
+        session_id: session.session_id.clone(),
+        mode_application: command.mode_application.clone(),
+        model_config_id: spec.model_config_id,
+        effort_config_id: spec.effort_config_id,
+        requested_model: requested_model.to_owned(),
+        requested_effort: requested_effort.map(str::to_owned),
+    }
+}
+
+fn mode_configuration(
+    session: &NewSessionResponse,
+    command: &ResolvedAgentCommand,
+) -> ModeConfigurationContract {
+    ModeConfigurationContract {
+        session_id: session.session_id.clone(),
+        mode_application: command.mode_application.clone(),
+    }
 }
 
 fn require_applied_mode(
@@ -1457,7 +2512,11 @@ async fn apply_legacy_mode(
     connection: &ConnectionTo<Agent>,
     session_id: &agent_client_protocol::schema::v1::SessionId,
     mode_id: &str,
-) -> Result<(), AgentStartupFailure> {
+    response_observed: &AtomicBool,
+    spec: &AgentLaunchSpec,
+    command: &ResolvedAgentCommand,
+) -> Result<(), OpeningHandshakeFailure> {
+    response_observed.store(false, Ordering::Release);
     connection
         .send_request(SetSessionModeRequest::new(
             session_id.clone(),
@@ -1466,7 +2525,15 @@ async fn apply_legacy_mode(
         .block_task()
         .await
         .map(|_| ())
-        .map_err(|_| configuration_invalid())
+        .map_err(|error| {
+            classify_opening_request_error(
+                spec,
+                command,
+                OpeningRequestPhaseV1::Configure,
+                &error,
+                configuration_invalid(),
+            )
+        })
 }
 
 async fn apply_select(
@@ -1474,7 +2541,11 @@ async fn apply_select(
     session_id: &agent_client_protocol::schema::v1::SessionId,
     config_id: &str,
     value: &str,
-) -> Result<Vec<SessionConfigOption>, AgentStartupFailure> {
+    response_observed: &AtomicBool,
+    spec: &AgentLaunchSpec,
+    command: &ResolvedAgentCommand,
+) -> Result<Vec<SessionConfigOption>, OpeningHandshakeFailure> {
+    response_observed.store(false, Ordering::Release);
     connection
         .send_request(SetSessionConfigOptionRequest::new(
             session_id.clone(),
@@ -1484,7 +2555,40 @@ async fn apply_select(
         .block_task()
         .await
         .map(|response| response.config_options)
-        .map_err(|_| configuration_invalid())
+        .map_err(|error| {
+            classify_opening_request_error(
+                spec,
+                command,
+                OpeningRequestPhaseV1::Configure,
+                &error,
+                configuration_invalid(),
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_final_select(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::v1::SessionId,
+    config_id: &str,
+    value: &str,
+    response_observed: &AtomicBool,
+    spec: &AgentLaunchSpec,
+    command: &ResolvedAgentCommand,
+    configuration_monitor: &OpeningConfigurationMonitor,
+    pending_contract: PendingReadyConfigurationContract,
+) -> Result<Vec<SessionConfigOption>, OpeningHandshakeFailure> {
+    configuration_monitor.arm_ready(pending_contract);
+    apply_select(
+        connection,
+        session_id,
+        config_id,
+        value,
+        response_observed,
+        spec,
+        command,
+    )
+    .await
 }
 
 fn configuration_invalid() -> AgentStartupFailure {
@@ -1608,10 +2712,17 @@ fn revalidate_workspace(
     Ok(())
 }
 
+struct SpawnedAgent {
+    child: Child,
+    stdin: ForkTracked<ChildStdin>,
+    stdout: ForkTracked<ChildStdout>,
+    stderr: ForkTracked<ChildStderr>,
+}
+
 fn spawn_child(
     command: &ResolvedAgentCommand,
     workspace: &WorkspaceLeaseV1,
-) -> Result<Child, AgentStartupFailure> {
+) -> Result<SpawnedAgent, AgentStartupFailure> {
     let mut standard = std::process::Command::new(&command.program);
     standard
         .args(&command.args)
@@ -1630,19 +2741,83 @@ fn spawn_child(
             }
         });
     }
-    Command::from(standard).spawn().map_err(|_| {
+    let guard = ForkExecGuard::begin();
+    let mut child = Command::from(standard).spawn().map_err(|_| {
         AgentStartupFailure::start("spawn_failed", "spawn", "agent process could not start")
+    })?;
+    let stdin = child.stdin.take().expect("agent stdin was configured");
+    let stdout = child.stdout.take().expect("agent stdout was configured");
+    let stderr = child.stderr.take().expect("agent stderr was configured");
+    let spawned = SpawnedAgent {
+        child,
+        stdin: guard.track(stdin),
+        stdout: guard.track(stdout),
+        stderr: guard.track(stderr),
+    };
+    drop(guard);
+    Ok(spawned)
+}
+
+fn process_group_has_live_members_at(proc_root: &Path, process_group: i32) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return true;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        if entry
+            .file_name()
+            .to_str()
+            .is_none_or(|name| name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            return false;
+        }
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            return false;
+        };
+        let Some(command_end) = stat.rfind(')') else {
+            return false;
+        };
+        let mut fields = stat[command_end + 1..].split_whitespace();
+        let Some(state) = fields.next() else {
+            return false;
+        };
+        let Some(_) = fields.next() else {
+            return false;
+        };
+        let Some(group) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+            return false;
+        };
+        group == process_group && !matches!(state, "X" | "Z")
     })
 }
 
-async fn terminate_and_reap(child: &mut Child, pid: u32) {
-    if let Ok(pid) = i32::try_from(pid) {
+#[cfg(test)]
+async fn wait_for_process_group_exit_at(proc_root: &Path, process_group: i32) {
+    while process_group_has_live_members_at(proc_root, process_group) {
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn wait_for_process_group_exit(process_group: i32) {
+    while process_group_has_live_members_at(Path::new("/proc"), process_group) {
         unsafe {
-            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn terminate_and_reap(child: &mut Child, pid: u32) {
+    let process_group = i32::try_from(pid).ok();
+    if let Some(process_group) = process_group {
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
         }
     }
     let _ = child.start_kill();
     let _ = child.wait().await;
+    if let Some(process_group) = process_group {
+        wait_for_process_group_exit(process_group).await;
+    }
 }
 
 async fn wait_for_stderr_drain(stderr_drain: Option<tokio::task::JoinHandle<()>>) {
@@ -1657,24 +2832,38 @@ fn commit_failure(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
     }
 }
 
-fn commit_connection_loss(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
-    if let Some(slot) = slot.upgrade() {
-        slot.commit_connection_loss(failure);
-    }
-}
-
-fn commit_acp_resource_limit(slot: &Weak<AgentSessionSlot>, phase: &'static str) {
-    if let Some(slot) = slot.upgrade() {
-        slot.mark_acp_resource_limit(phase);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncReadExt as _;
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[test]
+    fn opening_retry_window_uses_half_to_full_exponential_range_with_cap() {
+        assert_eq!(opening_retry_window_ms(0), (125, 250));
+        assert_eq!(opening_retry_window_ms(1), (250, 500));
+        assert_eq!(opening_retry_window_ms(6), (8_000, 16_000));
+        assert_eq!(opening_retry_window_ms(7), (15_000, 30_000));
+        assert_eq!(opening_retry_window_ms(u32::MAX), (15_000, 30_000));
+    }
+
+    #[test]
+    fn opening_retry_sampling_rejects_the_biased_prefix_and_keeps_boundaries() {
+        let mut words = [15_u64, 16].into_iter();
+        assert_eq!(
+            sample_opening_retry_delay_ms(0, || words.next().ok_or(())),
+            Ok(141)
+        );
+        assert_eq!(
+            sample_opening_retry_delay_ms(0, || Ok::<u64, ()>(126)),
+            Ok(125)
+        );
+        assert_eq!(
+            sample_opening_retry_delay_ms(0, || Ok::<u64, ()>(125)),
+            Ok(250)
+        );
+    }
 
     #[tokio::test]
     async fn cleanup_waits_for_the_stderr_drain_task() {
@@ -1696,12 +2885,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_group_wait_requires_os_confirmed_no_live_members() {
+        let proc_root = std::env::temp_dir().join(format!(
+            "troupe-process-group-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let member = proc_root.join("41001");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("stat"), "41001 (mock agent) R 1 41000 41000\n").unwrap();
+
+        let mut wait = std::pin::pin!(wait_for_process_group_exit_at(&proc_root, 41000));
+        tokio::select! {
+            biased;
+            () = &mut wait => panic!("cleanup accepted a live process-group member"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        std::fs::write(member.join("stat"), "41001 (mock agent) Z 1 41000 41000\n").unwrap();
+        wait.await;
+        std::fs::remove_dir_all(&proc_root).unwrap();
+    }
+
+    #[tokio::test]
     async fn acp_frame_reader_enforces_the_exact_sixteen_mibibyte_boundary() {
         async fn read_frame(size: usize) -> (std::io::Result<Vec<u8>>, bool) {
-            let mut wire = vec![b' '; size];
+            const PREFIX: &[u8] = br#"{"jsonrpc":"2.0","id":"size","result":""#;
+            const SUFFIX: &[u8] = br#""}"#;
+            assert!(size >= PREFIX.len() + SUFFIX.len());
+            let mut wire = Vec::with_capacity(size + 1);
+            wire.extend_from_slice(PREFIX);
+            wire.resize(size - SUFFIX.len(), b'x');
+            wire.extend_from_slice(SUFFIX);
             wire.push(b'\n');
             let exceeded = Arc::new(AtomicBool::new(false));
-            let mut reader = AcpFrameLimitedReader::new(wire.as_slice(), Arc::clone(&exceeded));
+            let mut reader = AcpFrameLimitedReader::new(
+                wire.as_slice(),
+                Arc::clone(&exceeded),
+                Arc::new(AtomicBool::new(false)),
+            );
             let mut output = Vec::new();
             let result = reader.read_to_end(&mut output).await.map(|_| output);
             (result, exceeded.load(Ordering::Acquire))
@@ -1717,21 +2938,37 @@ mod tests {
         assert!(exceeded);
 
         let exceeded = Arc::new(AtomicBool::new(false));
-        let mut reader =
-            AcpFrameLimitedReader::new(b"first\nsecond\n".as_slice(), Arc::clone(&exceeded));
+        let mut reader = AcpFrameLimitedReader::new(
+            br#"{"jsonrpc":"2.0","id":1,"result":"first"}
+{"jsonrpc":"2.0","id":2,"result":"second"}
+"#
+            .as_slice(),
+            Arc::clone(&exceeded),
+            Arc::new(AtomicBool::new(false)),
+        );
         let mut output = Vec::new();
         reader.read_to_end(&mut output).await.unwrap();
-        assert_eq!(output, b"first\nsecond\n");
+        assert_eq!(
+            output,
+            br#"{"jsonrpc":"2.0","id":1,"result":"first"}
+{"jsonrpc":"2.0","id":2,"result":"second"}
+"#,
+        );
         assert!(!exceeded.load(Ordering::Acquire));
     }
 
     #[tokio::test]
     async fn acp_frame_reader_enforces_protocol_depth_63_64_65() {
         let nested_frame = |depth: usize| {
-            let mut value = serde_json::json!(null);
-            for _ in 1..depth {
-                value = serde_json::json!({"nested": value});
+            let mut nested = serde_json::json!(null);
+            for _ in 3..depth {
+                nested = serde_json::json!({"nested": nested});
             }
+            let value = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "depth",
+                "result": {"_meta": nested},
+            });
             let mut frame = serde_json::to_vec(&value).unwrap();
             frame.push(b'\n');
             frame
@@ -1740,7 +2977,11 @@ mod tests {
         for depth in [63, 64] {
             let exceeded = Arc::new(AtomicBool::new(false));
             let frame = nested_frame(depth);
-            let mut reader = AcpFrameLimitedReader::new(frame.as_slice(), Arc::clone(&exceeded));
+            let mut reader = AcpFrameLimitedReader::new(
+                frame.as_slice(),
+                Arc::clone(&exceeded),
+                Arc::new(AtomicBool::new(false)),
+            );
             let mut output = Vec::new();
             reader.read_to_end(&mut output).await.unwrap();
             assert_eq!(output, frame);
@@ -1749,13 +2990,75 @@ mod tests {
 
         let exceeded = Arc::new(AtomicBool::new(false));
         let frame = nested_frame(65);
-        let mut reader = AcpFrameLimitedReader::new(frame.as_slice(), Arc::clone(&exceeded));
+        let mut reader = AcpFrameLimitedReader::new(
+            frame.as_slice(),
+            Arc::clone(&exceeded),
+            Arc::new(AtomicBool::new(false)),
+        );
         let mut output = Vec::new();
         assert_eq!(
             reader.read_to_end(&mut output).await.unwrap_err().kind(),
             std::io::ErrorKind::InvalidData,
         );
         assert!(exceeded.load(Ordering::Acquire));
+
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let mut reader = AcpFrameLimitedReader::new(
+            b"{not-json}\n".as_slice(),
+            Arc::clone(&exceeded),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut output = Vec::new();
+        assert_eq!(
+            reader.read_to_end(&mut output).await.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+        );
+        assert!(!exceeded.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn acp_frame_reader_rejects_malformed_json_rpc_response_envelope() {
+        let exceeded = Arc::new(AtomicBool::new(false));
+        let protocol_violation = Arc::new(AtomicBool::new(false));
+        let frame = br#"{"jsonrpc":"2.0","id":"request","result":{},"error":{"code":-32603,"message":"ambiguous"}}
+"#;
+        let mut reader = AcpFrameLimitedReader::new(
+            frame.as_slice(),
+            Arc::clone(&exceeded),
+            Arc::clone(&protocol_violation),
+        );
+        let mut output = Vec::new();
+
+        assert_eq!(
+            reader.read_to_end(&mut output).await.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData,
+        );
+        assert!(!exceeded.load(Ordering::Acquire));
+        assert!(protocol_violation.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn acp_response_tracker_rejects_unknown_and_duplicate_response_ids() {
+        let protocol_violation = Arc::new(AtomicBool::new(false));
+        let tracker = AcpResponseTracker::new(Arc::clone(&protocol_violation));
+        tracker
+            .observe_outgoing(
+                r#"{"jsonrpc":"2.0","id":"expected","method":"initialize","params":{}}"#,
+            )
+            .unwrap();
+        tracker
+            .observe_incoming(r#"{"jsonrpc":"2.0","id":"expected","result":{}}"#)
+            .unwrap();
+        assert!(!protocol_violation.load(Ordering::Acquire));
+
+        assert_eq!(
+            tracker
+                .observe_incoming(r#"{"jsonrpc":"2.0","id":"expected","result":{}}"#)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData,
+        );
+        assert!(protocol_violation.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -1788,6 +3091,34 @@ mod tests {
         assert!(matches!(
             &*lock(&slot.state),
             AgentSessionState::Broken(stored) if stored.code == "protocol_violation"
+        ));
+    }
+
+    #[tokio::test]
+    async fn abandoned_cancelling_turn_cannot_publish_ready_without_settlement() {
+        let slot = AgentSessionSlot::new();
+        slot.commit_ready(
+            AgentReadySnapshot {
+                pid: std::process::id(),
+                session_id: "abandoned-turn-test".to_owned(),
+                agent_info: None,
+                agent_capabilities: AgentCapabilities::default(),
+                generation: 1,
+                server_name: "abandoned-turn-test".to_owned(),
+                endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+                effective_model: "test-model".to_owned(),
+                effective_effort: None,
+            },
+            None,
+        );
+        let (_, session_turn, _) = slot.claim_session_turn().await.unwrap();
+        session_turn.cancelling_marker().mark_cancelling();
+
+        drop(session_turn);
+
+        assert!(matches!(
+            &*lock(&slot.state),
+            AgentSessionState::Cancelling(_)
         ));
     }
 }

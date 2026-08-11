@@ -494,7 +494,10 @@ def test_transport_loss_precedes_a_repairable_invalid_result(tmp_path: Path) -> 
 
     assert len(captured) == 1
     assert type(captured[0]) is troupe.AgentSessionBrokenError
-    assert captured[0].code == "transport_lost"  # type: ignore[attr-defined]
+    assert captured[0].code in {  # type: ignore[attr-defined]
+        "process_exited",
+        "transport_lost",
+    }
     assert states == ["broken"]
     tool_events = [row for row in _events(events) if row["event"] == "tool_result_received"]
     assert len(tool_events) == 1
@@ -565,8 +568,23 @@ def test_schema_callback_failure_precedes_a_correlated_prompt_error(
     assert tool_event["text"] == "schema validation callback failed"
 
 
-def test_malformed_prompt_response_breaks_session_and_blocks_reuse(tmp_path: Path) -> None:
-    events, workspace = _launch(tmp_path, "act_malformed_prompt_response")
+@pytest.mark.parametrize(
+    ("scenario_name", "terminal_event"),
+    [
+        ("act_malformed_prompt_response", "malformed_prompt_response_sent"),
+        (
+            "act_malformed_prompt_response_envelope",
+            "malformed_prompt_response_envelope_sent",
+        ),
+        ("act_unknown_prompt_response_id", "unknown_prompt_response_id_sent"),
+    ],
+)
+def test_malformed_prompt_response_breaks_session_and_blocks_reuse(
+    tmp_path: Path,
+    scenario_name: str,
+    terminal_event: str,
+) -> None:
+    events, workspace = _launch(tmp_path, scenario_name)
     captured: list[troupe.AgentSessionBrokenError] = []
     states: list[str] = []
     runtime = _native()._Runtime()
@@ -613,9 +631,7 @@ def test_malformed_prompt_response_breaks_session_and_blocks_reuse(tmp_path: Pat
     assert all(error.__cause__ is None for error in captured)
     assert states == ["broken", "broken"]
     assert [row["event"] for row in _events(events)].count("prompt_received") == 1
-    assert [row["event"] for row in _events(events)].count(
-        "malformed_prompt_response_sent"
-    ) == 1
+    assert [row["event"] for row in _events(events)].count(terminal_event) == 1
 
 
 def test_accepted_result_with_non_end_turn_discards_value_and_returns_turn_error(

@@ -1,10 +1,11 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, PermissionOptionKind, PromptRequest, PromptResponse,
-    RequestId, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, StopReason, TextContent,
+    CancelNotification, ContentBlock, ErrorCode, PermissionOptionKind, PromptRequest,
+    PromptResponse, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionId, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, ConnectionTo, Error, Responder, is_incoming_transport_closed};
 use pyo3::PyErr;
@@ -39,6 +40,8 @@ pub(crate) enum AgentTurnStop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromptErrorSettlement {
     AuthoritativeRequestFailure,
+    AuthenticationLost,
+    Uncertain,
     TransportLost,
     ProtocolViolation,
 }
@@ -98,6 +101,7 @@ enum AgentTurnControlPhase {
 
 struct AgentTurnControlState {
     phase: AgentTurnControlPhase,
+    prompt_response_observed: bool,
     caller_admission: Option<ActAdmissionLease>,
     armed_result: Option<ArmedResultLease>,
     session_turn: Option<SessionTurnLease>,
@@ -131,6 +135,7 @@ impl AgentTurnControl {
             slot,
             state: Mutex::new(AgentTurnControlState {
                 phase: AgentTurnControlPhase::Preparing,
+                prompt_response_observed: false,
                 caller_admission: None,
                 armed_result: None,
                 session_turn: None,
@@ -180,6 +185,29 @@ impl AgentTurnControl {
         }
         state.phase = AgentTurnControlPhase::Submitted;
         true
+    }
+
+    pub(crate) fn mark_prompt_response_observed(&self) {
+        let mut state = lock(&self.state);
+        if matches!(
+            state.phase,
+            AgentTurnControlPhase::Submitted
+                | AgentTurnControlPhase::SupervisorOwnedCancelled
+                | AgentTurnControlPhase::SupervisorOwnedFailed
+        ) {
+            state.prompt_response_observed = true;
+        }
+    }
+
+    pub(crate) fn accepts_ordinary_update(&self) -> bool {
+        let state = lock(&self.state);
+        !state.prompt_response_observed
+            && matches!(
+                state.phase,
+                AgentTurnControlPhase::Submitted
+                    | AgentTurnControlPhase::SupervisorOwnedCancelled
+                    | AgentTurnControlPhase::SupervisorOwnedFailed
+            )
     }
 
     pub(crate) fn queue_if_armed(
@@ -311,14 +339,24 @@ impl AgentTurnControl {
         &self,
         request: &RequestPermissionRequest,
         responder: Responder<RequestPermissionResponse>,
-    ) -> Result<(), Error> {
+    ) -> (bool, Result<(), Error>) {
         let state = lock(&self.state);
-        let outcome = if state.phase == AgentTurnControlPhase::Submitted {
+        let attributable = !state.prompt_response_observed
+            && matches!(
+                state.phase,
+                AgentTurnControlPhase::Submitted
+                    | AgentTurnControlPhase::SupervisorOwnedCancelled
+                    | AgentTurnControlPhase::SupervisorOwnedFailed
+            );
+        let outcome = if attributable && state.phase == AgentTurnControlPhase::Submitted {
             reject_unmapped_permission(request)
         } else {
             RequestPermissionOutcome::Cancelled
         };
-        responder.respond(RequestPermissionResponse::new(outcome))
+        (
+            attributable,
+            responder.respond(RequestPermissionResponse::new(outcome)),
+        )
     }
 
     fn begin_result_failure_handoff(&self) -> bool {
@@ -365,6 +403,8 @@ impl AgentTurnControl {
         &self,
         response: Result<PromptResponse, Error>,
         remote_error: bool,
+        boundary_protocol_violation: bool,
+        authoritative_error_codes: &[i32],
         #[cfg(feature = "agent-test-support")] settlement_gate: Option<&TestOpeningGate>,
     ) -> AgentTurnCompletion {
         #[cfg(feature = "agent-test-support")]
@@ -398,15 +438,28 @@ impl AgentTurnControl {
             let (caller_outcome, proposed_failure) = if supervisor_owned {
                 let failure = match response {
                     Ok(_) => None,
-                    Err(error) => match classify_prompt_error(&error, remote_error) {
-                        PromptErrorSettlement::AuthoritativeRequestFailure => None,
-                        PromptErrorSettlement::TransportLost => {
-                            Some(AgentSessionFailure::transport_lost())
+                    Err(error) => {
+                        match classify_prompt_error(
+                            &error,
+                            remote_error,
+                            boundary_protocol_violation,
+                            authoritative_error_codes,
+                        ) {
+                            PromptErrorSettlement::AuthoritativeRequestFailure => None,
+                            PromptErrorSettlement::AuthenticationLost => {
+                                Some(AgentSessionFailure::authentication_lost())
+                            }
+                            PromptErrorSettlement::Uncertain => {
+                                Some(AgentSessionFailure::uncertain_settlement())
+                            }
+                            PromptErrorSettlement::TransportLost => {
+                                Some(AgentSessionFailure::transport_lost())
+                            }
+                            PromptErrorSettlement::ProtocolViolation => {
+                                Some(AgentSessionFailure::protocol_violation())
+                            }
                         }
-                        PromptErrorSettlement::ProtocolViolation => {
-                            Some(AgentSessionFailure::protocol_violation())
-                        }
-                    },
+                    }
                 };
                 (None, failure)
             } else {
@@ -419,30 +472,53 @@ impl AgentTurnControl {
                         };
                         (outcome, failure)
                     }
-                    Err(error) => match classify_prompt_error(&error, remote_error) {
-                        PromptErrorSettlement::AuthoritativeRequestFailure => {
-                            let outcome = outcome_from_authoritative_request_error(result);
-                            let failure = match &outcome {
-                                AgentTurnOutcome::SessionBroken(failure) => Some(failure.clone()),
-                                _ => None,
-                            };
-                            (outcome, failure)
+                    Err(error) => {
+                        match classify_prompt_error(
+                            &error,
+                            remote_error,
+                            boundary_protocol_violation,
+                            authoritative_error_codes,
+                        ) {
+                            PromptErrorSettlement::AuthoritativeRequestFailure => {
+                                let outcome = outcome_from_authoritative_request_error(result);
+                                let failure = match &outcome {
+                                    AgentTurnOutcome::SessionBroken(failure) => {
+                                        Some(failure.clone())
+                                    }
+                                    _ => None,
+                                };
+                                (outcome, failure)
+                            }
+                            PromptErrorSettlement::AuthenticationLost => {
+                                let failure = AgentSessionFailure::authentication_lost();
+                                (
+                                    outcome_from_terminal_failure(result, failure.clone()),
+                                    Some(failure),
+                                )
+                            }
+                            PromptErrorSettlement::Uncertain => {
+                                let failure = AgentSessionFailure::uncertain_settlement();
+                                (
+                                    outcome_from_terminal_failure(result, failure.clone()),
+                                    Some(failure),
+                                )
+                            }
+                            PromptErrorSettlement::TransportLost => {
+                                let failure = AgentSessionFailure::transport_lost();
+                                (
+                                    outcome_from_terminal_failure(result, failure.clone()),
+                                    Some(failure),
+                                )
+                            }
+                            PromptErrorSettlement::ProtocolViolation => {
+                                let failure = AgentSessionFailure::protocol_violation();
+                                (
+                                    outcome_from_terminal_failure(result, failure.clone()),
+                                    Some(failure),
+                                )
+                            }
                         }
-                        PromptErrorSettlement::TransportLost => {
-                            let failure = AgentSessionFailure::transport_lost();
-                            (
-                                outcome_from_terminal_failure(result, failure.clone()),
-                                Some(failure),
-                            )
-                        }
-                        PromptErrorSettlement::ProtocolViolation => {
-                            let failure = AgentSessionFailure::protocol_violation();
-                            (
-                                outcome_from_terminal_failure(result, failure.clone()),
-                                Some(failure),
-                            )
-                        }
-                    },
+                    }
                 };
                 (Some(outcome), failure)
             };
@@ -679,29 +755,39 @@ impl AgentTurnRequest {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_turn_worker(
     connection: &ConnectionTo<Agent>,
     slot: Arc<AgentSessionSlot>,
     session_id: SessionId,
     response_provenance: &PromptResponseProvenance,
+    authoritative_error_codes: Arc<[i32]>,
+    boundary_protocol_violation: Arc<AtomicBool>,
     cancellation: &CancellationToken,
     #[cfg(feature = "agent-test-support")] turn_gates: TestTurnGates,
 ) {
+    let terminal_fault = slot.terminal_fault();
     loop {
         #[cfg(feature = "agent-test-support")]
         if let Some(gate) = &turn_gates.intake {
             tokio::select! {
                 () = gate.wait() => gate.mark_completed(),
                 () = cancellation.cancelled() => return,
+                () = terminal_fault.cancelled() => return,
             }
         }
         let request = tokio::select! {
             request = slot.next_turn() => request,
             () = connection.incoming_closed() => {
-                slot.commit_transport_loss();
+                if boundary_protocol_violation.load(Ordering::Acquire) {
+                    slot.commit_protocol_violation("configure");
+                } else {
+                    slot.commit_transport_loss();
+                }
                 return;
             }
             () = cancellation.cancelled() => None,
+            () = terminal_fault.cancelled() => None,
         };
         let Some(request) = request else {
             return;
@@ -719,6 +805,7 @@ pub(crate) async fn run_agent_turn_worker(
             tokio::select! {
                 () = gate.wait() => gate.mark_completed(),
                 () = cancellation.cancelled() => return,
+                () = terminal_fault.cancelled() => return,
             }
         }
 
@@ -745,14 +832,18 @@ pub(crate) async fn run_agent_turn_worker(
                         .send_notification(CancelNotification::new(session_id.clone()))
                         .is_err()
                     {
-                        request
-                            .control
-                            .fail_supervisor(AgentSessionFailure::transport_lost());
+                        let failure = if boundary_protocol_violation.load(Ordering::Acquire) {
+                            AgentSessionFailure::protocol_violation()
+                        } else {
+                            AgentSessionFailure::transport_lost()
+                        };
+                        request.control.fail_supervisor(failure);
                         return;
                     }
                     cancel_sent = true;
                 }
                 () = cancellation.cancelled() => return,
+                () = terminal_fault.cancelled() => return,
             }
         };
         let remote_error = response
@@ -761,15 +852,15 @@ pub(crate) async fn run_agent_turn_worker(
         let completion = request.control.complete_response(
             response,
             remote_error,
+            boundary_protocol_violation.load(Ordering::Acquire),
+            &authoritative_error_codes,
             #[cfg(feature = "agent-test-support")]
             turn_gates.settlement.as_deref(),
         );
         #[cfg(feature = "agent-test-support")]
         if let Some(gate) = &turn_gates.outcome {
-            tokio::select! {
-                () = gate.wait() => gate.mark_completed(),
-                () = cancellation.cancelled() => return,
-            }
+            gate.wait().await;
+            gate.mark_completed();
         }
         request.control.publish_caller_outcome();
         if completion.broken {
@@ -794,9 +885,25 @@ fn reject_unmapped_permission(request: &RequestPermissionRequest) -> RequestPerm
     RequestPermissionOutcome::Cancelled
 }
 
-fn classify_prompt_error(error: &Error, remote_error: bool) -> PromptErrorSettlement {
+fn classify_prompt_error(
+    error: &Error,
+    remote_error: bool,
+    boundary_protocol_violation: bool,
+    authoritative_error_codes: &[i32],
+) -> PromptErrorSettlement {
+    if boundary_protocol_violation {
+        return PromptErrorSettlement::ProtocolViolation;
+    }
     if remote_error {
-        return PromptErrorSettlement::AuthoritativeRequestFailure;
+        if error.code == ErrorCode::AuthRequired {
+            return PromptErrorSettlement::AuthenticationLost;
+        }
+        let code = i32::from(error.code);
+        return if authoritative_error_codes.contains(&code) {
+            PromptErrorSettlement::AuthoritativeRequestFailure
+        } else {
+            PromptErrorSettlement::Uncertain
+        };
     }
     if is_incoming_transport_closed(error) {
         return PromptErrorSettlement::TransportLost;
@@ -966,6 +1073,8 @@ mod tests {
                 "method": "session/prompt",
             }))),
             false,
+            false,
+            &[-32603, -32700],
             #[cfg(feature = "agent-test-support")]
             None,
         );
@@ -980,7 +1089,7 @@ mod tests {
     fn prompt_error_classifier_uses_response_provenance_not_peer_controlled_payloads() {
         let remote = Error::new(-32603, "remote request failure");
         assert_eq!(
-            classify_prompt_error(&remote, true),
+            classify_prompt_error(&remote, true, false, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
@@ -989,11 +1098,11 @@ mod tests {
             "method": "session/prompt",
         }));
         assert_eq!(
-            classify_prompt_error(&incoming_closed, false),
+            classify_prompt_error(&incoming_closed, false, false, &[-32603, -32700]),
             PromptErrorSettlement::TransportLost
         );
         assert_eq!(
-            classify_prompt_error(&incoming_closed, true),
+            classify_prompt_error(&incoming_closed, true, false, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
@@ -1002,22 +1111,22 @@ mod tests {
             "json": {"stopReason": "unknown"},
         }));
         assert_eq!(
-            classify_prompt_error(&malformed, false),
+            classify_prompt_error(&malformed, false, false, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
         assert_eq!(
-            classify_prompt_error(&malformed, true),
+            classify_prompt_error(&malformed, true, false, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
         let dropped = Error::internal_error()
             .data("response to `session/prompt` never received: channel closed");
         assert_eq!(
-            classify_prompt_error(&dropped, false),
+            classify_prompt_error(&dropped, false, false, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
         assert_eq!(
-            classify_prompt_error(&dropped, true),
+            classify_prompt_error(&dropped, true, false, &[-32603, -32700]),
             PromptErrorSettlement::AuthoritativeRequestFailure
         );
 
@@ -1025,7 +1134,20 @@ mod tests {
             "failed to send outgoing request `session/prompt`: connection is no longer running",
         );
         assert_eq!(
-            classify_prompt_error(&outgoing_closed, false),
+            classify_prompt_error(&outgoing_closed, false, false, &[-32603, -32700]),
+            PromptErrorSettlement::ProtocolViolation
+        );
+
+        assert_eq!(
+            classify_prompt_error(&Error::auth_required(), true, false, &[-32603, -32700],),
+            PromptErrorSettlement::AuthenticationLost
+        );
+        assert_eq!(
+            classify_prompt_error(&Error::request_cancelled(), true, false, &[-32603, -32700],),
+            PromptErrorSettlement::Uncertain
+        );
+        assert_eq!(
+            classify_prompt_error(&remote, true, true, &[-32603, -32700]),
             PromptErrorSettlement::ProtocolViolation
         );
     }

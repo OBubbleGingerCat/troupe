@@ -165,6 +165,11 @@ impl Production {
         self.state.agent_sessions_are_shutting_down()
     }
 
+    #[cfg(feature = "agent-test-support")]
+    fn _agent_fail_result_listener_for_test(&self) {
+        self.state.fail_agent_result_listener_for_test();
+    }
+
     #[pyo3(
         signature = (query=None, /, *, name=None, pattern=None),
         text_signature = None

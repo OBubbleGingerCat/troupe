@@ -1433,6 +1433,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "futures",
  "getrandom",
  "http-body-util",
  "hyper",

@@ -102,6 +102,14 @@ async def _wait_for_event(path: Path, event: str, count: int = 1) -> None:
         await asyncio.sleep(0)
 
 
+async def _signal_fifo(path: Path) -> None:
+    def write() -> None:
+        with path.open("wb", buffering=0) as signal:
+            signal.write(b"1")
+
+    await asyncio.to_thread(write)
+
+
 async def _wait_for_readiness_gate(latch: str, state: str) -> None:
     while not _native()._agent_test_readiness_gate_states()[latch][state]:
         await asyncio.sleep(0)
@@ -336,6 +344,94 @@ def test_ready_joins_mcp_and_configuration_for_every_supported_ordering(
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
 
 
+def test_config_drift_after_configuration_before_mcp_ready_fails_opening(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        release = tmp_path / "pre-ready-config.fifo"
+        os.mkfifo(release)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(
+            events,
+            scenario="pre_ready_config_model_drift",
+            release=release,
+        )
+        _native()._agent_test_hold_configuration_ready()
+        _native()._agent_test_hold_mcp_ready()
+
+        handle = _cast(troupe.Production([]), workspace, "pre-ready-config-drift")
+        await _wait_for_readiness_gate("configuration", "arrived")
+        await _signal_fifo(release)
+        await _wait_for_event(events, "pre_ready_config_update_sent")
+
+        try:
+            with pytest.raises(troupe.AgentSessionStartError) as raised:
+                await _ready(handle)
+            assert raised.value.code == "configuration_invalid"
+            assert raised.value.phase == "configure"
+        finally:
+            _native()._agent_test_release_configuration_ready()
+            _native()._agent_test_release_mcp_ready()
+
+        with pytest.raises(troupe.AgentSessionStartError) as raised:
+            await _ready(handle)
+        assert raised.value.code == "configuration_invalid"
+        assert raised.value.phase == "configure"
+        assert handle._agent_state_for_test() == "start_failed"  # type: ignore[attr-defined]
+        assert not any(row["event"] == "prompt_received" for row in _events(events))
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_config_drift_in_same_batch_as_final_response_fails_opening(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(events, scenario="final_config_response_then_drift")
+
+        handle = _cast(troupe.Production([]), workspace, "final-config-drift")
+        with pytest.raises(troupe.AgentSessionStartError) as raised:
+            await _ready(handle)
+        assert raised.value.code == "configuration_invalid"
+        assert raised.value.phase == "configure"
+        assert handle._agent_state_for_test() == "start_failed"  # type: ignore[attr-defined]
+        assert not any(row["event"] == "prompt_received" for row in _events(events))
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+@pytest.mark.parametrize(
+    "scenario_name",
+    [
+        "malformed_initialize_response_envelope",
+        "unknown_initialize_response_id",
+    ],
+)
+def test_invalid_json_rpc_response_fails_opening(
+    tmp_path: Path,
+    scenario_name: str,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(events, scenario=scenario_name)
+
+        handle = _cast(troupe.Production([]), workspace, "invalid-response")
+        with pytest.raises(troupe.AgentSessionStartError) as raised:
+            await asyncio.wait_for(_ready(handle), 0.5)
+        assert raised.value.code == "protocol_incompatible"
+        assert raised.value.phase == "initialize"
+        assert handle._agent_state_for_test() == "start_failed"  # type: ignore[attr-defined]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
 def test_mcp_http_10_is_rejected_without_contaminating_discovery(tmp_path: Path) -> None:
     async def scenario() -> None:
         events = tmp_path / "events.jsonl"
@@ -436,6 +532,33 @@ def test_ready_applies_the_registry_legacy_mode_before_model_and_effort(
             ("config_applied", "model", None),
             ("config_applied", "reasoning_effort", None),
         ]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_legacy_mode_drift_before_model_selection_fails_opening(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        events = tmp_path / "events.jsonl"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        _configure_mock(
+            events,
+            scenario="legacy_mode_drift_before_model",
+            legacy_mode_id="agent",
+        )
+
+        handle = _cast(troupe.Production([]), workspace, "legacy-mode-drift")
+        with pytest.raises(troupe.AgentSessionStartError) as raised:
+            await _ready(handle)
+        assert raised.value.code == "configuration_invalid"
+        assert raised.value.phase == "configure"
+        assert handle._agent_state_for_test() == "start_failed"  # type: ignore[attr-defined]
+        assert any(
+            row["event"] == "legacy_mode_drift_sent" for row in _events(events)
+        )
+        assert not any(row["event"] == "prompt_received" for row in _events(events))
 
     asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
 
@@ -630,10 +753,13 @@ def test_opening_background_spawn_failure_is_a_latched_start_error(tmp_path: Pat
             program=str(executable),
             args=[],
         )
+        _native()._agent_test_hold_opening()
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
         handle = _cast(troupe.Production([]), workspace, "spawn-failure")
+        executable.unlink()
+        _native()._agent_test_release_opening()
         for _ in range(2):
             with pytest.raises(troupe.AgentSessionStartError) as raised:
                 await _ready(handle)

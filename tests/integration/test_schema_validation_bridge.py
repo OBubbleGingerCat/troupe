@@ -34,21 +34,25 @@ def _configure_agent(
     *,
     scenario: str,
     results: list[dict[str, object]],
+    release: Path | None = None,
 ) -> tuple[Path, Path]:
     events = tmp_path / "events.jsonl"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    args = [
+        str(MOCK_AGENT),
+        "--events",
+        str(events),
+        "--scenario",
+        scenario,
+        "--results-json",
+        json.dumps(results, separators=(",", ":")),
+    ]
+    if release is not None:
+        args.extend(["--release", str(release)])
     _native()._agent_test_set_launch(
         program=sys.executable,
-        args=[
-            str(MOCK_AGENT),
-            "--events",
-            str(events),
-            "--scenario",
-            scenario,
-            "--results-json",
-            json.dumps(results, separators=(",", ":")),
-        ],
+        args=args,
     )
     return events, workspace
 
@@ -70,6 +74,19 @@ def _run(runtime: Any, production: troupe.Production) -> None:
         )
 
     asyncio.run(scenario())
+
+
+async def _wait_for_event(path: Path, event: str) -> None:
+    while not any(row["event"] == event for row in _events(path)):
+        await asyncio.sleep(0)
+
+
+async def _signal_fifo(path: Path) -> None:
+    def write() -> None:
+        with path.open("wb", buffering=0) as signal:
+            signal.write(b"1")
+
+    await asyncio.to_thread(write)
 
 
 @pytest.fixture(autouse=True)
@@ -857,3 +874,192 @@ def test_value_rejected_is_bounded_and_end_turn_reports_invalid_result(
     tool_event = next(row for row in _events(events) if row["event"] == "tool_result_received")
     assert tool_event["is_error"] is True
     assert len(tool_event["text"].encode("utf-8")) <= 32 * 1024
+
+
+def test_run_binding_teardown_uses_a_fresh_bridge_after_rebind(
+    tmp_path: Path,
+) -> None:
+    settlement_release = tmp_path / "settlement.fifo"
+    os.mkfifo(settlement_release)
+    events, workspace = _configure_agent(
+        tmp_path,
+        scenario="act_cancel_during_callback_then_reuse",
+        results=[],
+        release=settlement_release,
+    )
+    first_callback_entered: asyncio.Event
+    first_callback_cancelled: asyncio.Event
+    first_callback_release: asyncio.Event
+    first_late_returns: list[int] = []
+    second_validations: list[int] = []
+    observed: list[dict[str, object]] = []
+    scene_number = 0
+    handle: troupe.ActorHandle | None = None
+    active_runtime: Any = None
+
+    class FirstBindingValue(troupe.act_schema.SchemaValue[int]):
+        def __init__(self) -> None:
+            super().__init__(description="first binding value", json_kind="int64")
+
+        def render_prompt(self) -> str:
+            return "must remain pending across RunBinding teardown"
+
+        async def validate(self, value: int, /) -> None:
+            first_callback_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                first_callback_cancelled.set()
+                await first_callback_release.wait()
+            first_late_returns.append(value)
+
+    class SecondBindingValue(troupe.act_schema.SchemaValue[int]):
+        def __init__(self) -> None:
+            super().__init__(description="second binding value", json_kind="int64")
+
+        def render_prompt(self) -> str:
+            return "must validate on the fresh bridge"
+
+        def validate(self, value: int, /) -> None:
+            second_validations.append(value)
+
+    class ReboundActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            turn = int(cue.instruction["turn"])
+            schema: troupe.act_schema.SchemaValue[int]
+            schema = FirstBindingValue() if turn == 1 else SecondBindingValue()
+            observed.append(
+                await self.act(
+                    script=f"Return the value for binding {turn}.",
+                    output_schema={"value": schema},
+                )
+            )
+            return ()
+
+    class ReboundProduction(troupe.Production):
+        async def scene(self) -> None:
+            nonlocal handle, scene_number
+            scene_number += 1
+            if scene_number == 1:
+                handle = self.cast_actor(
+                    ReboundActor,
+                    name="run-binding-bridge",
+                    agent_profile=_profile(workspace),
+                    actor_args=(),
+                    actor_kwargs={},
+                )
+                asyncio.create_task(handle.cue({"turn": 1}))
+                await asyncio.Event().wait()
+                raise AssertionError("the first RunBinding scene was not cancelled")
+
+            assert handle is not None
+            assert await handle.cue({"turn": 2}) == ()
+            await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+            active_runtime.request_shutdown()
+
+    async def scenario() -> None:
+        nonlocal active_runtime
+        nonlocal first_callback_cancelled, first_callback_entered, first_callback_release
+        first_callback_entered = asyncio.Event()
+        first_callback_cancelled = asyncio.Event()
+        first_callback_release = asyncio.Event()
+        production = ReboundProduction([])
+        first_runtime = _native()._Runtime()
+        active_runtime = first_runtime
+        first_run = asyncio.ensure_future(first_runtime.run(production))
+        await first_callback_entered.wait()
+
+        first_runtime.request_shutdown()
+        await first_run
+        await first_callback_cancelled.wait()
+        assert first_late_returns == []
+        await _wait_for_event(events, "cancel_received")
+        await _signal_fifo(settlement_release)
+
+        second_runtime = _native()._Runtime()
+        active_runtime = second_runtime
+        await second_runtime.run(production)
+        assert observed == [{"value": 2}]
+        assert second_validations == [2]
+        assert first_late_returns == []
+
+        first_callback_release.set()
+        while first_late_returns != [1]:
+            await asyncio.sleep(0)
+        assert observed == [{"value": 2}]
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))
+
+
+def test_production_teardown_does_not_join_a_validator_that_ignored_cancel(
+    tmp_path: Path,
+) -> None:
+    _, workspace = _configure_agent(
+        tmp_path,
+        scenario="act_cancel_during_callback_then_reuse",
+        results=[],
+    )
+    callback_entered: asyncio.Event
+    callback_cancelled: asyncio.Event
+    callback_release: asyncio.Event
+    late_returns: list[int] = []
+    runtime = _native()._Runtime()
+
+    class IgnoredCancelValue(troupe.act_schema.SchemaValue[int]):
+        def __init__(self) -> None:
+            super().__init__(description="pending teardown value", json_kind="int64")
+
+        def render_prompt(self) -> str:
+            return "must remain pending until Production teardown"
+
+        async def validate(self, value: int, /) -> None:
+            callback_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                callback_cancelled.set()
+                await callback_release.wait()
+            late_returns.append(value)
+
+    class TeardownActor(troupe.Actor):
+        async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+            del cue
+            await self.act(
+                script="Keep custom validation pending.",
+                output_schema={"value": IgnoredCancelValue()},
+            )
+            return ()
+
+    class TeardownProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                TeardownActor,
+                name="production-bridge-teardown",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            cue = asyncio.create_task(handle.cue({}))
+            await callback_entered.wait()
+
+            await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+            await callback_cancelled.wait()
+            assert late_returns == []
+            assert cue.done()
+            with pytest.raises(troupe.AgentSessionBrokenError) as raised:
+                await cue
+            assert raised.value.code == "transport_lost"
+
+            callback_release.set()
+            while late_returns != [1]:
+                await asyncio.sleep(0)
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        nonlocal callback_entered, callback_cancelled, callback_release
+        callback_entered = asyncio.Event()
+        callback_cancelled = asyncio.Event()
+        callback_release = asyncio.Event()
+        await runtime.run(TeardownProduction([]))
+
+    asyncio.run(asyncio.wait_for(scenario(), HARNESS_TIMEOUT))

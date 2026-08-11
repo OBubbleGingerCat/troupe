@@ -124,6 +124,13 @@ pub(crate) struct AgentSessionFailure {
 }
 
 impl AgentSessionFailure {
+    pub(crate) const fn process_exited() -> Self {
+        Self {
+            code: "process_exited",
+            message: "agent session process exited",
+        }
+    }
+
     pub(crate) const fn transport_lost() -> Self {
         Self {
             code: "transport_lost",
@@ -135,6 +142,20 @@ impl AgentSessionFailure {
         Self {
             code: "protocol_violation",
             message: "agent session violated the protocol contract",
+        }
+    }
+
+    pub(crate) const fn uncertain_settlement() -> Self {
+        Self {
+            code: "uncertain_settlement",
+            message: "agent turn settlement is uncertain",
+        }
+    }
+
+    pub(crate) const fn authentication_lost() -> Self {
+        Self {
+            code: "authentication_lost",
+            message: "agent session authentication was lost",
         }
     }
 

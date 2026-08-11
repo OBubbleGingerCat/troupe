@@ -56,6 +56,7 @@ EXPECTED_RUST_SOURCES = [
     "diagnostics.rs",
     "effect.rs",
     "failure.rs",
+    "fork_fd_registry.rs",
     "invocation.rs",
     "lib.rs",
     "loader.rs",
@@ -563,6 +564,9 @@ def test_default_wheel_smoke_rejects_every_agent_test_support_surface() -> None:
         "_agent_test_reset_launch",
         "_agent_test_hold_opening",
         "_agent_test_release_opening",
+        "_agent_test_hold_opening_backoff",
+        "_agent_test_release_opening_backoff",
+        "_agent_test_opening_backoff_state",
         "_agent_test_hold_configuration_ready",
         "_agent_test_release_configuration_ready",
         "_agent_test_hold_mcp_ready",
@@ -588,6 +592,7 @@ def test_default_wheel_smoke_rejects_every_agent_test_support_surface() -> None:
         "_agent_ready_for_test",
         "_agent_shutdown_for_test",
         "_agent_is_shutting_down_for_test",
+        "_agent_fail_result_listener_for_test",
     ):
         assert smoke.count(f'"{name}"') == 1
 
@@ -979,6 +984,7 @@ def test_rust_manifest_and_source_boundary() -> None:
         "base64",
         "bytes",
         "clap",
+        "futures",
         "getrandom",
         "http-body-util",
         "hyper",
@@ -994,6 +1000,7 @@ def test_rust_manifest_and_source_boundary() -> None:
     assert dependencies["agent-client-protocol"] == {"version": "=2.0.0"}
     assert dependencies["base64"] == "0.22"
     assert dependencies["bytes"] == "1"
+    assert dependencies["futures"] == "0.3"
     assert dependencies["getrandom"] == "0.4"
     assert dependencies["http-body-util"] == "0.1"
     assert dependencies["hyper"] == {
@@ -1022,6 +1029,7 @@ def test_rust_manifest_and_source_boundary() -> None:
             "process",
             "rt-multi-thread",
             "sync",
+            "time",
         ],
     }
     assert dependencies["tokio-util"] == {

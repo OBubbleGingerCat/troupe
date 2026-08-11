@@ -30,6 +30,7 @@ use crate::act_schema::{
 use crate::agent_error::AgentStartupFailure;
 #[cfg(feature = "agent-test-support")]
 use crate::agent_launch::TestOpeningGate;
+use crate::fork_fd_registry::ForkTracked;
 use crate::schema_validation_bridge::{CustomValidationOutcome, PythonSchemaValidationBridge};
 
 const MCP_REVISION: &str = "2025-11-25";
@@ -42,6 +43,7 @@ const MCP_JSON_MAX_DEPTH: usize = 64;
 pub(crate) const MAX_REPAIRABLE_INVALID_CALLS: u8 = 8;
 const VALIDATION_DETAIL_MAX_ISSUES: usize = 16;
 const VALIDATION_DETAIL_MAX_BYTES: usize = 32 * 1024;
+static SECURE_RANDOM_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BodyCollectionError {
@@ -53,6 +55,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(crate) fn fill_secure_random(bytes: &mut [u8]) -> Result<(), getrandom::Error> {
+    let _guard = lock(&SECURE_RANDOM_LOCK);
+    getrandom::fill(bytes)
 }
 
 enum ServiceState {
@@ -1671,7 +1678,9 @@ pub(crate) struct ResultMcpService {
     changed: Notify,
     routes: Mutex<HashMap<String, Arc<ResultRoute>>>,
     shutdown: CancellationToken,
+    listener_failure: CancellationToken,
     connections: Arc<Semaphore>,
+    accept_started: AtomicBool,
     accept_complete: AtomicBool,
     accept_changed: Notify,
     connection_tasks: AtomicUsize,
@@ -1699,7 +1708,9 @@ impl ResultMcpService {
             changed: Notify::new(),
             routes: Mutex::new(HashMap::new()),
             shutdown: CancellationToken::new(),
+            listener_failure: CancellationToken::new(),
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+            accept_started: AtomicBool::new(false),
             accept_complete: AtomicBool::new(false),
             accept_changed: Notify::new(),
             connection_tasks: AtomicUsize::new(0),
@@ -1711,12 +1722,39 @@ impl ResultMcpService {
         self.shutdown.cancel();
     }
 
+    pub(crate) fn listener_failure(&self) -> CancellationToken {
+        self.listener_failure.clone()
+    }
+
+    fn commit_listener_failure(&self) {
+        let failure = AgentStartupFailure::start(
+            "result_channel_unavailable",
+            "preparation",
+            "agent result service listener failed",
+        );
+        let mut state = lock(&self.state);
+        if matches!(*state, ServiceState::Failed(_)) {
+            return;
+        }
+        *state = ServiceState::Failed(failure);
+        drop(state);
+        self.changed.notify_waiters();
+        self.listener_failure.cancel();
+        self.shutdown.cancel();
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn fail_listener_for_test(&self) {
+        self.commit_listener_failure();
+    }
+
     pub(crate) async fn shutdown_and_wait(&self) {
         self.shutdown();
         loop {
             let changed = self.accept_changed.notified();
-            let accept_started = matches!(*lock(&self.state), ServiceState::Ready { .. });
-            if !accept_started || self.accept_complete.load(Ordering::Acquire) {
+            if !self.accept_started.load(Ordering::Acquire)
+                || self.accept_complete.load(Ordering::Acquire)
+            {
                 break;
             }
             changed.await;
@@ -1758,7 +1796,7 @@ impl ResultMcpService {
             }
 
             let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await {
-                Ok(listener) => listener,
+                Ok(listener) => ForkTracked::new(listener),
                 Err(_) => {
                     let failure = AgentStartupFailure::start(
                         "result_channel_unavailable",
@@ -1792,6 +1830,7 @@ impl ResultMcpService {
             self.changed.notify_waiters();
             let service = Arc::clone(self);
             let completion = Arc::clone(self);
+            self.accept_started.store(true, Ordering::Release);
             pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
                 service.accept(listener).await;
                 completion.accept_complete.store(true, Ordering::Release);
@@ -1817,7 +1856,7 @@ impl ResultMcpService {
             }
         };
         let mut random = [0_u8; 44];
-        getrandom::fill(&mut random).map_err(|_| {
+        fill_secure_random(&mut random).map_err(|_| {
             AgentStartupFailure::start(
                 "preparation_failed",
                 "session_new",
@@ -1853,15 +1892,18 @@ impl ResultMcpService {
         route.wait_connections_closed().await;
     }
 
-    async fn accept(self: Arc<Self>, listener: TcpListener) {
+    async fn accept(self: Arc<Self>, listener: ForkTracked<TcpListener>) {
+        let mut listener_failed = false;
         loop {
             let accepted = tokio::select! {
                 () = self.shutdown.cancelled() => break,
                 accepted = listener.accept() => accepted,
             };
             let Ok((stream, address)) = accepted else {
+                listener_failed = true;
                 break;
             };
+            let stream = ForkTracked::new(stream);
             if !address.ip().is_loopback() {
                 continue;
             }
@@ -1888,6 +1930,9 @@ impl ResultMcpService {
                 drop(permit);
                 drop(connection_task);
             });
+        }
+        if listener_failed && !self.shutdown.is_cancelled() {
+            self.commit_listener_failure();
         }
     }
 

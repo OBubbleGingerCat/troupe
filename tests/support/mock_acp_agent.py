@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import http.client
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -55,6 +57,66 @@ def _response(
         )
 
 
+def _response_and_notification_batch(
+    request_id: object,
+    result: object,
+    method: str,
+    params: object,
+) -> None:
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                [
+                    {"jsonrpc": "2.0", "id": request_id, "result": result},
+                    {"jsonrpc": "2.0", "method": method, "params": params},
+                ],
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+
+def _response_and_request_batch(
+    request_id: object,
+    result: object,
+    reverse_request_id: object,
+    method: str,
+    params: object,
+) -> None:
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                [
+                    {"jsonrpc": "2.0", "id": request_id, "result": result},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": reverse_request_id,
+                        "method": method,
+                        "params": params,
+                    },
+                ],
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+
+def _malformed_response_with_result_and_error(request_id: object) -> None:
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {},
+                    "error": {"code": -32603, "message": "ambiguous response"},
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+
 def _scenario_depth(scenario: str, prefix: str) -> int | None:
     if not scenario.startswith(prefix):
         return None
@@ -99,6 +161,44 @@ def _request(request_id: object, method: str, params: object) -> None:
             ),
             flush=True,
         )
+
+
+def _notification(method: str, params: object) -> None:
+    with _OUTPUT_LOCK:
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+
+def _permission_params(session_id: str) -> dict[str, object]:
+    return {
+        "sessionId": session_id,
+        "toolCall": {
+            "toolCallId": "mock-tool-call",
+            "kind": "execute",
+            "title": "Run a command",
+        },
+        "options": [
+            {
+                "optionId": "allow-once",
+                "name": "Allow once",
+                "kind": "allow_once",
+            },
+            {
+                "optionId": "reject-once",
+                "name": "Reject once",
+                "kind": "reject_once",
+            },
+        ],
+    }
 
 
 def _write_oversized_acp_frame() -> None:
@@ -471,13 +571,32 @@ def _require_closed_connection(connection: socket.socket) -> None:
     assert received == b"", received
 
 
+def _claim_attempt(path: Path | None) -> int:
+    if path is None:
+        return 1
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        raw = os.read(descriptor, 64)
+        attempt = int(raw) + 1 if raw else 1
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, str(attempt).encode("ascii"))
+        return attempt
+    finally:
+        os.close(descriptor)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--events", type=Path, required=True)
     parser.add_argument("--scenario", default="ready")
     parser.add_argument("--release", type=Path)
     parser.add_argument("--results-json")
+    parser.add_argument("--attempt-file", type=Path)
     args = parser.parse_args()
+
+    attempt = _claim_attempt(args.attempt_file)
 
     cwd_metadata = os.stat(".")
     _record(
@@ -486,7 +605,16 @@ def main() -> int:
         cwd=os.getcwd(),
         cwd_dev=cwd_metadata.st_dev,
         cwd_ino=cwd_metadata.st_ino,
+        attempt=attempt,
     )
+    if args.scenario == "spawn_descendant":
+        descendant = subprocess.Popen(
+            [sys.executable, "-c", "import signal; signal.pause()"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _record(args.events, "descendant_started", descendant_pid=descendant.pid)
     config = {
         "mode": "default",
         "model": "default-model",
@@ -512,6 +640,18 @@ def main() -> int:
         _record(args.events, "acp_request", method=method)
 
         if method is None and request_id == pending_permission_id:
+            if args.scenario in {
+                "act_late_permission_after_terminal",
+                "act_terminal_then_permission_batch",
+            }:
+                _record(
+                    args.events,
+                    "late_permission_response_received",
+                    scenario=args.scenario,
+                    result=request.get("result"),
+                )
+                pending_permission_id = None
+                continue
             assert request.get("result") == {"outcome": {"outcome": "cancelled"}}, request
             assert pending_prompt_id is not None
             assert args.release is not None
@@ -531,9 +671,28 @@ def main() -> int:
             continue
 
         if method == "initialize":
+            opening_crash = (
+                args.scenario == "opening_eof_crash_loop"
+                or (
+                    args.scenario == "opening_crash_twice_then_ready"
+                    and attempt <= 2
+                )
+            )
+            if opening_crash:
+                _record(args.events, "opening_transport_closing", attempt=attempt)
+                with _OUTPUT_LOCK:
+                    os.close(sys.stdout.fileno())
+                continue
             if args.scenario == "oversized_acp_frame":
                 _write_oversized_acp_frame()
                 continue
+            if args.scenario == "malformed_initialize_response_envelope":
+                _record(args.events, "malformed_initialize_response_sent")
+                _malformed_response_with_result_and_error(request_id)
+                continue
+            if args.scenario == "unknown_initialize_response_id":
+                _record(args.events, "unknown_initialize_response_id_sent")
+                request_id = "not-the-request-id"
             if args.scenario == "hold_initialize":
                 assert args.release is not None
                 _record(args.events, "initialize_blocked")
@@ -581,6 +740,18 @@ def main() -> int:
                 _record(args.events, "oversized_acp_frame_sent", phase="session_new")
                 _write_oversized_acp_frame()
                 continue
+            if (
+                args.scenario == "opening_transient_four_times_then_ready"
+                and attempt <= 4
+            ):
+                _record(
+                    args.events,
+                    "opening_transient_error_sent",
+                    attempt=attempt,
+                    phase="session_new",
+                )
+                _error(request_id, -32099, "mock typed transient startup failure")
+                continue
             if args.scenario == "http_10_before_discovery":
                 status = _mcp_http_10_initialize(server)
                 _record(args.events, "mcp_http_10_rejected", status=status)
@@ -589,6 +760,8 @@ def main() -> int:
                 "mcp_before_configuration",
                 "mcp_between_configuration",
                 "mcp_after_configuration",
+                "opening_eof_before_mcp_ready",
+                "opening_protocol_error_before_mcp_ready",
             }
             if delayed_mcp:
                 pending_mcp_server = server
@@ -652,7 +825,12 @@ def main() -> int:
                                 ],
                             }
                         }
-                        if args.scenario in {"legacy_mode", "legacy_mode_missing"}
+                        if args.scenario
+                        in {
+                            "legacy_mode",
+                            "legacy_mode_drift_before_model",
+                            "legacy_mode_missing",
+                        }
                         else {}
                     ),
                     "configOptions": (
@@ -661,7 +839,11 @@ def main() -> int:
                         else _config_options(
                             config,
                             include_mode=args.scenario
-                            not in {"legacy_mode", "legacy_mode_missing"},
+                            not in {
+                                "legacy_mode",
+                                "legacy_mode_drift_before_model",
+                                "legacy_mode_missing",
+                            },
                         )
                     ),
                 },
@@ -707,9 +889,15 @@ def main() -> int:
                 "act_invalid_then_request_error",
                 "act_invalid_then_transport_loss",
                 "act_malformed_prompt_response",
+                "act_malformed_prompt_response_envelope",
                 "act_ninth_invalid_then_request_error",
                 "act_no_result",
+                "act_late_permission_after_terminal",
+                "act_late_update_after_terminal",
+                "act_ordinary_update_burst",
                 "act_oversized_acp_frame",
+                "act_post_ready_auth_required",
+                "act_post_ready_uncertain_error",
                 "act_request_error_then_success",
                 "act_request_error_internal_collision_then_success",
                 "act_request_error_parse_collision_then_success",
@@ -720,6 +908,11 @@ def main() -> int:
                 "act_submit_results",
                 "act_submit_concurrent",
                 "act_two_turns",
+                "act_terminal_then_permission_batch",
+                "act_unknown_prompt_response_id",
+                "opening_crash_twice_then_ready",
+                "post_ready_config_after_result",
+                "post_ready_config_during_turn",
             }
             or args.scenario.startswith("act_acp_depth_")
         ):
@@ -807,6 +1000,8 @@ def main() -> int:
                 _record(args.events, "oversized_acp_frame_sent")
                 _write_oversized_acp_frame()
                 continue
+            if args.scenario == "post_ready_config_during_turn":
+                continue
             acp_depth = _scenario_depth(args.scenario, "act_acp_depth_")
             if acp_depth is not None:
                 _record(args.events, "acp_depth_frame_sent", depth=acp_depth)
@@ -820,10 +1015,34 @@ def main() -> int:
                 _record(args.events, "malformed_prompt_response_sent")
                 _response(request_id, {"stopReason": "unknown_stop_reason"})
                 continue
+            if args.scenario == "act_malformed_prompt_response_envelope":
+                _record(args.events, "malformed_prompt_response_envelope_sent")
+                _malformed_response_with_result_and_error(request_id)
+                continue
+            if args.scenario == "act_unknown_prompt_response_id":
+                _record(args.events, "unknown_prompt_response_id_sent")
+                _response("not-the-prompt-id", {"stopReason": "end_turn"})
+                continue
             if args.scenario == "act_no_result":
                 _record(args.events, "turn_ended_without_result", turn=prompt_turn)
                 _response(request_id, {"stopReason": "end_turn"})
                 continue
+            if args.scenario == "act_ordinary_update_burst":
+                for index in range(256):
+                    _notification(
+                        "session/update",
+                        {
+                            "sessionId": current_session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": f"ordinary diagnostic update {index}",
+                                },
+                            },
+                        },
+                    )
+                _record(args.events, "ordinary_updates_sent", count=256)
             if args.scenario == "act_invalid_then_transport_loss":
                 rejected = _submit_result(
                     current_mcp_server,
@@ -840,6 +1059,26 @@ def main() -> int:
                 )
                 _record(args.events, "transport_closing_after_invalid")
                 return 0
+            if args.scenario in {
+                "act_post_ready_auth_required",
+                "act_post_ready_uncertain_error",
+            }:
+                if args.scenario == "act_post_ready_uncertain_error":
+                    accepted = _submit_result(
+                        current_mcp_server,
+                        880,
+                        {"value": 9},
+                    )
+                    assert accepted["result"]["isError"] is False, accepted
+                    _record(args.events, "result_submitted_before_uncertain_error")
+                code = (
+                    -32000
+                    if args.scenario == "act_post_ready_auth_required"
+                    else -32800
+                )
+                _record(args.events, "prompt_terminal_error_sent", code=code)
+                _error(request_id, code, "mock terminal prompt error")
+                continue
             request_error_scenarios = {
                 "act_callback_fault_then_request_error",
                 "act_invalid_then_request_error",
@@ -1165,7 +1404,15 @@ def main() -> int:
                 assert prompt_turn == 2
                 assert remembered_token is not None
                 value = {"remembered": remembered_token}
-            if args.scenario == "act_two_turns":
+            if args.scenario in {
+                "act_late_permission_after_terminal",
+                "act_late_update_after_terminal",
+                "act_two_turns",
+                "act_ordinary_update_burst",
+                "opening_crash_twice_then_ready",
+                "post_ready_config_after_result",
+                "act_terminal_then_permission_batch",
+            }:
                 tool_response = _submit_result(
                     current_mcp_server,
                     100 + prompt_turn,
@@ -1173,6 +1420,18 @@ def main() -> int:
                 )
                 assert tool_response["result"]["isError"] is False, tool_response
             _record(args.events, "result_submitted", turn=prompt_turn, value=value)
+            if args.scenario == "act_terminal_then_permission_batch":
+                assert current_session_id is not None
+                pending_permission_id = "permission-after-terminal-batch"
+                _response_and_request_batch(
+                    request_id,
+                    {"stopReason": "end_turn"},
+                    pending_permission_id,
+                    "session/request_permission",
+                    _permission_params(current_session_id),
+                )
+                _record(args.events, "terminal_then_permission_batch_sent")
+                continue
             _response(
                 request_id,
                 {
@@ -1183,6 +1442,50 @@ def main() -> int:
                     )
                 },
             )
+            if args.scenario == "act_late_update_after_terminal":
+                assert args.release is not None
+
+                def send_late_update() -> None:
+                    assert args.release is not None
+                    with args.release.open("rb", buffering=0) as release:
+                        assert release.read(1) == b"1"
+                    _notification(
+                        "session/update",
+                        {
+                            "sessionId": current_session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": "late ordinary diagnostic update",
+                                },
+                            },
+                        },
+                    )
+                    _record(args.events, "late_ordinary_update_sent")
+
+                late_update = threading.Thread(target=send_late_update)
+                late_update.start()
+                background_threads.append(late_update)
+            if args.scenario == "act_late_permission_after_terminal":
+                assert args.release is not None
+
+                def send_late_permission() -> None:
+                    assert args.release is not None
+                    assert current_session_id is not None
+                    with args.release.open("rb", buffering=0) as release:
+                        assert release.read(1) == b"1"
+                    _request(
+                        "permission-after-terminal-idle",
+                        "session/request_permission",
+                        _permission_params(current_session_id),
+                    )
+                    _record(args.events, "late_permission_request_sent")
+
+                pending_permission_id = "permission-after-terminal-idle"
+                late_permission = threading.Thread(target=send_late_permission)
+                late_permission.start()
+                background_threads.append(late_permission)
         elif method == "session/cancel" and args.scenario in {
             "act_cancel_after_result_then_reuse",
             "act_cancel_during_callback_then_reuse",
@@ -1206,26 +1509,7 @@ def main() -> int:
                 _request(
                     pending_permission_id,
                     "session/request_permission",
-                    {
-                        "sessionId": current_session_id,
-                        "toolCall": {
-                            "toolCallId": "cancelled-tool",
-                            "kind": "execute",
-                            "title": "Run a command",
-                        },
-                        "options": [
-                            {
-                                "optionId": "allow-once",
-                                "name": "Allow once",
-                                "kind": "allow_once",
-                            },
-                            {
-                                "optionId": "reject-once",
-                                "name": "Reject once",
-                                "kind": "reject_once",
-                            },
-                        ],
-                    },
+                    _permission_params(current_session_id),
                 )
                 continue
 
@@ -1246,7 +1530,24 @@ def main() -> int:
                 "legacy_mode_applied",
                 mode_id=params["modeId"],
             )
-            _response(request_id, {})
+            if args.scenario == "legacy_mode_drift_before_model":
+                assert current_session_id is not None
+                config["mode"] = "default"
+                _response_and_notification_batch(
+                    request_id,
+                    {},
+                    "session/update",
+                    {
+                        "sessionId": current_session_id,
+                        "update": {
+                            "sessionUpdate": "current_mode_update",
+                            "currentModeId": "default",
+                        },
+                    },
+                )
+                _record(args.events, "legacy_mode_drift_sent")
+            else:
+                _response(request_id, {})
         elif method == "session/set_config_option":
             if args.scenario == "oversized_acp_frame_configure":
                 _record(args.events, "oversized_acp_frame_sent", phase="configure")
@@ -1267,15 +1568,119 @@ def main() -> int:
                 "model_domain_invalid": "model",
                 "effort_domain_invalid": "reasoning_effort",
             }.get(args.scenario)
-            _response(
-                request_id,
-                {
-                    "configOptions": _config_options(
-                        config,
-                        invalid_domain=invalid_domain,
+            config_response = {
+                "configOptions": _config_options(
+                    config,
+                    invalid_domain=invalid_domain,
+                )
+            }
+            if (
+                config_id == "reasoning_effort"
+                and args.scenario == "final_config_response_then_drift"
+            ):
+                assert current_session_id is not None
+                drifted = dict(config)
+                drifted["model"] = "default-model"
+                _response_and_notification_batch(
+                    request_id,
+                    config_response,
+                    "session/update",
+                    {
+                        "sessionId": current_session_id,
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": _config_options(drifted),
+                        },
+                    },
+                )
+                _record(args.events, "final_config_response_then_drift_sent")
+            else:
+                _response(request_id, config_response)
+            if config_id == "reasoning_effort" and args.scenario in {
+                "pre_ready_config_model_drift",
+                "post_ready_config_exact",
+                "post_ready_config_model_drift",
+                "post_ready_config_model_malformed",
+                "post_ready_session_update_malformed",
+                "post_ready_config_after_result",
+                "post_ready_config_during_turn",
+            }:
+                assert args.release is not None
+                assert current_session_id is not None
+                update_config = dict(config)
+                if args.scenario in {
+                    "pre_ready_config_model_drift",
+                    "post_ready_config_model_drift",
+                    "post_ready_config_after_result",
+                    "post_ready_config_during_turn",
+                }:
+                    update_config["model"] = "default-model"
+                config_options = _config_options(update_config)
+                if args.scenario == "post_ready_config_model_malformed":
+                    model_option = next(
+                        option for option in config_options if option["id"] == "model"
                     )
-                },
-            )
+                    model_option["currentValue"] = None
+
+                def send_config_update(
+                    session_id: str = current_session_id,
+                    options: list[dict[str, object]] = config_options,
+                ) -> None:
+                    assert args.release is not None
+                    with args.release.open("rb", buffering=0) as release:
+                        assert release.read(1) == b"1"
+                    if args.scenario == "post_ready_session_update_malformed":
+                        _notification("session/update", {"malformed": True})
+                    else:
+                        _notification(
+                            "session/update",
+                            {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "config_option_update",
+                                    "configOptions": options,
+                                },
+                            },
+                        )
+                    _record(
+                        args.events,
+                        (
+                            "pre_ready_config_update_sent"
+                            if args.scenario == "pre_ready_config_model_drift"
+                            else "post_ready_config_update_sent"
+                        ),
+                    )
+
+                config_update = threading.Thread(target=send_config_update)
+                config_update.start()
+                background_threads.append(config_update)
+            if config_id == "reasoning_effort" and args.scenario in {
+                "opening_eof_before_mcp_ready",
+                "opening_protocol_error_before_mcp_ready",
+            }:
+                if args.scenario == "opening_eof_before_mcp_ready":
+                    _record(args.events, "opening_stdout_closing_before_mcp_ready")
+                    with _OUTPUT_LOCK:
+                        os.close(sys.stdout.fileno())
+                else:
+                    assert args.release is not None
+
+                    def send_protocol_error() -> None:
+                        assert args.release is not None
+                        with args.release.open("rb", buffering=0) as release:
+                            assert release.read(1) == b"1"
+                        _record(
+                            args.events,
+                            "opening_protocol_error_sent_before_mcp_ready",
+                        )
+                        with _OUTPUT_LOCK:
+                            sys.stdout.buffer.write(b"{not-json}\n")
+                            sys.stdout.buffer.flush()
+
+                    protocol_error = threading.Thread(target=send_protocol_error)
+                    protocol_error.start()
+                    background_threads.append(protocol_error)
+                continue
             if (
                 args.scenario == "oversized_acp_frame_mcp_ready"
                 and config_id == "reasoning_effort"
@@ -1302,7 +1707,8 @@ def main() -> int:
                 )
                 pending_mcp_server = None
         else:
-            _error(request_id, -32601, "Method not found")
+            if request_id is not None:
+                _error(request_id, -32601, "Method not found")
 
     for thread in background_threads:
         thread.join()

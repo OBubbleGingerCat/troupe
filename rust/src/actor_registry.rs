@@ -297,6 +297,11 @@ impl ProductionState {
         self.agent_supervisor.is_shutting_down()
     }
 
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn fail_agent_result_listener_for_test(&self) {
+        self.agent_supervisor.fail_result_listener_for_test();
+    }
+
     fn pid_matches(&self) -> bool {
         self.owner_pid.load(Ordering::Acquire) == std::process::id()
     }

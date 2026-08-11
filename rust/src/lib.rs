@@ -29,6 +29,7 @@ mod cue_future;
 mod diagnostics;
 mod effect;
 mod failure;
+mod fork_fd_registry;
 mod invocation;
 mod loader;
 mod mailbox;
@@ -58,10 +59,11 @@ mod _runtime {
     #[pymodule_export]
     use crate::agent_launch::{
         hold_test_configuration_ready, hold_test_mcp_ready, hold_test_opening,
-        hold_test_turn_intake, hold_test_turn_outcome, hold_test_turn_registration,
-        hold_test_turn_settlement, hold_test_turn_submission, hold_test_turn_terminal_delivery,
-        launch_specs_for_test, readiness_gate_states, release_test_configuration_ready,
-        release_test_mcp_ready, release_test_opening, release_test_turn_intake,
+        hold_test_opening_backoff, hold_test_turn_intake, hold_test_turn_outcome,
+        hold_test_turn_registration, hold_test_turn_settlement, hold_test_turn_submission,
+        hold_test_turn_terminal_delivery, launch_specs_for_test, opening_backoff_state,
+        readiness_gate_states, release_test_configuration_ready, release_test_mcp_ready,
+        release_test_opening, release_test_opening_backoff, release_test_turn_intake,
         release_test_turn_outcome, release_test_turn_registration, release_test_turn_settlement,
         release_test_turn_submission, release_test_turn_terminal_delivery, reset_test_launch,
         set_test_launch, turn_gate_states,

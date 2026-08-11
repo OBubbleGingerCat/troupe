@@ -103,7 +103,7 @@ impl AgentSupervisor {
             &slot,
             profile,
             spec,
-            command,
+            *command,
             Arc::clone(&self.result_service),
         );
         slot
@@ -155,6 +155,11 @@ impl AgentSupervisor {
     #[cfg(feature = "agent-test-support")]
     pub(crate) fn is_shutting_down(&self) -> bool {
         lock(&self.control.state).shutting_down
+    }
+
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) fn fail_result_listener_for_test(&self) {
+        self.result_service.fail_listener_for_test();
     }
 }
 

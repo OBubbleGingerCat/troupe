@@ -863,6 +863,9 @@ agent_test_support_absent = not any(
         "_agent_test_reset_launch",
         "_agent_test_hold_opening",
         "_agent_test_release_opening",
+        "_agent_test_hold_opening_backoff",
+        "_agent_test_release_opening_backoff",
+        "_agent_test_opening_backoff_state",
         "_agent_test_hold_configuration_ready",
         "_agent_test_release_configuration_ready",
         "_agent_test_hold_mcp_ready",
@@ -896,6 +899,7 @@ agent_test_support_absent = not any(
     for name in (
         "_agent_shutdown_for_test",
         "_agent_is_shutting_down_for_test",
+        "_agent_fail_result_listener_for_test",
     )
 )
 assert agent_test_support_absent

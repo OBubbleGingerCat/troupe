@@ -1,11 +1,14 @@
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[cfg(feature = "agent-test-support")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
 #[cfg(feature = "agent-test-support")]
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "agent-test-support")]
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 #[cfg(feature = "agent-test-support")]
 use tokio::sync::Notify;
 
@@ -118,6 +121,31 @@ pub(crate) enum ConfigurationOrderV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpeningRequestPhaseV1 {
+    Initialize,
+    SessionNew,
+    Configure,
+}
+
+impl OpeningRequestPhaseV1 {
+    #[cfg(feature = "agent-test-support")]
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "initialize" => Some(Self::Initialize),
+            "session_new" => Some(Self::SessionNew),
+            "configure" => Some(Self::Configure),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OpeningTransientErrorV1 {
+    pub(crate) phase: OpeningRequestPhaseV1,
+    pub(crate) code: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EffectiveValueValidationV1 {
     ExactAdvertisedSelect,
 }
@@ -179,6 +207,8 @@ pub(crate) struct AgentLaunchSpec {
     pub(crate) mcp_registration: McpRegistrationV1,
     pub(crate) autonomous_request_profile: AutonomousRequestProfileId,
     pub(crate) settlement_profile: SettlementProfileId,
+    pub(crate) opening_transient_errors: &'static [OpeningTransientErrorV1],
+    pub(crate) authoritative_prompt_error_codes: &'static [i32],
 }
 
 impl AgentLaunchSpec {
@@ -207,6 +237,8 @@ impl AgentLaunchSpec {
 
 const NO_ARGS: &[&str] = &[];
 const NO_ENVIRONMENT: &[(&str, &str)] = &[];
+const NO_ERROR_CODES: &[i32] = &[];
+const NO_TRANSIENT_OPENING_ERRORS: &[OpeningTransientErrorV1] = &[];
 const CODEX_ENVIRONMENT: &[(&str, &str)] = &[("INITIAL_AGENT_MODE", "agent")];
 
 const CODEX: AgentLaunchSpec = AgentLaunchSpec {
@@ -234,6 +266,8 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     mcp_registration: McpRegistrationV1::SessionNewHttp,
     autonomous_request_profile: AutonomousRequestProfileId("codex-acp@1.1.9"),
     settlement_profile: SettlementProfileId("codex-acp@1.1.9"),
+    opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
+    authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
 
 const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
@@ -261,6 +295,8 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     mcp_registration: McpRegistrationV1::SessionNewHttp,
     autonomous_request_profile: AutonomousRequestProfileId("claude-agent-acp@0.64.2"),
     settlement_profile: SettlementProfileId("claude-agent-acp@0.64.2"),
+    opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
+    authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
 
 const KIMI_ARGS: &[&str] = &["acp"];
@@ -289,6 +325,8 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     mcp_registration: McpRegistrationV1::SessionNewHttp,
     autonomous_request_profile: AutonomousRequestProfileId("kimi-code@0.31.1"),
     settlement_profile: SettlementProfileId("kimi-code@0.31.1"),
+    opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
+    authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
 
 pub(crate) const fn launch_spec(agent: AgentKind) -> &'static AgentLaunchSpec {
@@ -305,12 +343,16 @@ pub(crate) struct ResolvedAgentCommand {
     pub(crate) args: Vec<OsString>,
     pub(crate) environment: Vec<(OsString, OsString)>,
     pub(crate) mode_application: ResolvedModeApplication,
+    pub(crate) opening_transient_errors: Vec<OpeningTransientErrorV1>,
+    pub(crate) authoritative_prompt_error_codes: Arc<[i32]>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) opening_gate: Option<Arc<TestOpeningGate>>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) configuration_ready_gate: Option<Arc<TestOpeningGate>>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) mcp_ready_gate: Option<Arc<TestOpeningGate>>,
+    #[cfg(feature = "agent-test-support")]
+    pub(crate) opening_backoff: Option<Arc<TestOpeningBackoff>>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) turn_gates: TestTurnGates,
 }
@@ -319,7 +361,7 @@ pub(crate) struct ResolvedAgentCommand {
 pub(crate) enum ResolvedLaunch {
     #[cfg_attr(not(feature = "agent-test-support"), allow(dead_code))]
     Inert,
-    Process(ResolvedAgentCommand),
+    Process(Box<ResolvedAgentCommand>),
 }
 
 fn unavailable() -> AgentStartupFailure {
@@ -392,12 +434,16 @@ fn production_command(
         args,
         environment,
         mode_application: spec.mode_application.into(),
+        opening_transient_errors: spec.opening_transient_errors.to_vec(),
+        authoritative_prompt_error_codes: Arc::from(spec.authoritative_prompt_error_codes),
         #[cfg(feature = "agent-test-support")]
         opening_gate: None,
         #[cfg(feature = "agent-test-support")]
         configuration_ready_gate: None,
         #[cfg(feature = "agent-test-support")]
         mcp_ready_gate: None,
+        #[cfg(feature = "agent-test-support")]
+        opening_backoff: None,
         #[cfg(feature = "agent-test-support")]
         turn_gates: TestTurnGates::default(),
     })
@@ -411,8 +457,10 @@ struct TestLaunch {
     opening_gate: Option<Arc<TestOpeningGate>>,
     configuration_ready_gate: Option<Arc<TestOpeningGate>>,
     mcp_ready_gate: Option<Arc<TestOpeningGate>>,
+    opening_backoff: Option<Arc<TestOpeningBackoff>>,
     turn_gates: TestTurnGates,
     legacy_mode_id: Option<String>,
+    transient_opening_errors: Vec<OpeningTransientErrorV1>,
 }
 
 #[cfg(feature = "agent-test-support")]
@@ -435,6 +483,63 @@ pub(crate) struct TestOpeningGate {
     changed: Notify,
     blocking_lock: Mutex<()>,
     blocking_changed: Condvar,
+}
+
+#[cfg(feature = "agent-test-support")]
+#[derive(Debug)]
+pub(crate) struct TestOpeningBackoff {
+    random_words: Mutex<VecDeque<u64>>,
+    arrivals: AtomicU64,
+    releases: AtomicU64,
+    completions: AtomicU64,
+    delays_ms: Mutex<Vec<u64>>,
+    changed: Notify,
+}
+
+#[cfg(feature = "agent-test-support")]
+impl TestOpeningBackoff {
+    fn new(random_words: Vec<u64>) -> Arc<Self> {
+        Arc::new(Self {
+            random_words: Mutex::new(random_words.into()),
+            arrivals: AtomicU64::new(0),
+            releases: AtomicU64::new(0),
+            completions: AtomicU64::new(0),
+            delays_ms: Mutex::new(Vec::new()),
+            changed: Notify::new(),
+        })
+    }
+
+    pub(crate) fn next_random_word(&self) -> Option<u64> {
+        lock(&self.random_words).pop_front()
+    }
+
+    pub(crate) async fn wait(
+        &self,
+        delay_ms: u64,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        lock(&self.delays_ms).push(delay_ms);
+        let arrival = self.arrivals.fetch_add(1, Ordering::AcqRel) + 1;
+        loop {
+            if self.releases.load(Ordering::Acquire) >= arrival {
+                self.completions.fetch_add(1, Ordering::AcqRel);
+                return true;
+            }
+            let changed = self.changed.notified();
+            if self.releases.load(Ordering::Acquire) >= arrival {
+                continue;
+            }
+            tokio::select! {
+                () = changed => {}
+                () = cancellation.cancelled() => return false,
+            }
+        }
+    }
+
+    fn release_one(&self) {
+        self.releases.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_waiters();
+    }
 }
 
 #[cfg(feature = "agent-test-support")]
@@ -511,7 +616,12 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
         let Some(configured) = configured else {
             return Ok(ResolvedLaunch::Inert);
         };
-        Ok(ResolvedLaunch::Process(ResolvedAgentCommand {
+        let mut authoritative_prompt_error_codes =
+            launch_spec(agent).authoritative_prompt_error_codes.to_vec();
+        authoritative_prompt_error_codes.extend([-32603, -32700]);
+        authoritative_prompt_error_codes.sort_unstable();
+        authoritative_prompt_error_codes.dedup();
+        Ok(ResolvedLaunch::Process(Box::new(ResolvedAgentCommand {
             program: resolve_program(&configured.program)?,
             args: configured.args,
             environment: Vec::new(),
@@ -519,42 +629,109 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
                 || launch_spec(agent).mode_application.into(),
                 |mode_id| ResolvedModeApplication::LegacySessionMode { mode_id },
             ),
+            opening_transient_errors: configured.transient_opening_errors,
+            authoritative_prompt_error_codes: Arc::from(authoritative_prompt_error_codes),
             opening_gate: configured.opening_gate,
             configuration_ready_gate: configured.configuration_ready_gate,
             mcp_ready_gate: configured.mcp_ready_gate,
+            opening_backoff: configured.opening_backoff,
             turn_gates: configured.turn_gates,
-        }))
+        })))
     }
 
     #[cfg(not(feature = "agent-test-support"))]
     {
-        production_command(launch_spec(agent)).map(ResolvedLaunch::Process)
+        production_command(launch_spec(agent))
+            .map(Box::new)
+            .map(ResolvedLaunch::Process)
     }
 }
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_set_launch")]
-#[pyo3(signature = (*, program, args, legacy_mode_id=None))]
+#[pyo3(signature = (*, program, args, legacy_mode_id=None, transient_opening_errors=None))]
 pub(crate) fn set_test_launch(
     program: PathBuf,
     args: Vec<OsString>,
     legacy_mode_id: Option<String>,
-) {
+    transient_opening_errors: Option<Vec<(String, i32)>>,
+) -> pyo3::PyResult<()> {
+    let transient_opening_errors = transient_opening_errors
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(phase, code)| {
+            OpeningRequestPhaseV1::parse(&phase)
+                .map(|phase| OpeningTransientErrorV1 { phase, code })
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "transient Opening error phase must be initialize, session_new, or configure",
+                    )
+                })
+        })
+        .collect::<pyo3::PyResult<Vec<_>>>()?;
     *lock(test_launch()) = Some(TestLaunch {
         program,
         args,
         opening_gate: None,
         configuration_ready_gate: None,
         mcp_ready_gate: None,
+        opening_backoff: None,
         turn_gates: TestTurnGates::default(),
         legacy_mode_id,
+        transient_opening_errors,
     });
+    Ok(())
 }
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_reset_launch")]
 pub(crate) fn reset_test_launch() {
     *lock(test_launch()) = None;
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_hold_opening_backoff")]
+#[pyo3(signature = (*, random_words))]
+pub(crate) fn hold_test_opening_backoff(random_words: Vec<u64>) -> pyo3::PyResult<()> {
+    let mut launch = lock(test_launch());
+    let launch = launch.as_mut().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "configure a test launch before holding Opening backoff",
+        )
+    })?;
+    launch.opening_backoff = Some(TestOpeningBackoff::new(random_words));
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_release_opening_backoff")]
+pub(crate) fn release_test_opening_backoff() -> pyo3::PyResult<()> {
+    let launch = lock(test_launch());
+    let backoff = launch
+        .as_ref()
+        .and_then(|launch| launch.opening_backoff.as_ref())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Opening backoff is not held"))?;
+    backoff.release_one();
+    Ok(())
+}
+
+#[cfg(feature = "agent-test-support")]
+#[pyo3::pyfunction(name = "_agent_test_opening_backoff_state")]
+pub(crate) fn opening_backoff_state(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    use pyo3::types::{PyDict, PyDictMethods};
+
+    let launch = lock(test_launch());
+    let backoff = launch
+        .as_ref()
+        .and_then(|launch| launch.opening_backoff.as_ref())
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Opening backoff is not held"))?;
+    let snapshot = PyDict::new(py);
+    snapshot.set_item("arrivals", backoff.arrivals.load(Ordering::Acquire))?;
+    snapshot.set_item("releases", backoff.releases.load(Ordering::Acquire))?;
+    snapshot.set_item("completions", backoff.completions.load(Ordering::Acquire))?;
+    snapshot.set_item("delays_ms", lock(&backoff.delays_ms).clone())?;
+    snapshot.set_item("random_words_remaining", lock(&backoff.random_words).len())?;
+    Ok(snapshot.into_any().unbind())
 }
 
 #[cfg(feature = "agent-test-support")]

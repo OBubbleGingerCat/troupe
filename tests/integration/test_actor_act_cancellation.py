@@ -622,7 +622,7 @@ def test_cued_scope_handoffs_an_escaped_submitted_act_without_remote_wait(
     assert observed == [{"value": 2}]
 
 
-def test_transport_loss_during_supervisor_settlement_breaks_later_turns(
+def test_transport_or_process_loss_during_supervisor_settlement_breaks_later_turns(
     tmp_path: Path,
 ) -> None:
     events = tmp_path / "events.jsonl"
@@ -672,7 +672,7 @@ def test_transport_loss_during_supervisor_settlement_breaks_later_turns(
 
     asyncio.run(scenario())
     assert len(later_failures) == 1
-    assert later_failures[0].code == "transport_lost"
+    assert later_failures[0].code in {"process_exited", "transport_lost"}
 
 
 def test_committed_result_precedes_late_python_task_cancellation(tmp_path: Path) -> None:
@@ -1014,7 +1014,7 @@ def test_process_exit_fails_a_turn_queued_before_worker_intake(tmp_path: Path) -
     asyncio.run(scenario())
     assert completed == [True]
     assert len(failures) == 1
-    assert failures[0].code == "transport_lost"
+    assert failures[0].code in {"process_exited", "transport_lost"}
 
 
 def test_terminal_failure_before_turn_registration_cannot_orphan_active_caller(
@@ -1072,7 +1072,7 @@ def test_terminal_failure_before_turn_registration_cannot_orphan_active_caller(
 
     asyncio.run(scenario())
     assert len(failures) == 1
-    assert failures[0].code == "transport_lost"
+    assert failures[0].code in {"process_exited", "transport_lost"}
 
 
 def test_terminal_failure_before_result_commit_wins_the_caller_outcome(
