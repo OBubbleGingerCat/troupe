@@ -17,7 +17,7 @@ create_exception!(troupe, AgentResultError, AgentTurnError);
 create_exception!(troupe, AgentResultMissingError, AgentResultError);
 
 #[pyclass(frozen, module = "troupe")]
-pub(crate) struct AgentResultIssue {
+pub struct AgentResultIssue {
     #[pyo3(get)]
     path: String,
     #[pyo3(get)]
@@ -26,10 +26,10 @@ pub(crate) struct AgentResultIssue {
     message: String,
 }
 
-pub(crate) struct AgentResultIssueData {
-    pub(crate) path: String,
-    pub(crate) code: &'static str,
-    pub(crate) message: String,
+pub struct AgentResultIssueData {
+    pub path: String,
+    pub code: &'static str,
+    pub message: String,
 }
 
 fn set_code(error: &PyErr, py: Python<'_>, code: &'static str) {
@@ -39,25 +39,25 @@ fn set_code(error: &PyErr, py: Python<'_>, code: &'static str) {
         .expect("agent exception instances accept a code attribute");
 }
 
-pub(crate) fn busy_error(py: Python<'_>) -> PyErr {
+pub fn busy_error(py: Python<'_>) -> PyErr {
     let error = PyErr::new::<AgentSessionBusyError, _>("another act call is already active");
     set_code(&error, py, "concurrent_act");
     error
 }
 
-pub(crate) fn session_broken_error(py: Python<'_>, failure: &AgentSessionFailure) -> PyErr {
+pub fn session_broken_error(py: Python<'_>, failure: &AgentSessionFailure) -> PyErr {
     let error = PyErr::new::<AgentSessionBrokenError, _>(failure.message);
     set_code(&error, py, failure.code);
     error
 }
 
-pub(crate) fn turn_error(py: Python<'_>, code: &'static str, message: &'static str) -> PyErr {
+pub fn turn_error(py: Python<'_>, code: &'static str, message: &'static str) -> PyErr {
     let error = PyErr::new::<AgentTurnError, _>(message);
     set_code(&error, py, code);
     error
 }
 
-pub(crate) fn result_error(
+pub fn result_error(
     py: Python<'_>,
     code: &'static str,
     message: &'static str,
@@ -93,7 +93,7 @@ pub(crate) fn result_error(
     error
 }
 
-pub(crate) fn missing_result_error(py: Python<'_>) -> PyErr {
+pub fn missing_result_error(py: Python<'_>) -> PyErr {
     let error = PyErr::new::<AgentResultMissingError, _>("agent turn ended without a result");
     set_code(&error, py, "missing_result");
     let value = error.value(py);
@@ -110,7 +110,7 @@ pub(crate) fn missing_result_error(py: Python<'_>) -> PyErr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AgentStartupFailure {
+pub struct AgentStartupFailure {
     pub(crate) code: &'static str,
     pub(crate) phase: &'static str,
     pub(crate) message: &'static str,
@@ -118,7 +118,7 @@ pub(crate) struct AgentStartupFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AgentSessionFailure {
+pub struct AgentSessionFailure {
     pub(crate) code: &'static str,
     pub(crate) message: &'static str,
 }
@@ -131,7 +131,7 @@ impl AgentSessionFailure {
         }
     }
 
-    pub(crate) const fn transport_lost() -> Self {
+    pub const fn transport_lost() -> Self {
         Self {
             code: "transport_lost",
             message: "agent session transport was lost",
@@ -175,7 +175,7 @@ impl AgentSessionFailure {
 }
 
 impl AgentStartupFailure {
-    pub(crate) fn start(code: &'static str, phase: &'static str, message: &'static str) -> Self {
+    pub fn start(code: &'static str, phase: &'static str, message: &'static str) -> Self {
         assert_start_phase(phase);
         Self {
             code,
@@ -195,7 +195,7 @@ impl AgentStartupFailure {
         }
     }
 
-    pub(crate) fn to_pyerr(&self, py: Python<'_>) -> PyErr {
+    pub fn to_pyerr(&self, py: Python<'_>) -> PyErr {
         let error = if self.authentication_required {
             PyErr::new::<AgentAuthenticationRequiredError, _>(self.message)
         } else {

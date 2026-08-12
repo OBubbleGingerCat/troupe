@@ -1429,10 +1429,22 @@ dependencies = [
 name = "troupe"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "tokio",
+ "tokio-util",
+ "troupe-agent-runtime",
+ "uuid",
+]
+
+[[package]]
+name = "troupe-agent-runtime"
+version = "0.1.0"
+dependencies = [
  "agent-client-protocol",
  "base64",
  "bytes",
- "clap",
  "futures",
  "getrandom",
  "http-body-util",

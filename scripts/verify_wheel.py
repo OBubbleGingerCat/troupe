@@ -281,6 +281,15 @@ EXPECTED_EXAMPLE_FILES = (
     "cooperative_workers/production.py",
     "hello_actor/__init__.py",
     "hello_actor/production.py",
+    "live_agents/README.md",
+    "live_agents/claude_actor/__init__.py",
+    "live_agents/claude_actor/production.py",
+    "live_agents/codex_actor/__init__.py",
+    "live_agents/codex_actor/production.py",
+    "live_agents/kimi_actor/__init__.py",
+    "live_agents/kimi_actor/production.py",
+    "live_agents/mixed_repository_repair/__init__.py",
+    "live_agents/mixed_repository_repair/production.py",
     "repeating_scenes/__init__.py",
     "repeating_scenes/production.py",
 )
@@ -408,6 +417,33 @@ def _source_examples(source_package: Path) -> dict[str, bytes]:
         raise VerificationError(f"could not inspect source examples: {error}") from error
 
 
+def _source_rust_build_inputs(source_package: Path) -> dict[str, bytes]:
+    repository_root = source_package.parent.parent
+    rust_root = repository_root / "rust"
+    try:
+        paths = [rust_root / "Cargo.toml", rust_root / "Cargo.lock"]
+        paths.extend(
+            path
+            for path in rust_root.rglob("*.rs")
+            if "target" not in path.relative_to(rust_root).parts
+        )
+        crates_root = rust_root / "crates"
+        if crates_root.is_dir():
+            paths.extend(crates_root.rglob("Cargo.toml"))
+        files = {
+            path.relative_to(repository_root).as_posix(): path.read_bytes()
+            for path in paths
+            if path.is_file()
+        }
+        if "rust/Cargo.toml" not in files or "rust/Cargo.lock" not in files:
+            raise VerificationError("source Rust build inputs are incomplete")
+        return files
+    except VerificationError:
+        raise
+    except OSError as error:
+        raise VerificationError(f"could not inspect source Rust inputs: {error}") from error
+
+
 def _validate_sdist(
     source_package: Path,
     sdist: Path,
@@ -418,6 +454,7 @@ def _validate_sdist(
         expected if expected is not None else _validate_source(source_package)
     )
     source_examples = _source_examples(source_package)
+    source_rust_inputs = _source_rust_build_inputs(source_package)
     try:
         with tarfile.open(sdist, "r:*") as archive:
             members = archive.getmembers()
@@ -452,6 +489,23 @@ def _validate_sdist(
             if example_names != expected_example_names:
                 raise VerificationError("sdist examples inventory is not exact")
 
+            rust_prefix = f"{distribution_prefix}rust/"
+            rust_names = {
+                name
+                for name in regular_names
+                if name.startswith(rust_prefix)
+                and (
+                    name.endswith(".rs")
+                    or name.endswith("/Cargo.toml")
+                    or name == f"{rust_prefix}Cargo.lock"
+                )
+            }
+            expected_rust_names = {
+                f"{distribution_prefix}{name}" for name in source_rust_inputs
+            }
+            if rust_names != expected_rust_names:
+                raise VerificationError("sdist Rust build input inventory is not exact")
+
             wrapper_member = archive.extractfile(f"{prefix}__init__.py")
             stub_member = archive.extractfile(f"{prefix}__init__.pyi")
             act_schema_stub_member = archive.extractfile(f"{prefix}act_schema.pyi")
@@ -473,6 +527,10 @@ def _validate_sdist(
                     raise VerificationError(
                         f"sdist example differs from source: {name}"
                     )
+            for name, data in source_rust_inputs.items():
+                member = archive.extractfile(f"{distribution_prefix}{name}")
+                if member is None or member.read() != data:
+                    raise VerificationError(f"sdist Rust input differs from source: {name}")
     except VerificationError:
         raise
     except (OSError, tarfile.TarError, KeyError) as error:

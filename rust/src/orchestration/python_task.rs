@@ -11,8 +11,10 @@ use pyo3::types::{
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::oneshot;
 
-use crate::production::Production;
-use crate::scene_context::{CuedScope, RunBinding, SceneScope, ScopeDriver, TaskFactoryAction};
+use crate::orchestration::production::Production;
+use crate::orchestration::scene_context::{
+    CuedScope, RunBinding, SceneScope, ScopeDriver, TaskFactoryAction,
+};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -856,8 +858,10 @@ mod tests {
     use pyo3::types::{PyAnyMethods, PyList, PyListMethods, PyModule, PyWeakrefReference};
     use tokio::sync::oneshot;
 
-    use crate::actor_registry::ProductionState;
-    use crate::scene_context::{CuedScope, RunBinding, SceneScope, ScopeDriver, TaskFactoryAction};
+    use crate::orchestration::actor_registry::ProductionState;
+    use crate::orchestration::scene_context::{
+        CuedScope, RunBinding, SceneScope, ScopeDriver, TaskFactoryAction,
+    };
 
     use super::{
         HookCallback, ProvisionalPermitStack, SceneTaskCallback, TaskCancelCallback,

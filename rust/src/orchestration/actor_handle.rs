@@ -5,10 +5,10 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 
-use crate::actor::{ActorCapability, ActorCapabilityNode};
-use crate::cue::CueContextError;
-use crate::cue_future::CueCall;
-use crate::scene_context::CUE_CONTEXT_ERROR;
+use crate::orchestration::actor::{ActorCapability, ActorCapabilityNode};
+use crate::orchestration::cue::CueContextError;
+use crate::orchestration::cue_future::CueCall;
+use crate::orchestration::scene_context::CUE_CONTEXT_ERROR;
 
 const HANDLE_DIRECT_ERROR: &str = "ActorHandle cannot be constructed directly";
 
@@ -76,7 +76,7 @@ impl ActorHandle {
         }
         let lineage = binding
             .current_lineage(py)?
-            .filter(crate::python_task::TaskLineage::is_active)
+            .filter(crate::orchestration::python_task::TaskLineage::is_active)
             .ok_or_else(|| CueContextError::new_err(CUE_CONTEXT_ERROR))?;
         let scene = lineage
             .scene()
@@ -139,7 +139,7 @@ impl ActorHandle {
             .ok_or_else(|| PyRuntimeError::new_err("Actor has no agent session"))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let snapshot = session
-                .readiness()
+                .readiness_for_test()
                 .await
                 .map_err(|failure| Python::attach(|py| failure.to_pyerr(py)))?;
             Python::attach(|py| {
@@ -159,11 +159,8 @@ impl ActorHandle {
                 };
                 value.set_item("agent_info", agent_info)?;
                 let capabilities = PyDict::new(py);
-                capabilities.set_item("load_session", snapshot.agent_capabilities.load_session)?;
-                capabilities.set_item(
-                    "mcp_http",
-                    snapshot.agent_capabilities.mcp_capabilities.http,
-                )?;
+                capabilities.set_item("load_session", snapshot.load_session)?;
+                capabilities.set_item("mcp_http", snapshot.mcp_http)?;
                 value.set_item("capabilities", capabilities)?;
                 value.set_item("generation", snapshot.generation)?;
                 value.set_item("server_name", &snapshot.server_name)?;
@@ -191,12 +188,12 @@ mod tests {
     use pyo3::prelude::*;
     use pyo3::types::{PyDict, PyString, PyWeakrefMethods, PyWeakrefReference};
 
-    use crate::actor::{
+    use crate::orchestration::actor::{
         Actor, ActorCapability, ActorCapabilityNode, ActorIdentity, enter_actor_permit,
     };
-    use crate::actor_registry::{NameKey, ProductionState};
-    use crate::cue::CueContextError;
-    use crate::scene_context::{
+    use crate::orchestration::actor_registry::{NameKey, ProductionState};
+    use crate::orchestration::cue::CueContextError;
+    use crate::orchestration::scene_context::{
         AdmissionMetrics, admission_metrics_for_test, reset_admission_metrics_for_test,
     };
 

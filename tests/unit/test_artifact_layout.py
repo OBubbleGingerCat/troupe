@@ -39,38 +39,56 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "troupe"
 EXPECTED_RUST_SOURCES = [
-    "act_call.rs",
-    "act_schema.rs",
-    "actor.rs",
-    "actor_handle.rs",
-    "actor_registry.rs",
-    "agent_adapter.rs",
-    "agent_error.rs",
-    "agent_launch.rs",
-    "agent_process.rs",
-    "agent_profile.rs",
-    "agent_session.rs",
-    "agent_supervisor.rs",
-    "agent_turn.rs",
-    "cli.rs",
-    "cue.rs",
-    "cue_future.rs",
-    "diagnostics.rs",
-    "effect.rs",
-    "failure.rs",
-    "fork_fd_registry.rs",
-    "invocation.rs",
-    "lib.rs",
-    "loader.rs",
-    "mailbox.rs",
-    "production.rs",
-    "python_task.rs",
-    "result_mcp.rs",
-    "runtime.rs",
-    "scene_context.rs",
-    "schema_validation_bridge.rs",
-    "signals.rs",
+    "crates/troupe-agent-runtime/src/adapter/claude.rs",
+    "crates/troupe-agent-runtime/src/adapter/codex.rs",
+    "crates/troupe-agent-runtime/src/adapter/kimi.rs",
+    "crates/troupe-agent-runtime/src/adapter/mod.rs",
+    "crates/troupe-agent-runtime/src/error.rs",
+    "crates/troupe-agent-runtime/src/launch/fd_registry.rs",
+    "crates/troupe-agent-runtime/src/launch/mod.rs",
+    "crates/troupe-agent-runtime/src/launch/process.rs",
+    "crates/troupe-agent-runtime/src/lib.rs",
+    "crates/troupe-agent-runtime/src/profile.rs",
+    "crates/troupe-agent-runtime/src/result/mod.rs",
+    "crates/troupe-agent-runtime/src/result/tests.rs",
+    "crates/troupe-agent-runtime/src/schema/mod.rs",
+    "crates/troupe-agent-runtime/src/schema/tests.rs",
+    "crates/troupe-agent-runtime/src/schema/validation_bridge.rs",
+    "crates/troupe-agent-runtime/src/session/mod.rs",
+    "crates/troupe-agent-runtime/src/session/supervisor.rs",
+    "crates/troupe-agent-runtime/src/session/tests.rs",
+    "crates/troupe-agent-runtime/src/session/turn.rs",
+    "src/act_call.rs",
+    "src/application/cli.rs",
+    "src/application/diagnostics.rs",
+    "src/application/failure.rs",
+    "src/application/invocation.rs",
+    "src/application/loader.rs",
+    "src/application/mod.rs",
+    "src/application/signals.rs",
+    "src/lib.rs",
+    "src/orchestration/actor.rs",
+    "src/orchestration/actor_handle.rs",
+    "src/orchestration/actor_registry.rs",
+    "src/orchestration/cue.rs",
+    "src/orchestration/cue_future.rs",
+    "src/orchestration/effect.rs",
+    "src/orchestration/mailbox.rs",
+    "src/orchestration/mod.rs",
+    "src/orchestration/production.rs",
+    "src/orchestration/python_task.rs",
+    "src/orchestration/runtime.rs",
+    "src/orchestration/scene_context.rs",
 ]
+SYNTHETIC_RUST_BUILD_INPUTS = {
+    "rust/Cargo.lock": b"version = 4\n",
+    "rust/Cargo.toml": b'[workspace]\nmembers = ["crates/troupe-agent-runtime"]\n',
+    "rust/crates/troupe-agent-runtime/Cargo.toml": (
+        b'[package]\nname = "troupe-agent-runtime"\npublish = false\n'
+    ),
+    "rust/crates/troupe-agent-runtime/src/lib.rs": b"pub fn agent_runtime() {}\n",
+    "rust/src/lib.rs": b"pub fn runtime() {}\n",
+}
 
 EXPECTED_WRAPPER = (
     b"from dataclasses import dataclass as _dataclass\n"
@@ -337,6 +355,15 @@ EXAMPLE_FILES = {
     "cooperative_workers/production.py": b"import troupe\n",
     "hello_actor/__init__.py": b"",
     "hello_actor/production.py": b"import troupe\n",
+    "live_agents/README.md": b"# Live agent examples\n",
+    "live_agents/claude_actor/__init__.py": b"",
+    "live_agents/claude_actor/production.py": b"import troupe\n",
+    "live_agents/codex_actor/__init__.py": b"",
+    "live_agents/codex_actor/production.py": b"import troupe\n",
+    "live_agents/kimi_actor/__init__.py": b"",
+    "live_agents/kimi_actor/production.py": b"import troupe\n",
+    "live_agents/mixed_repository_repair/__init__.py": b"",
+    "live_agents/mixed_repository_repair/production.py": b"import troupe\n",
     "repeating_scenes/__init__.py": b"",
     "repeating_scenes/production.py": b"import troupe\n",
 }
@@ -686,6 +713,8 @@ def _synthetic_artifacts(
     missing_sdist_example: str | None = None,
     changed_sdist_example: str | None = None,
     extra_sdist_example: bool = False,
+    missing_sdist_rust: str | None = None,
+    changed_sdist_rust: str | None = None,
     sdist_unsafe: str | None = None,
     wheel_wrapper: bytes = EXPECTED_WRAPPER,
     wheel_stub: bytes | None = EXPECTED_STUB,
@@ -721,6 +750,11 @@ def _synthetic_artifacts(
         (source / "nested" / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
     if extra_source_stub:
         (source / "helper.pyi").write_text("VALUE: int\n", encoding="utf-8")
+
+    for name, data in SYNTHETIC_RUST_BUILD_INPUTS.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
 
     source_examples = tmp_path / "examples"
     for name, data in EXAMPLE_FILES.items():
@@ -770,6 +804,12 @@ def _synthetic_artifacts(
                 f"{sdist_root}/examples/unexpected.txt",
                 b"unexpected\n",
             )
+        for name, data in SYNTHETIC_RUST_BUILD_INPUTS.items():
+            if name == missing_sdist_rust:
+                continue
+            if name == changed_sdist_rust:
+                data = b"changed\n"
+            _add_tar_bytes(archive, f"{sdist_root}/{name}", data)
         if sdist_unsafe == "traversal":
             _add_tar_bytes(archive, "../escape.dat", b"unsafe\n")
         elif sdist_unsafe == "absolute":
@@ -969,6 +1009,8 @@ def test_python_project_metadata_and_build_configuration() -> None:
         "README.md",
         "rust/Cargo.toml",
         "rust/Cargo.lock",
+        "rust/crates/**/Cargo.toml",
+        "rust/crates/**/*.rs",
         "rust/src/**/*.rs",
         "src/troupe/**/*.py",
         "src/troupe/**/*.pyi",
@@ -978,17 +1020,68 @@ def test_python_project_metadata_and_build_configuration() -> None:
 
 def test_rust_manifest_and_source_boundary() -> None:
     config = _toml(ROOT / "rust" / "Cargo.toml")
+    agent_config = _toml(
+        ROOT / "rust" / "crates" / "troupe-agent-runtime" / "Cargo.toml"
+    )
 
+    assert config["workspace"] == {
+        "members": ["crates/troupe-agent-runtime"],
+        "resolver": "3",
+    }
     assert config["lib"]["name"] == "_runtime"
     assert config["lib"]["crate-type"] == ["cdylib"]
-    assert config["features"] == {"default": [], "agent-test-support": []}
+    assert config["features"] == {
+        "default": [],
+        "agent-test-support": ["troupe-agent-runtime/agent-test-support"],
+    }
 
     dependencies = config["dependencies"]
     assert set(dependencies) == {
+        "clap",
+        "pyo3",
+        "pyo3-async-runtimes",
+        "tokio",
+        "tokio-util",
+        "troupe-agent-runtime",
+        "uuid",
+    }
+    assert dependencies["pyo3"] == {
+        "version": "0.29.0",
+        "features": ["abi3-py310", "experimental-async"],
+    }
+    assert dependencies["pyo3-async-runtimes"] == {
+        "version": "0.29.0",
+        "features": ["tokio-runtime"],
+    }
+    assert dependencies["tokio"] == {
+        "version": "1",
+        "features": ["macros", "rt-multi-thread", "sync"],
+    }
+    assert dependencies["tokio-util"] == {
+        "version": "0.7",
+        "features": ["rt"],
+    }
+    assert dependencies["clap"] == {
+        "version": "4",
+        "features": ["derive"],
+    }
+    assert dependencies["uuid"] == {
+        "version": "1",
+        "features": ["v4"],
+    }
+    assert dependencies["troupe-agent-runtime"] == {
+        "path": "crates/troupe-agent-runtime"
+    }
+    assert "extension-module" not in dependencies["pyo3"]["features"]
+
+    assert agent_config["package"]["name"] == "troupe-agent-runtime"
+    assert agent_config["package"]["publish"] is False
+    assert agent_config["features"] == {"default": [], "agent-test-support": []}
+    agent_dependencies = agent_config["dependencies"]
+    assert set(agent_dependencies) == {
         "agent-client-protocol",
         "base64",
         "bytes",
-        "clap",
         "futures",
         "getrandom",
         "http-body-util",
@@ -1002,30 +1095,16 @@ def test_rust_manifest_and_source_boundary() -> None:
         "tokio-util",
         "uuid",
     }
-    assert dependencies["agent-client-protocol"] == {"version": "=2.0.0"}
-    assert dependencies["base64"] == "0.22"
-    assert dependencies["bytes"] == "1"
-    assert dependencies["futures"] == "0.3"
-    assert dependencies["getrandom"] == "0.4"
-    assert dependencies["http-body-util"] == "0.1"
-    assert dependencies["hyper"] == {
+    assert agent_dependencies["agent-client-protocol"] == {"version": "=2.0.0"}
+    assert agent_dependencies["hyper"] == {
         "version": "1",
         "features": ["http1", "server"],
     }
-    assert dependencies["hyper-util"] == {
-        "version": "0.1",
-        "features": ["tokio"],
+    assert agent_dependencies["serde_json"] == {
+        "version": "1",
+        "features": ["arbitrary_precision"],
     }
-    assert dependencies["libc"] == "0.2"
-    assert dependencies["pyo3"] == {
-        "version": "0.29.0",
-        "features": ["abi3-py310", "experimental-async"],
-    }
-    assert dependencies["pyo3-async-runtimes"] == {
-        "version": "0.29.0",
-        "features": ["tokio-runtime"],
-    }
-    assert dependencies["tokio"] == {
+    assert agent_dependencies["tokio"] == {
         "version": "1",
         "features": [
             "io-util",
@@ -1037,42 +1116,26 @@ def test_rust_manifest_and_source_boundary() -> None:
             "time",
         ],
     }
-    assert dependencies["tokio-util"] == {
-        "version": "0.7",
-        "features": ["compat", "rt"],
-    }
-    assert dependencies["serde_json"] == {
-        "version": "1",
-        "features": ["arbitrary_precision"],
-    }
-    assert dependencies["clap"] == {
-        "version": "4",
-        "features": ["derive"],
-    }
-    assert dependencies["uuid"] == {
-        "version": "1",
-        "features": ["v4"],
-    }
-    assert "extension-module" not in dependencies["pyo3"]["features"]
 
     rust_sources = sorted(
-        path.relative_to(ROOT / "rust" / "src").as_posix()
-        for path in (ROOT / "rust" / "src").rglob("*.rs")
+        path.relative_to(ROOT / "rust").as_posix()
+        for path in (ROOT / "rust").rglob("*.rs")
+        if "target" not in path.parts
     )
     assert rust_sources == EXPECTED_RUST_SOURCES
     source_code = "\n".join(
         _rust_without_test_modules(
-            (ROOT / "rust" / "src" / name).read_text(encoding="utf-8")
+            (ROOT / "rust" / name).read_text(encoding="utf-8")
         )
         for name in rust_sources
     )
     assert '"contextvars"' not in source_code
     assert '"ContextVar"' not in source_code
-    effect_source = (ROOT / "rust" / "src" / "effect.rs").read_text(
+    effect_source = (ROOT / "rust" / "src" / "orchestration" / "effect.rs").read_text(
         encoding="utf-8"
     )
     assert "struct CuedScope" not in _rust_without_test_modules(effect_source)
-    mailbox_source = (ROOT / "rust" / "src" / "mailbox.rs").read_text(
+    mailbox_source = (ROOT / "rust" / "src" / "orchestration" / "mailbox.rs").read_text(
         encoding="utf-8"
     )
     mailbox_code = _rust_without_test_modules(mailbox_source)
@@ -1090,7 +1153,7 @@ def test_rust_manifest_and_source_boundary() -> None:
         for package in _toml(ROOT / "rust" / "Cargo.lock")["package"]
     }
     assert "uuid" in locked_packages
-    invocation_source = (ROOT / "rust" / "src" / "invocation.rs").read_text(
+    invocation_source = (ROOT / "rust" / "src" / "application" / "invocation.rs").read_text(
         encoding="utf-8"
     )
     assert "#[derive(Parser)]" in invocation_source
@@ -1148,6 +1211,8 @@ def test_verifier_accepts_pinned_maturin_entry_point_format(tmp_path: Path) -> N
         {"extra_source_example": True},
         {"changed_sdist_example": "actor_pipeline/production.py"},
         {"extra_sdist_example": True},
+        {"missing_sdist_rust": "rust/crates/troupe-agent-runtime/Cargo.toml"},
+        {"changed_sdist_rust": "rust/crates/troupe-agent-runtime/src/lib.rs"},
         {"extra_wheel_python": True},
         {"extra_package_python": True},
         {"forbidden_file": "helper.py"},

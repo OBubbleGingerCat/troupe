@@ -5,12 +5,12 @@ use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 
-use crate::actor::ActorCapability;
-use crate::cue::{Cue, CueContextError};
-use crate::mailbox::CueOperation;
+use crate::orchestration::actor::ActorCapability;
+use crate::orchestration::cue::{Cue, CueContextError};
+use crate::orchestration::mailbox::CueOperation;
 #[cfg(test)]
-use crate::scene_context::{AdmissionMetric, record_admission_metric_for_test};
-use crate::scene_context::{CUE_CONTEXT_ERROR, CuedScope, RunBinding, SceneScope};
+use crate::orchestration::scene_context::{AdmissionMetric, record_admission_metric_for_test};
+use crate::orchestration::scene_context::{CUE_CONTEXT_ERROR, CuedScope, RunBinding, SceneScope};
 
 const REUSE_ERROR: &str = "cannot reuse already awaited coroutine";
 
@@ -98,7 +98,7 @@ impl CueCall {
 
     fn source_for_lineage(
         py: Python<'_>,
-        lineage: &crate::python_task::TaskLineage,
+        lineage: &crate::orchestration::python_task::TaskLineage,
         scene: &Arc<SceneScope>,
     ) -> Py<PyString> {
         lineage
@@ -351,14 +351,14 @@ mod tests {
     use pyo3::prelude::*;
     use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods, PyModule, PyString, PyType};
 
-    use crate::actor::{
+    use crate::orchestration::actor::{
         Actor, ActorCapability, ActorCapabilityNode, ActorIdentity, enter_actor_permit,
     };
-    use crate::actor_handle::ActorHandle;
-    use crate::actor_registry::{NameKey, ProductionState};
-    use crate::mailbox::CueOperation;
-    use crate::python_task::TaskLineage;
-    use crate::scene_context::{
+    use crate::orchestration::actor_handle::ActorHandle;
+    use crate::orchestration::actor_registry::{NameKey, ProductionState};
+    use crate::orchestration::mailbox::CueOperation;
+    use crate::orchestration::python_task::TaskLineage;
+    use crate::orchestration::scene_context::{
         AdmissionMetrics, RunBinding, admission_metrics_for_test, reset_admission_metrics_for_test,
     };
 

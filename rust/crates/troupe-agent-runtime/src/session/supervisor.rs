@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::Notify;
 
-use crate::agent_adapter::agent_adapter;
-use crate::agent_error::AgentStartupFailure;
-use crate::agent_launch::{NpxPreparationKey, ResolvedLaunch, resolve_launch};
-use crate::agent_profile::ResolvedAgentProfile;
-use crate::agent_session::{AgentSessionSlot, NpxPreparationGate, spawn_opening};
-use crate::result_mcp::ResultMcpService;
+use crate::adapter::agent_adapter;
+use crate::error::AgentStartupFailure;
+use crate::launch::{NpxPreparationKey, ResolvedLaunch, ResolvedLaunchKind, resolve_launch};
+use crate::profile::ResolvedAgentProfile;
+use crate::result::ResultMcpService;
+use crate::session::{AgentSessionSlot, NpxPreparationGate, spawn_opening};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -16,7 +16,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub(crate) struct AgentSupervisor {
+pub struct AgentSupervisor {
     result_service: Arc<ResultMcpService>,
     control: Arc<SupervisorControl>,
 }
@@ -33,12 +33,12 @@ struct SupervisorState {
     package_preparations: HashMap<NpxPreparationKey, Arc<NpxPreparationGate>>,
 }
 
-pub(crate) struct AgentCastPermit {
+pub struct AgentCastPermit {
     control: Arc<SupervisorControl>,
 }
 
 impl AgentSupervisor {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             result_service: ResultMcpService::new(),
             control: Arc::new(SupervisorControl {
@@ -53,7 +53,7 @@ impl AgentSupervisor {
         }
     }
 
-    pub(crate) fn begin_cast(&self) -> Result<AgentCastPermit, AgentStartupFailure> {
+    pub fn begin_cast(&self) -> Result<AgentCastPermit, AgentStartupFailure> {
         let mut state = lock(&self.control.state);
         if state.shutting_down {
             return Err(AgentStartupFailure::start(
@@ -69,14 +69,14 @@ impl AgentSupervisor {
         })
     }
 
-    pub(crate) fn resolve(
+    pub fn resolve(
         &self,
         profile: &ResolvedAgentProfile,
     ) -> Result<ResolvedLaunch, AgentStartupFailure> {
         resolve_launch(profile.agent)
     }
 
-    pub(crate) fn start(
+    pub fn start(
         &self,
         permit: &AgentCastPermit,
         profile: Arc<ResolvedAgentProfile>,
@@ -87,13 +87,15 @@ impl AgentSupervisor {
             "an agent cast permit belongs to its Production"
         );
         #[cfg(feature = "agent-test-support")]
-        if matches!(launch, ResolvedLaunch::Inert) {
+        if matches!(launch.0, ResolvedLaunchKind::Inert) {
             let slot = AgentSessionSlot::inert(&profile);
             return slot;
         }
-        let command = match launch {
-            ResolvedLaunch::Process(command) => command,
-            ResolvedLaunch::Inert => unreachable!("inert launch returned after its early branch"),
+        let command = match launch.0 {
+            ResolvedLaunchKind::Process(command) => command,
+            ResolvedLaunchKind::Inert => {
+                unreachable!("inert launch returned after its early branch")
+            }
         };
         let spec = agent_adapter(profile.agent).launch_spec();
         let package_preparation = spec
@@ -151,7 +153,7 @@ impl AgentSupervisor {
         sessions
     }
 
-    pub(crate) async fn shutdown_and_wait(&self) {
+    pub async fn shutdown_and_wait(&self) {
         {
             let mut state = lock(&self.control.state);
             state.shutting_down = true;
@@ -175,18 +177,24 @@ impl AgentSupervisor {
     }
 
     #[cfg(feature = "agent-test-support")]
-    pub(crate) fn is_shutting_down(&self) -> bool {
+    pub fn is_shutting_down(&self) -> bool {
         lock(&self.control.state).shutting_down
     }
 
     #[cfg(feature = "agent-test-support")]
-    pub(crate) fn fail_result_listener_for_test(&self) {
+    pub fn fail_result_listener_for_test(&self) {
         self.result_service.fail_listener_for_test();
     }
 
     #[cfg(feature = "agent-test-support")]
-    pub(crate) fn tracked_session_count(&self) -> usize {
+    pub fn tracked_session_count(&self) -> usize {
         lock(&self.control.state).sessions.len()
+    }
+}
+
+impl Default for AgentSupervisor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -8,7 +8,7 @@ use pyo3::types::{
     PyStringMethods, PyType, PyTypeMethods,
 };
 
-use crate::production::Production;
+use crate::orchestration::production::Production;
 
 create_exception!(troupe._runtime, ProductionLoadError, PyException);
 

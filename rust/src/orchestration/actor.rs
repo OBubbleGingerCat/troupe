@@ -8,15 +8,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType, PyWeakrefReference};
 
 use crate::act_call::ActCall;
-use crate::act_schema::{compile_act_schema, extract_script};
-use crate::actor_registry::{NameKey, ProductionState};
-use crate::agent_session::AgentSessionSlot;
-use crate::cue::{Cue, CueContextError};
-use crate::effect::{Effect, EffectContextError, construct_effect};
-use crate::mailbox::{
+use crate::agent::{AgentSessionSlot, compile_act_schema, extract_script};
+use crate::orchestration::actor_registry::{NameKey, ProductionState};
+use crate::orchestration::cue::{Cue, CueContextError};
+use crate::orchestration::effect::{Effect, EffectContextError, construct_effect};
+use crate::orchestration::mailbox::{
     CueOperation, DispatchOutcome, Mailbox, MailboxTerminalTransition, TerminalAction,
 };
-use crate::scene_context::{CuedScope, RunBinding};
+use crate::orchestration::scene_context::{CuedScope, RunBinding};
 
 pub(crate) const ACTOR_DIRECT_ERROR: &str =
     "Actor instances can only be created by Production.cast_actor()";
@@ -156,7 +155,7 @@ impl Actor {
         let binding = state.active_binding_for_cue().ok()?;
         let lineage = binding.current_lineage(py).ok()??;
         let cued = Some(lineage)
-            .filter(crate::python_task::TaskLineage::is_active)
+            .filter(crate::orchestration::python_task::TaskLineage::is_active)
             .and_then(|lineage| lineage.cued())
             .filter(|cued| {
                 cued.is_active() && cued.actor_identity() == capability.identity_address()
@@ -453,7 +452,7 @@ impl ActorCapability {
 
     #[cfg(test)]
     pub(crate) fn install_running_for_test(&self, operation: CueOperation) {
-        lock(&self.mailbox).running = Some(crate::mailbox::Running::new(operation));
+        lock(&self.mailbox).running = Some(crate::orchestration::mailbox::Running::new(operation));
     }
 
     #[cfg(test)]
@@ -575,11 +574,11 @@ mod tests {
         PyWeakrefReference,
     };
 
-    use crate::actor_handle::ActorHandle;
-    use crate::actor_registry::{NameKey, ProductionState};
-    use crate::cue::Cue;
-    use crate::mailbox::{CueOperation, CueOperationInner, Mailbox, Running};
-    use crate::scene_context::{CuedScope, RunBinding, SceneScope};
+    use crate::orchestration::actor_handle::ActorHandle;
+    use crate::orchestration::actor_registry::{NameKey, ProductionState};
+    use crate::orchestration::cue::Cue;
+    use crate::orchestration::mailbox::{CueOperation, CueOperationInner, Mailbox, Running};
+    use crate::orchestration::scene_context::{CuedScope, RunBinding, SceneScope};
 
     use super::{
         ACTOR_DIRECT_ERROR, Actor, ActorCapability, ActorCapabilityNode, ActorIdentity,

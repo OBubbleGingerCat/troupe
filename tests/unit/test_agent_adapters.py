@@ -33,7 +33,9 @@ def _live_acceptance_module() -> Any:
 
 
 def test_mcp_official_acp_dependency_pins_the_sdk_not_an_unstable_transport() -> None:
-    with (ROOT / "rust" / "Cargo.toml").open("rb") as handle:
+    with (
+        ROOT / "rust" / "crates" / "troupe-agent-runtime" / "Cargo.toml"
+    ).open("rb") as handle:
         manifest = tomllib.load(handle)
 
     assert manifest["dependencies"]["agent-client-protocol"] == {

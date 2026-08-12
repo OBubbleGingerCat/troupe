@@ -6,10 +6,10 @@ use std::process::Stdio;
 
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
-use crate::agent_error::AgentStartupFailure;
-use crate::agent_launch::ResolvedAgentCommand;
-use crate::agent_profile::WorkspaceLeaseV1;
-use crate::fork_fd_registry::{ForkExecGuard, ForkTracked};
+use crate::error::AgentStartupFailure;
+use crate::launch::ResolvedAgentCommand;
+use crate::launch::fd_registry::{ForkExecGuard, ForkTracked};
+use crate::profile::WorkspaceLeaseV1;
 
 const PROC_CHILDREN: &std::ffi::CStr = c"/proc/thread-self/children";
 

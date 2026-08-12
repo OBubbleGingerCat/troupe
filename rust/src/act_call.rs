@@ -5,19 +5,14 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use crate::act_schema::{CompiledActSchema, SchemaValidationMode};
-use crate::agent_error::{
-    AgentResultIssueData, AgentSessionFailure, busy_error, missing_result_error, result_error,
-    session_broken_error, turn_error,
+use crate::agent::{
+    AgentActError, AgentResultIssueData, AgentSessionFailure, AgentSessionSlot,
+    AgentTurnCancelDecision, AgentTurnControl, AgentTurnOutcome, AgentTurnStop, CompiledActSchema,
+    MAX_REPAIRABLE_INVALID_CALLS, PythonSchemaValidationBridge, SchemaValidationMode, busy_error,
+    missing_result_error, result_error, session_broken_error, turn_error,
 };
-use crate::agent_session::{AgentActError, AgentSessionSlot};
-use crate::agent_turn::{
-    AgentTurnCancelDecision, AgentTurnControl, AgentTurnOutcome, AgentTurnStop,
-};
-use crate::cue::CueContextError;
-use crate::result_mcp::MAX_REPAIRABLE_INVALID_CALLS;
-use crate::scene_context::{CuedScope, RunBinding};
-use crate::schema_validation_bridge::PythonSchemaValidationBridge;
+use crate::orchestration::cue::CueContextError;
+use crate::orchestration::scene_context::{CuedScope, RunBinding};
 
 const ACT_CONTEXT_ERROR: &str =
     "Actor.act() must be called on the current actor within its active cued context";
@@ -76,7 +71,7 @@ impl ActCall {
             .ok_or_else(|| CueContextError::new_err(ACT_CONTEXT_ERROR))?;
         let current = binding
             .current_lineage(py)?
-            .filter(crate::python_task::TaskLineage::is_active)
+            .filter(crate::orchestration::python_task::TaskLineage::is_active)
             .and_then(|lineage| lineage.cued())
             .filter(|cued| Arc::ptr_eq(cued, &expected));
         if current.is_none() {

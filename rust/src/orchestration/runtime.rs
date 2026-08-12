@@ -9,10 +9,10 @@ use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::failure::lifecycle_result;
-use crate::production::Production;
-use crate::python_task::{apply_task_factory_action, await_hook, create_scene_task};
-use crate::scene_context::{FACTORY_REPLACED_ERROR, RunBinding, TaskFactoryAction};
+use crate::application::failure::lifecycle_result;
+use crate::orchestration::production::Production;
+use crate::orchestration::python_task::{apply_task_factory_action, await_hook, create_scene_task};
+use crate::orchestration::scene_context::{FACTORY_REPLACED_ERROR, RunBinding, TaskFactoryAction};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

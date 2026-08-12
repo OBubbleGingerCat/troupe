@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::act_schema::{
+use crate::schema::{
     CompiledActSchema, CustomValidationJob, defensive_python_copy, schema_callback_error,
 };
 
@@ -63,7 +63,7 @@ impl ValidationCloseSignal {
 }
 
 #[derive(Debug)]
-pub(crate) struct PythonSchemaValidationBridge {
+pub struct PythonSchemaValidationBridge {
     worker: Py<PyAny>,
     serial: AsyncMutex<()>,
     closed: ValidationCloseSignal,
@@ -87,7 +87,7 @@ struct ValidationCompletion {
 }
 
 impl PythonSchemaValidationBridge {
-    pub(crate) fn new(py: Python<'_>) -> PyResult<Arc<Self>> {
+    pub fn new(py: Python<'_>) -> PyResult<Arc<Self>> {
         let worker = py
             .import("troupe.act_schema")?
             .getattr("_PythonValidationBridge")?

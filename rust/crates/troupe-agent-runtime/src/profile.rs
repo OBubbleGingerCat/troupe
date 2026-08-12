@@ -9,7 +9,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
 
-use crate::fork_fd_registry::ForkTracked;
+use crate::launch::fd_registry::ForkTracked;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum AgentKind {
@@ -60,7 +60,7 @@ pub(crate) struct WorkspaceLeaseV1 {
     pub(crate) acp_cwd_alias: PathBuf,
 }
 
-pub(crate) struct ResolvedAgentProfile {
+pub struct ResolvedAgentProfile {
     pub(crate) agent: AgentKind,
     pub(crate) workspace: WorkspaceLeaseV1,
     pub(crate) requested_model: String,
@@ -74,7 +74,7 @@ fn workspace_error(path: &Path, error: impl std::fmt::Display) -> PyErr {
     ))
 }
 
-pub(crate) fn resolve_agent_profile(profile: &Bound<'_, PyAny>) -> PyResult<ResolvedAgentProfile> {
+pub fn resolve_agent_profile(profile: &Bound<'_, PyAny>) -> PyResult<ResolvedAgentProfile> {
     let py = profile.py();
     let profile_type = py.import("troupe")?.getattr("AgentProfile")?;
     if !profile.is_instance(&profile_type)? {

@@ -11,19 +11,17 @@ use pyo3::PyErr;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::act_schema::{ValidatedActValue, ValidationIssue};
-use crate::agent_adapter::{
-    AcpAgentAdapter, RemotePromptErrorSettlement, SupervisorResponseSettlement,
-};
-use crate::agent_error::AgentSessionFailure;
+use crate::adapter::{AcpAgentAdapter, RemotePromptErrorSettlement, SupervisorResponseSettlement};
+use crate::error::AgentSessionFailure;
 #[cfg(feature = "agent-test-support")]
-use crate::agent_launch::TestTurnGates;
-use crate::agent_session::{
-    ActAdmissionLease, AgentSessionSlot, ProtocolViolationBoundary, SessionTurnLease,
-};
-use crate::result_mcp::{
+use crate::launch::TestTurnGates;
+use crate::result::{
     ArmedResultLease, MAX_REPAIRABLE_INVALID_CALLS, PreparedResultSettlement, ResultAtSettlement,
     ResultCancelHandoff, ResultFailureAtHandoff,
+};
+use crate::schema::{ValidatedActValue, ValidationIssue};
+use crate::session::{
+    ActAdmissionLease, AgentSessionSlot, ProtocolViolationBoundary, SessionTurnLease,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -33,7 +31,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AgentTurnStop {
+pub enum AgentTurnStop {
     MaxTokens,
     MaxTurnRequests,
     Refusal,
@@ -72,7 +70,7 @@ impl PromptResponseProvenance {
 }
 
 #[derive(Debug)]
-pub(crate) enum AgentTurnOutcome {
+pub enum AgentTurnOutcome {
     Success(ValidatedActValue),
     MissingResult,
     ResultRejected {
@@ -86,7 +84,7 @@ pub(crate) enum AgentTurnOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AgentTurnCancelDecision {
+pub enum AgentTurnCancelDecision {
     Accepted,
     Rejected,
 }
@@ -113,7 +111,7 @@ struct AgentTurnControlState {
     caller_outcome: Option<AgentTurnOutcome>,
 }
 
-pub(crate) struct AgentTurnControl {
+pub struct AgentTurnControl {
     slot: Arc<AgentSessionSlot>,
     state: Mutex<AgentTurnControlState>,
     caller_cancelled: CancellationToken,
@@ -134,7 +132,7 @@ pub(crate) struct AgentTurnTerminalCleanup {
 }
 
 impl AgentTurnControl {
-    pub(crate) fn new(slot: Arc<AgentSessionSlot>) -> Arc<Self> {
+    pub fn new(slot: Arc<AgentSessionSlot>) -> Arc<Self> {
         Arc::new(Self {
             slot,
             state: Mutex::new(AgentTurnControlState {
@@ -151,7 +149,7 @@ impl AgentTurnControl {
         })
     }
 
-    pub(crate) fn install_admission(&self, admission: ActAdmissionLease) -> bool {
+    pub fn install_admission(&self, admission: ActAdmissionLease) -> bool {
         let mut state = lock(&self.state);
         if state.phase != AgentTurnControlPhase::Preparing || state.caller_admission.is_some() {
             drop(state);
@@ -225,7 +223,7 @@ impl AgentTurnControl {
         self.slot.queue_turn(request, self).map(|()| true)
     }
 
-    pub(crate) fn request_cancel(&self) -> AgentTurnCancelDecision {
+    pub fn request_cancel(&self) -> AgentTurnCancelDecision {
         let mut pre_submission_cleanup = None;
         let mut caller_admission = None;
         let mut caller_response = None;
@@ -619,7 +617,7 @@ impl AgentTurnControl {
         }
     }
 
-    pub(crate) fn finish_caller(&self) {
+    pub fn finish_caller(&self) {
         let caller_admission = {
             let mut state = lock(&self.state);
             if state.phase == AgentTurnControlPhase::CallerOutcomeCommitted {
@@ -1043,7 +1041,7 @@ fn outcome_from_settlement(
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "agent-test-support")]
-    use crate::agent_launch::TestOpeningGate;
+    use crate::launch::TestOpeningGate;
     use pyo3::Python;
     use pyo3::exceptions::PyValueError;
     use serde_json::json;
@@ -1091,7 +1089,7 @@ mod tests {
     fn terminal_response_before_result_failure_handoff(
         failure: ResultFailureAtHandoff,
     ) -> AgentTurnOutcome {
-        let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Codex);
+        let adapter = crate::adapter::agent_adapter(crate::profile::AgentKind::Codex);
         let slot = AgentSessionSlot::new();
         let control = AgentTurnControl::new(slot);
         let (response, mut caller) = oneshot::channel();
@@ -1120,7 +1118,7 @@ mod tests {
     }
 
     fn successful_response_at_protocol_boundary() -> (AgentTurnCompletion, AgentTurnOutcome) {
-        let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Kimi);
+        let adapter = crate::adapter::agent_adapter(crate::profile::AgentKind::Kimi);
         let slot = AgentSessionSlot::new();
         let control = AgentTurnControl::new(slot);
         let (response, mut caller) = oneshot::channel();
@@ -1146,7 +1144,7 @@ mod tests {
 
     #[test]
     fn prompt_error_classifier_uses_response_provenance_not_peer_controlled_payloads() {
-        let adapter = crate::agent_adapter::agent_adapter(crate::agent_profile::AgentKind::Codex);
+        let adapter = crate::adapter::agent_adapter(crate::profile::AgentKind::Codex);
         let remote = Error::new(-32603, "remote request failure");
         assert_eq!(
             classify_prompt_error(&remote, true, false, adapter, &[-32603, -32700]),
