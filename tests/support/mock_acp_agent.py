@@ -970,6 +970,15 @@ def main() -> int:
         cwd_ino=cwd_metadata.st_ino,
         attempt=attempt,
     )
+    if (
+        args.scenario == "npx_transient_four_times_then_ready"
+        and attempt <= 4
+    ):
+        print("npm error code EAI_AGAIN", file=sys.stderr, flush=True)
+        return 1
+    if args.scenario == "npx_package_version_missing":
+        print("npm error code ETARGET", file=sys.stderr, flush=True)
+        return 1
     if args.scenario == "codex_path_scrubbed":
         _record(
             args.events,

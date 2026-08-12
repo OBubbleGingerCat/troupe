@@ -46,6 +46,7 @@ use crate::schema_validation_bridge::PythonSchemaValidationBridge;
 const ACP_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
 const ACP_JSON_MAX_DEPTH: usize = 64;
 const OPENING_CRASH_LOOP_THRESHOLD: u8 = 3;
+const NPM_ERROR_CODE_LINE_MAX_BYTES: usize = 128;
 
 fn opening_retry_window_ms(ordinal: u32) -> (u64, u64) {
     let exponent = ordinal.min(7);
@@ -116,12 +117,14 @@ pub(crate) struct NpxPreparationGate {
 #[derive(Default)]
 struct NpxPreparationState {
     ready: bool,
+    failure: Option<AgentStartupFailure>,
     leader: Option<u64>,
     next_generation: u64,
 }
 
 pub(crate) enum NpxPreparationAdmission {
     Prepared,
+    Failed(AgentStartupFailure),
     Leader(NpxPreparationLeader),
     Cancelled,
 }
@@ -148,6 +151,9 @@ impl NpxPreparationGate {
             let changed = self.changed.notified();
             {
                 let mut state = lock(&self.state);
+                if let Some(failure) = &state.failure {
+                    return NpxPreparationAdmission::Failed(failure.clone());
+                }
                 if state.ready {
                     return NpxPreparationAdmission::Prepared;
                 }
@@ -183,6 +189,21 @@ impl NpxPreparationLeader {
         drop(state);
         self.gate.changed.notify_waiters();
     }
+
+    fn mark_failed(&self, failure: AgentStartupFailure) {
+        let mut state = lock(&self.gate.state);
+        if state.leader == Some(self.generation) {
+            state.failure = Some(failure);
+            state.leader = None;
+            self.completed.store(true, Ordering::Release);
+        }
+        drop(state);
+        self.gate.changed.notify_waiters();
+    }
+
+    fn is_completed(&self) -> bool {
+        self.completed.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for NpxPreparationLeader {
@@ -196,6 +217,92 @@ impl Drop for NpxPreparationLeader {
         }
         drop(state);
         self.gate.changed.notify_waiters();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NpxPreparationFailureKind {
+    Transient,
+    Deterministic,
+}
+
+#[derive(Default)]
+struct NpxPreparationStderrClassifier {
+    line: Vec<u8>,
+    line_overflowed: bool,
+    evidence: Option<NpxPreparationFailureKind>,
+    conflicting_evidence: bool,
+}
+
+impl NpxPreparationStderrClassifier {
+    fn push(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                self.finish_line();
+            } else if !self.line_overflowed {
+                if self.line.len() < NPM_ERROR_CODE_LINE_MAX_BYTES {
+                    self.line.push(byte);
+                } else {
+                    self.line.clear();
+                    self.line_overflowed = true;
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> Option<NpxPreparationFailureKind> {
+        self.finish_line();
+        (!self.conflicting_evidence)
+            .then_some(self.evidence)
+            .flatten()
+    }
+
+    fn finish_line(&mut self) {
+        if !self.line_overflowed {
+            let line = self.line.strip_suffix(b"\r").unwrap_or(&self.line);
+            if let Some(kind) = classify_npm_error_code_line(line) {
+                match self.evidence {
+                    None => self.evidence = Some(kind),
+                    Some(previous) if previous == kind => {}
+                    Some(_) => self.conflicting_evidence = true,
+                }
+            }
+        }
+        self.line.clear();
+        self.line_overflowed = false;
+    }
+}
+
+fn classify_npm_error_code_line(line: &[u8]) -> Option<NpxPreparationFailureKind> {
+    let code = line
+        .strip_prefix(b"npm error code ")
+        .or_else(|| line.strip_prefix(b"npm ERR! code "))?;
+    if code.is_empty()
+        || !code
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+    {
+        return None;
+    }
+    match code {
+        b"E404" | b"ETARGET" => Some(NpxPreparationFailureKind::Deterministic),
+        b"EAI_AGAIN"
+        | b"EADDRINUSE"
+        | b"ECONNECTIONTIMEOUT"
+        | b"ECONNREFUSED"
+        | b"ECONNRESET"
+        | b"EIDLETIMEOUT"
+        | b"ERESPONSETIMEOUT"
+        | b"ESOCKETTIMEDOUT"
+        | b"ETIMEDOUT"
+        | b"ETRANSFERTIMEOUT"
+        | b"E408"
+        | b"E420"
+        | b"E429" => Some(NpxPreparationFailureKind::Transient),
+        [b'E', b'5', tens, ones] if tens.is_ascii_digit() && ones.is_ascii_digit() => {
+            Some(NpxPreparationFailureKind::Transient)
+        }
+        _ => None,
     }
 }
 
@@ -2084,6 +2191,13 @@ async fn open_agent_session(
     let package_leader = match package_preparation {
         Some(gate) => match gate.enter(&cancellation).await {
             NpxPreparationAdmission::Prepared => None,
+            NpxPreparationAdmission::Failed(failure) => {
+                if cancellation.is_cancelled() {
+                    return;
+                }
+                commit_failure(&slot, failure);
+                return;
+            }
             NpxPreparationAdmission::Leader(leader) => Some(leader),
             NpxPreparationAdmission::Cancelled => return,
         },
@@ -2316,10 +2430,22 @@ async fn run_opening_attempt(
         mut stderr,
         mut shutdown,
     } = spawned;
+    let classify_npx_preparation = package_leader.is_some();
     let stderr_drain = Some({
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            let mut classifier = NpxPreparationStderrClassifier::default();
             let mut buffer = [0_u8; 8192];
-            while stderr.read(&mut buffer).await.is_ok_and(|read| read != 0) {}
+            while let Ok(read) = stderr.read(&mut buffer).await {
+                if read == 0 {
+                    break;
+                }
+                if classify_npx_preparation {
+                    classifier.push(&buffer[..read]);
+                }
+            }
+            classify_npx_preparation
+                .then(|| classifier.finish())
+                .flatten()
         })
     });
 
@@ -2701,7 +2827,7 @@ async fn run_opening_attempt(
         result_service.revoke_route(&route).await;
     }
     terminate_and_reap(&mut guardian, &mut shutdown).await;
-    wait_for_stderr_drain(stderr_drain).await;
+    let npx_preparation_failure = wait_for_stderr_drain(stderr_drain).await;
 
     if cancelled {
         return OpeningAttemptOutcome::Cancelled;
@@ -2734,6 +2860,21 @@ async fn run_opening_attempt(
             phase,
             "agent connection violated the protocol during startup",
         ));
+    }
+    if let Some(package_leader) = package_leader
+        && !package_leader.is_completed()
+        && let Some(failure_kind) = npx_preparation_failure
+    {
+        match failure_kind {
+            NpxPreparationFailureKind::Transient => {
+                return OpeningAttemptOutcome::Transient;
+            }
+            NpxPreparationFailureKind::Deterministic => {
+                let failure = preparation_failure();
+                package_leader.mark_failed(failure.clone());
+                return OpeningAttemptOutcome::Terminal(failure);
+            }
+        }
     }
     let observation = match completion {
         OpeningAttemptCompletion::Child => OpeningFailureObservation::ProcessExited,
@@ -3312,10 +3453,13 @@ fn revalidate_workspace(
     Ok(())
 }
 
-async fn wait_for_stderr_drain(stderr_drain: Option<tokio::task::JoinHandle<()>>) {
+async fn wait_for_stderr_drain(
+    stderr_drain: Option<tokio::task::JoinHandle<Option<NpxPreparationFailureKind>>>,
+) -> Option<NpxPreparationFailureKind> {
     if let Some(stderr_drain) = stderr_drain {
-        let _ = stderr_drain.await;
+        return stderr_drain.await.unwrap_or(None);
     }
+    None
 }
 
 fn commit_failure(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
@@ -3405,6 +3549,66 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn deterministic_npx_preparation_failure_is_cached_for_waiters() {
+        let gate = NpxPreparationGate::new();
+        let cancellation = CancellationToken::new();
+        let leader = match gate.enter(&cancellation).await {
+            NpxPreparationAdmission::Leader(leader) => leader,
+            _ => panic!("the first preparation admission must lead"),
+        };
+        let waiter = tokio::spawn({
+            let gate = Arc::clone(&gate);
+            let cancellation = cancellation.clone();
+            async move { gate.enter(&cancellation).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        let failure = preparation_failure();
+        leader.mark_failed(failure.clone());
+
+        match waiter.await.unwrap() {
+            NpxPreparationAdmission::Failed(observed) => assert_eq!(observed, failure),
+            _ => panic!("a deterministic preparation failure must be shared"),
+        }
+        match gate.enter(&cancellation).await {
+            NpxPreparationAdmission::Failed(observed) => assert_eq!(observed, failure),
+            _ => panic!("the gate must retain its deterministic failure"),
+        }
+    }
+
+    #[test]
+    fn npx_preparation_classifier_accepts_only_closed_npm_code_records() {
+        let mut transient = NpxPreparationStderrClassifier::default();
+        transient.push(b"npm error co");
+        transient.push(b"de EAI_AGAIN\n");
+        assert_eq!(
+            transient.finish(),
+            Some(NpxPreparationFailureKind::Transient)
+        );
+
+        let mut deterministic = NpxPreparationStderrClassifier::default();
+        deterministic.push(b"npm ERR! code ETARGET\r\n");
+        assert_eq!(
+            deterministic.finish(),
+            Some(NpxPreparationFailureKind::Deterministic)
+        );
+
+        let mut unknown = NpxPreparationStderrClassifier::default();
+        unknown.push(b"network request failed with EAI_AGAIN\n");
+        assert_eq!(unknown.finish(), None);
+
+        let mut conflicting = NpxPreparationStderrClassifier::default();
+        conflicting.push(b"npm error code EAI_AGAIN\nnpm error code ETARGET\n");
+        assert_eq!(conflicting.finish(), None);
+
+        let mut oversized = NpxPreparationStderrClassifier::default();
+        oversized.push(&[b'x'; NPM_ERROR_CODE_LINE_MAX_BYTES + 1]);
+        oversized.push(b"npm error code EAI_AGAIN\n");
+        assert_eq!(oversized.finish(), None);
+    }
+
     #[test]
     fn post_ready_mode_transition_requires_both_pinned_claude_snapshots() {
         let mut transition = PostReadyModeTransition::default();
@@ -3488,9 +3692,10 @@ mod tests {
         let (release, released) = oneshot::channel();
         let stderr_drain = tokio::spawn(async move {
             let _ = released.await;
+            None
         });
         let cleanup = tokio::spawn(async move {
-            wait_for_stderr_drain(Some(stderr_drain)).await;
+            assert_eq!(wait_for_stderr_drain(Some(stderr_drain)).await, None);
         });
         tokio::task::yield_now().await;
         assert!(!cleanup.is_finished());

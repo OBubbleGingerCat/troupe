@@ -222,6 +222,111 @@ def test_typed_transient_opening_failure_retries_past_crash_loop_threshold(
     ]
 
 
+def test_npx_transient_acquisition_retries_past_crash_loop_threshold(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    attempts = tmp_path / "attempts"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, "npx_transient_four_times_then_ready", attempts)
+    _native()._agent_test_hold_opening_backoff(
+        random_words=[126, 251, 501, 1001]
+    )
+    runtime = _native()._Runtime()
+    snapshots: list[dict[str, object]] = []
+
+    class NpxTransientProduction(troupe.Production):
+        async def scene(self) -> None:
+            handle = self.cast_actor(
+                troupe.Actor,
+                name="npx-transient-opening",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            for arrival in range(1, 5):
+                state = await _wait_for_backoff_arrivals(arrival)
+                assert state["arrivals"] == arrival
+                _native()._agent_test_release_opening_backoff()
+            snapshots.append(await handle._agent_ready_for_test())  # type: ignore[attr-defined]
+            await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(NpxTransientProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+    assert snapshots[0]["generation"] == 5
+    assert _native()._agent_test_opening_backoff_state()["delays_ms"] == [
+        125,
+        250,
+        500,
+        1000,
+    ]
+    assert len([row for row in _events(events) if row["event"] == "process_started"]) == 5
+
+
+def test_npx_missing_package_failure_is_cached_for_shared_waiters(
+    tmp_path: Path,
+) -> None:
+    events = tmp_path / "events.jsonl"
+    attempts = tmp_path / "attempts"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _configure_mock(events, "npx_package_version_missing", attempts)
+    runtime = _native()._Runtime()
+    failures: list[BaseException] = []
+
+    class NpxMissingProduction(troupe.Production):
+        async def scene(self) -> None:
+            first = self.cast_actor(
+                troupe.Actor,
+                name="npx-missing-first",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            second = self.cast_actor(
+                troupe.Actor,
+                name="npx-missing-second",
+                agent_profile=_profile(workspace),
+                actor_args=(),
+                actor_kwargs={},
+            )
+            failures.extend(
+                await asyncio.gather(
+                    first._agent_ready_for_test(),  # type: ignore[attr-defined]
+                    second._agent_ready_for_test(),  # type: ignore[attr-defined]
+                    return_exceptions=True,
+                )
+            )
+            await self._agent_shutdown_for_test()  # type: ignore[attr-defined]
+            runtime.request_shutdown()
+
+    async def scenario() -> None:
+        await asyncio.wait_for(
+            asyncio.shield(runtime.run(NpxMissingProduction([]))),
+            HARNESS_TIMEOUT,
+        )
+
+    asyncio.run(scenario())
+    assert len(failures) == 2
+    assert all(type(error) is troupe.AgentSessionStartError for error in failures)
+    assert [error.code for error in failures] == [  # type: ignore[attr-defined]
+        "preparation_failed",
+        "preparation_failed",
+    ]
+    assert [error.phase for error in failures] == [  # type: ignore[attr-defined]
+        "preparation",
+        "preparation",
+    ]
+    assert len([row for row in _events(events) if row["event"] == "process_started"]) == 1
+
+
 def test_clean_eof_while_waiting_for_mcp_readiness_starts_backoff(
     tmp_path: Path,
 ) -> None:
