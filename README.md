@@ -1,17 +1,164 @@
-# troupe
+# Troupe
 
-Troupe runs a Python-defined production on a Rust/Tokio runtime. The supported
-release target is Linux x86_64 glibc only.
+Troupe is a runtime for building long-running, autonomous agent workflows in
+Python. A Troupe program casts stateful **Actors**, sends them work as **Cues**,
+and receives owned **Effects**. Each Actor owns one persistent Codex, Claude, or
+Kimi session, with the provider's native coding harness available for real
+repository work.
+
+> Troupe is not a stateless model API wrapper. It is the orchestration layer
+> around stateful roles: your Python code decides who acts next, each Actor keeps
+> its own working context, and schemas turn agent work back into dependable
+> application data.
+
+The orchestration API is Python. Lifecycle, scheduling, cancellation, agent
+processes, and ACP transport run on a Rust/Tokio runtime.
+
+## The runtime model
+
+One agent turn travels through the system like this:
+
+```mermaid
+flowchart LR
+    Scene["Production scene<br/>Python orchestration"]
+    Actor["Actor<br/>long-lived role"]
+    Session["Persistent agent session<br/>Codex / Claude / Kimi"]
+    Validate["Troupe result tool<br/>schema validation"]
+
+    Scene -->|"cue(instruction)"| Actor
+    Actor -->|"act(script, output_schema)"| Session
+    Session -->|"submit JSON over MCP"| Validate
+    Validate -->|"validated dict"| Actor
+    Actor -->|"Effect(s)"| Scene
+```
+
+The six concepts are deliberately small:
+
+| Concept | What it means |
+| --- | --- |
+| **Production** | The top-level program. It owns lifecycle, Actors, and orchestration. |
+| **Scene** | One run of the Production's orchestration logic. It decides which Actors to cue and how to combine their Effects. |
+| **Actor** | A named, long-lived role. It handles one Cue at a time and owns one contextual agent session. |
+| **Cue** | An instruction dictionary sent from a Scene to an Actor. |
+| **Effect** | An Actor-owned domain result returned to the Scene. |
+| **Agent session** | The provider's coding harness reached through Agent Client Protocol (ACP). Context stays with its Actor for that Actor's lifetime. |
+
+This gives a workflow both memory and structure. Cues sent to one Actor execute
+in strict FIFO order, while different Actors progress cooperatively. A later Cue
+can ask the same Actor to use facts learned earlier, without copying its entire
+conversation into another prompt.
+
+```mermaid
+sequenceDiagram
+    participant Scene as Production Scene
+    participant Codex as Codex investigator (persistent)
+    participant Claude as Claude reviewer (persistent)
+    participant Kimi as Kimi repairer (persistent)
+
+    Scene->>Codex: Cue 1 - investigate
+    Codex-->>Scene: Investigation Effect
+    Scene->>Claude: Cue 2 - review investigation
+    Claude-->>Scene: ContractReview Effect
+    Scene->>Kimi: Cue 3 - repair from reviewed contract
+    Kimi-->>Scene: RepositoryRepair Effect
+    Scene->>Codex: Cue 4 - recall earlier context
+    Codex-->>Scene: ContextRecall Effect
+```
+
+That diagram is also a real repository example: Codex investigates a defect,
+Claude checks the behavioral contract, Kimi repairs and commits the code, and
+the original Codex Actor later recalls context from its first turn. See the
+[mixed-provider Production](examples/live_agents/mixed_repository_repair/production.py).
+
+Actor context is durable within the running Troupe process. V1 does not persist
+or restore provider sessions across a process restart.
+
+## An agent-backed Actor
+
+The open-ended part of an Actor is one `act()` call. Its script tells the agent
+what to do; its schema defines the only result that the Production will accept:
+
+```python
+from pathlib import Path
+import troupe
+
+
+class Review(troupe.Effect):
+    def __init__(self, payload):
+        self.payload = payload
+
+
+class Reviewer(troupe.Actor):
+    async def cued(self, cue):
+        result = await self.act(
+            script=f"Review the change in {cue.instruction['path']}.",
+            output_schema={
+                "decision": troupe.act_schema.StrValue(
+                    description="the review decision",
+                    choices=["accept", "reject"],
+                ),
+                "summary": troupe.act_schema.StrValue(
+                    description="a concise explanation of the decision",
+                    min_length=1,
+                ),
+            },
+        )
+        review = self.make_effect(
+            Review,
+            effect_args=(result,),
+            effect_kwargs={},
+        )
+        return (review,)
+```
+
+Cast the Actor once from the Production, then cue it from a Scene:
+
+```python
+profile = troupe.AgentProfile(
+    agent="codex",
+    workspace=Path("/path/to/repository"),
+    model="gpt-5.6-sol",
+    effort="max",
+)
+
+self.reviewer = self.cast_actor(
+    Reviewer,
+    name="reviewer",
+    agent_profile=profile,
+    actor_args=(),
+    actor_kwargs={},
+)
+
+# Inside Production.scene():
+(review,) = await self.reviewer.cue({"path": "src/payment.py"})
+```
+
+`cast_actor()` is synchronous: it submits session creation to the runtime and
+returns an `ActorHandle`. If the session is still starting, the first
+`Actor.act()` waits until it is ready. The result is a validated,
+JSON-compatible `dict`, not the agent's raw text stream.
+
+Troupe does not try to scrape JSON from a chat message. For each turn, it exposes
+a schema-specific result tool to the session through Model Context Protocol
+(MCP). Invalid submissions go back to the agent for correction; only an accepted
+object crosses back into the Actor.
 
 ## Install and run
 
-Install Troupe into a Python environment:
+Troupe currently supports GIL-enabled CPython 3.10 through 3.14 on Linux x86_64
+glibc. Install it into a Python environment:
 
 ```console
 pip install troupe
 ```
 
-After activating that environment, run a production package directly:
+Codex, Claude, and Kimi must already be logged in through their own CLI. Troupe
+does not collect API keys or add an authentication flow. Codex and Claude use
+pinned ACP adapter packages and require Node.js with npm and `npx`; Kimi uses
+the ACP server in Kimi Code 0.31.1.
+
+After activating the environment, run a production package directly. Arguments
+after `--` are passed untouched to the Production constructor:
 
 ```console
 troupe --production /path/to/my_production -- --value 7 input.txt
@@ -21,32 +168,25 @@ The direct command does not require `uv run`.
 `uv run troupe` only selects the project environment when its executable
 directory is not already on `PATH`.
 
-Troupe ships one thin `troupe/__init__.py` wrapper containing the immutable
-`AgentProfile` dataclass. Loading, lifecycle control, cancellation, signals,
-diagnostics, and the console command are implemented in the Rust extension.
-The `troupe/__init__.pyi` stub describes
-the public `AgentProfile` and agent exceptions together with the `Production`,
-`Actor`, `ActorHandle`, `Cue`, `CueContextError`, `Effect`, and
-`EffectContextError` API.
+## Start with the examples
 
-## Examples
+[Progressive examples](examples/README.md) introduce Actors and Effects, repeated
+Scenes, Actor-to-Actor routing, cooperative workers, and cancellation in small,
+deterministic steps. [Live agent examples](examples/live_agents/README.md) then
+exercise Codex, Claude, Kimi, and the mixed-provider repository repair against
+real provider CLIs. Every example uses the same `troupe --production` command as
+deployment.
 
-[Progressive examples](examples/README.md) cover a first Actor and Effect,
-continuously repeated Scenes, Actor-to-Actor routing, cooperative workers with
-per-Actor FIFO execution, and structured cancellation cleanup. Every example is
-a production package that runs through the same `troupe --production` command
-used in deployment.
-
-## Production API
+## Complete Production example
 
 The constructor receives a `list[str]` equivalent to `sys.argv[1:]`: these are
 the untouched tokens after `--` in the Troupe command. Construction is a
 synchronous constructor. Lifecycle work belongs in async `start()`, `scene()`, and `stop()`.
 
-This complete production casts two Actors, sends a cue, receives a real Effect,
-and writes a JSON result to the file descriptor supplied on the command line.
-The marked source below is also the source exercised by the documentation and
-literal-console acceptance tests.
+This deterministic Production casts two Actors, sends a Cue, receives a real
+Effect, and writes a JSON result to the file descriptor supplied on the command
+line. It demonstrates the orchestration API without spending a provider turn.
+The marked source is also exercised by documentation and literal-console tests.
 
 <!-- BEGIN README PRODUCTION -->
 ```python
@@ -131,7 +271,7 @@ The same source can be inspected without maintaining a second example:
 
 ```
 
-## Actor agents and structured results
+## Structured agent results
 
 `cast_actor()` requires an `AgentProfile`. It submits creation of the Actor's
 agent session immediately and remains synchronous; the first `Actor.act()`
@@ -171,6 +311,8 @@ result = await self.act(
     },
 )
 ```
+
+### Custom schema values
 
 Subclass `SchemaValue` when the built-ins cannot express a domain. This sync
 validator accepts values from multiple disjoint ranges. `ValueRejected` means
@@ -228,12 +370,18 @@ except asyncio.CancelledError:
     raise
 ```
 
+## Scheduling and lifecycle
+
+### Production lifecycle
+
 The runtime calls the hooks serially. A start failure means startup failed and
 stop is not called. A non-cancellation scene failure is retained and stop still
 runs. A scene `CancelledError` is normal shutdown; cancellation waits for the
 scene's cleanup before stop. There is no cancellation grace period. A scene
 that swallows `CancelledError` owns the resulting cleanup and completion delay.
 In diagnostics, start, scene, and stop are separate failure phases.
+
+### Task lineage and Cue runners
 
 Scene and Actor cue work use registered task lineage on one captured event-loop
 thread. Tasks created through `asyncio.create_task()` or `loop.create_task()`
@@ -255,6 +403,8 @@ report `cannot reuse already awaited coroutine`. Cancellation preserves the
 outcome category but does not guarantee `CancelledError` identity, arguments,
 traceback, or `__context__` chain shape.
 
+### Mailboxes and Effects
+
 The instruction dictionary is captured with a shallow copy when the request is
 admitted and exposed to the Actor as a read-only mapping. Cue IDs begin with a
 scene UUID and use a scene-wide sequence such as `-cue0`; Effects use a
@@ -272,6 +422,8 @@ period.
 Effects are created only by the current Actor during `cued()`. Framework-owned
 identity fields are fixed, user-defined Effect fields remain mutable, and Troupe
 does not consume user Effects returned from a cue.
+
+### Task ownership
 
 Scene-owned work completes or is cancelled before scene returns.
 Cancellation is propagated and cleanup is awaited.
@@ -293,6 +445,15 @@ A production path points to a Python package directory containing
 The basename must be a valid, non-keyword Python identifier and must remain
 unchanged by NFKC normalization. Other Python files, subpackages, and resources
 inside that production directory are supported.
+
+## Public API and implementation
+
+Troupe ships one thin `troupe/__init__.py` wrapper containing the immutable
+`AgentProfile` dataclass. Loading, lifecycle control, cancellation, signals,
+diagnostics, and the console command are implemented in the Rust extension.
+The `troupe/__init__.pyi` stub describes the public `AgentProfile` and agent
+exceptions together with the `Production`, `Actor`, `ActorHandle`, `Cue`,
+`CueContextError`, `Effect`, and `EffectContextError` API.
 
 ## Platform scope
 
