@@ -230,8 +230,9 @@ enum NpxPreparationFailureKind {
 struct NpxPreparationStderrClassifier {
     line: Vec<u8>,
     line_overflowed: bool,
+    overflowed_npm_record: bool,
     evidence: Option<NpxPreparationFailureKind>,
-    conflicting_evidence: bool,
+    ambiguous_evidence: bool,
 }
 
 impl NpxPreparationStderrClassifier {
@@ -243,6 +244,7 @@ impl NpxPreparationStderrClassifier {
                 if self.line.len() < NPM_ERROR_CODE_LINE_MAX_BYTES {
                     self.line.push(byte);
                 } else {
+                    self.overflowed_npm_record = npm_error_code(&self.line).is_some();
                     self.line.clear();
                     self.line_overflowed = true;
                 }
@@ -252,57 +254,76 @@ impl NpxPreparationStderrClassifier {
 
     fn finish(mut self) -> Option<NpxPreparationFailureKind> {
         self.finish_line();
-        (!self.conflicting_evidence)
+        (!self.ambiguous_evidence)
             .then_some(self.evidence)
             .flatten()
     }
 
     fn finish_line(&mut self) {
-        if !self.line_overflowed {
+        if self.overflowed_npm_record {
+            self.ambiguous_evidence = true;
+        } else if !self.line_overflowed {
             let line = self.line.strip_suffix(b"\r").unwrap_or(&self.line);
-            if let Some(kind) = classify_npm_error_code_line(line) {
-                match self.evidence {
-                    None => self.evidence = Some(kind),
-                    Some(previous) if previous == kind => {}
-                    Some(_) => self.conflicting_evidence = true,
+            if let Some(record) = classify_npm_error_code_line(line) {
+                match record {
+                    NpmErrorCodeRecord::Known(kind) => match self.evidence {
+                        None => self.evidence = Some(kind),
+                        Some(previous) if previous == kind => {}
+                        Some(_) => self.ambiguous_evidence = true,
+                    },
+                    NpmErrorCodeRecord::Unknown => self.ambiguous_evidence = true,
                 }
             }
         }
         self.line.clear();
         self.line_overflowed = false;
+        self.overflowed_npm_record = false;
     }
 }
 
-fn classify_npm_error_code_line(line: &[u8]) -> Option<NpxPreparationFailureKind> {
-    let code = line
-        .strip_prefix(b"npm error code ")
-        .or_else(|| line.strip_prefix(b"npm ERR! code "))?;
+enum NpmErrorCodeRecord {
+    Known(NpxPreparationFailureKind),
+    Unknown,
+}
+
+fn npm_error_code(line: &[u8]) -> Option<&[u8]> {
+    line.strip_prefix(b"npm error code ")
+        .or_else(|| line.strip_prefix(b"npm ERR! code "))
+}
+
+fn classify_npm_error_code_line(line: &[u8]) -> Option<NpmErrorCodeRecord> {
+    let code = npm_error_code(line)?;
     if code.is_empty()
         || !code
             .iter()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
     {
-        return None;
+        return Some(NpmErrorCodeRecord::Unknown);
     }
     match code {
-        b"E404" | b"ETARGET" => Some(NpxPreparationFailureKind::Deterministic),
+        b"E404" | b"ETARGET" => Some(NpmErrorCodeRecord::Known(
+            NpxPreparationFailureKind::Deterministic,
+        )),
         b"EAI_AGAIN"
         | b"EADDRINUSE"
         | b"ECONNECTIONTIMEOUT"
         | b"ECONNREFUSED"
         | b"ECONNRESET"
         | b"EIDLETIMEOUT"
+        | b"ERR_SOCKET_TIMEOUT"
         | b"ERESPONSETIMEOUT"
         | b"ESOCKETTIMEDOUT"
         | b"ETIMEDOUT"
         | b"ETRANSFERTIMEOUT"
         | b"E408"
         | b"E420"
-        | b"E429" => Some(NpxPreparationFailureKind::Transient),
-        [b'E', b'5', tens, ones] if tens.is_ascii_digit() && ones.is_ascii_digit() => {
-            Some(NpxPreparationFailureKind::Transient)
-        }
-        _ => None,
+        | b"E429" => Some(NpmErrorCodeRecord::Known(
+            NpxPreparationFailureKind::Transient,
+        )),
+        [b'E', b'5', tens, ones] if tens.is_ascii_digit() && ones.is_ascii_digit() => Some(
+            NpmErrorCodeRecord::Known(NpxPreparationFailureKind::Transient),
+        ),
+        _ => Some(NpmErrorCodeRecord::Unknown),
     }
 }
 
@@ -3588,6 +3609,13 @@ mod tests {
             Some(NpxPreparationFailureKind::Transient)
         );
 
+        let mut socket_timeout = NpxPreparationStderrClassifier::default();
+        socket_timeout.push(b"npm error code ERR_SOCKET_TIMEOUT\n");
+        assert_eq!(
+            socket_timeout.finish(),
+            Some(NpxPreparationFailureKind::Transient)
+        );
+
         let mut deterministic = NpxPreparationStderrClassifier::default();
         deterministic.push(b"npm ERR! code ETARGET\r\n");
         assert_eq!(
@@ -3603,10 +3631,25 @@ mod tests {
         conflicting.push(b"npm error code EAI_AGAIN\nnpm error code ETARGET\n");
         assert_eq!(conflicting.finish(), None);
 
+        let mut unknown_record = NpxPreparationStderrClassifier::default();
+        unknown_record.push(b"npm error code EAI_AGAIN\nnpm error code EUNKNOWN\n");
+        assert_eq!(unknown_record.finish(), None);
+
+        let mut malformed_record = NpxPreparationStderrClassifier::default();
+        malformed_record.push(b"npm error code EAI_AGAIN\nnpm error code not-a-code\n");
+        assert_eq!(malformed_record.finish(), None);
+
         let mut oversized = NpxPreparationStderrClassifier::default();
         oversized.push(&[b'x'; NPM_ERROR_CODE_LINE_MAX_BYTES + 1]);
         oversized.push(b"npm error code EAI_AGAIN\n");
         assert_eq!(oversized.finish(), None);
+
+        let mut oversized_record = NpxPreparationStderrClassifier::default();
+        oversized_record.push(b"npm error code EAI_AGAIN\n");
+        oversized_record.push(b"npm error code ");
+        oversized_record.push(&[b'E'; NPM_ERROR_CODE_LINE_MAX_BYTES]);
+        oversized_record.push(b"\n");
+        assert_eq!(oversized_record.finish(), None);
     }
 
     #[test]
