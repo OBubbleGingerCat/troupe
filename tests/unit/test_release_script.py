@@ -297,6 +297,8 @@ def _assert_quality_command_group(
                 "develop",
                 "--uv",
                 "--locked",
+                "--features",
+                "agent-test-support",
                 "--manifest-path",
                 "rust/Cargo.toml",
             ],

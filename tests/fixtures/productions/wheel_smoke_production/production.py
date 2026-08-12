@@ -29,6 +29,20 @@ async def _run_successor(handle, instruction, started):
     return await handle.cue(instruction)
 
 
+async def _wait_for_agent_configuration(path: Path, count: int) -> None:
+    while True:
+        if path.exists():
+            rows = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            if sum(row.get("event") == "config_applied" for row in rows) >= count:
+                return
+        yielded = asyncio.Event()
+        asyncio.get_running_loop().call_soon(yielded.set)
+        await yielded.wait()
+
+
 def _append_event(path: Path, event: list[object]) -> None:
     events = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     events.append(event)
@@ -230,6 +244,12 @@ class Production(troupe.Production):
         parser.add_argument("input")
         self.options = parser.parse_args(args)
         self.raw_args = args
+        self.agent_profile = troupe.AgentProfile(
+            agent="codex",
+            workspace=Path.cwd(),
+            model="test-model",
+            effort=None,
+        )
         _append_event(self.options.events, ["args", args])
 
     async def start(self) -> None:
@@ -256,12 +276,14 @@ class Production(troupe.Production):
         worker = self.cast_actor(
             Worker,
             name="worker",
+            agent_profile=self.agent_profile,
             actor_args=(observations,),
             actor_kwargs={},
         )
         router = self.cast_actor(
             Router,
             name="router",
+            agent_profile=self.agent_profile,
             actor_args=(observations, worker),
             actor_kwargs={},
         )
@@ -332,6 +354,12 @@ class Production(troupe.Production):
                 caller_outcome=caller_outcome,
                 successor_result=successor_result,
             ),
+        )
+        await _wait(
+            _wait_for_agent_configuration(
+                self.options.events.with_name("agent-events.jsonl"),
+                4,
+            )
         )
         await _wait(caller)
 

@@ -21,11 +21,13 @@ The direct command does not require `uv run`.
 `uv run troupe` only selects the project environment when its executable
 directory is not already on `PATH`.
 
-Troupe ships one thin `troupe/__init__.py` wrapper. Loading, lifecycle control,
-cancellation, signals, diagnostics, and the console command are
-implemented in the Rust extension. The `troupe/__init__.pyi` stub describes
-the public `Production`, `Actor`, `ActorHandle`, `Cue`, `CueContextError`,
-`Effect`, and `EffectContextError` API.
+Troupe ships one thin `troupe/__init__.py` wrapper containing the immutable
+`AgentProfile` dataclass. Loading, lifecycle control, cancellation, signals,
+diagnostics, and the console command are implemented in the Rust extension.
+The `troupe/__init__.pyi` stub describes
+the public `AgentProfile` and agent exceptions together with the `Production`,
+`Actor`, `ActorHandle`, `Cue`, `CueContextError`, `Effect`, and
+`EffectContextError` API.
 
 ## Examples
 
@@ -50,6 +52,7 @@ literal-console acceptance tests.
 ```python
 import json
 import os
+from pathlib import Path
 import troupe
 
 
@@ -72,15 +75,23 @@ class Production(troupe.Production):
     def __init__(self, args):
         self.fd = int(args[0])
         self.message = args[1]
+        profile = troupe.AgentProfile(
+            agent="codex",
+            workspace=Path.cwd(),
+            model="gpt-5.6-sol",
+            effort="medium",
+        )
         self.greeter = self.cast_actor(
             Greeter,
             name="greeter",
+            agent_profile=profile,
             actor_args=(),
             actor_kwargs={},
         )
         self.writer = self.cast_actor(
             Greeter,
             name="writer",
+            agent_profile=profile,
             actor_args=(),
             actor_kwargs={},
         )
@@ -118,6 +129,103 @@ The same source can be inspected without maintaining a second example:
 >>> [handle.name for handle in example.get_actor(re.compile(r"(?:greeter|writer)"))]
 ['greeter', 'writer']
 
+```
+
+## Actor agents and structured results
+
+`cast_actor()` requires an `AgentProfile`. It submits creation of the Actor's
+agent session immediately and remains synchronous; the first `Actor.act()`
+waits until that session is ready. Each Actor owns one persistent ACP session
+for its lifetime, so later cues can use context established by earlier calls.
+Codex, Claude, and Kimi must already be logged in through their own CLI. Troupe
+does not collect credentials, expose an authentication flow, or return raw
+agent output from `act()`. Codex and Claude launch pinned ACP packages and
+therefore require Node.js with npm and `npx`; Kimi requires Kimi Code 0.31.1.
+
+`Actor.act()` may only be called by that Actor while handling `cued()`. It sends
+the script to the persistent session and returns one validated JSON-compatible
+dictionary. Built-in schema values require a `description`; scalar values also
+accept `choices`, and `ObjectValue` gives nested objects their own typed fields:
+
+```python
+result = await self.act(
+    script="Inspect the job and submit the reviewed decision.",
+    output_schema={
+        "decision": troupe.act_schema.StrValue(
+            description="the review decision",
+            choices=["accept", "reject"],
+        ),
+        "review": troupe.act_schema.ObjectValue(
+            description="the reviewed job facts",
+            fields={
+                "attempts": troupe.act_schema.Int64Value(
+                    description="the observed attempt count",
+                    min=0,
+                ),
+                "complete": troupe.act_schema.BoolValue(
+                    description="whether the job is complete",
+                    choices=[True],
+                ),
+            },
+        ),
+    },
+)
+```
+
+Subclass `SchemaValue` when the built-ins cannot express a domain. This sync
+validator accepts values from multiple disjoint ranges. `ValueRejected` means
+the agent may correct and resubmit the field; other callback failures become a
+`SchemaCallbackError`:
+
+```python
+class DisjointIntValue(troupe.act_schema.SchemaValue[int]):
+    def __init__(self, *, description: str) -> None:
+        super().__init__(description=description, json_kind="int64")
+
+    def render_prompt(self) -> str:
+        return "an integer from 1 through 3 or from 10 through 12"
+
+    def validate(self, value: int) -> None:
+        if not (1 <= value <= 3 or 10 <= value <= 12):
+            raise troupe.act_schema.ValueRejected("outside the accepted ranges")
+```
+
+Validation may also await application work. An async database validator can
+move a blocking lookup off the event-loop thread:
+
+```python
+class ExistingAccountValue(troupe.act_schema.SchemaValue[str]):
+    def __init__(self) -> None:
+        super().__init__(
+            description="an account identifier present in the production database",
+            json_kind="string",
+        )
+
+    def render_prompt(self) -> str:
+        return "a currently registered account identifier"
+
+    async def validate(self, value: str) -> None:
+        exists = await asyncio.to_thread(account_exists, value)
+        if not exists:
+            raise troupe.act_schema.ValueRejected("account does not exist")
+```
+
+Treat `render_prompt()` and `validate()` callbacks as idempotent: validation can
+run for multiple agent submissions, and callbacks may be cancelled during
+caller or Production shutdown. Troupe adds no Runtime timeout to an agent turn
+or schema callback; a Production that needs a deadline owns that policy at the
+Troupe task level. Preserve `asyncio.CancelledError`. To report a callback bug,
+catch `SchemaCallbackError` and inspect its `phase` (`render_prompt` or
+`validate`) and schema `path`:
+
+```python
+try:
+    result = await self.act(script=script, output_schema=schema)
+except troupe.act_schema.SchemaCallbackError as error:
+    record_schema_failure(phase=error.phase, path=error.path)
+    raise
+except asyncio.CancelledError:
+    raise
 ```
 
 The runtime calls the hooks serially. A start failure means startup failed and

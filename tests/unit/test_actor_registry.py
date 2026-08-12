@@ -9,12 +9,19 @@ import weakref
 import pytest
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 def _cast(production: troupe.Production, name: str) -> troupe.ActorHandle:
     return production.cast_actor(
         troupe.Actor,
         name=name,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -88,6 +95,7 @@ def test_pattern_snapshot_pins_capabilities_during_python_reentry() -> None:
         handle = production.cast_actor(
             CyclicActor,
             name=name,
+            agent_profile=TEST_AGENT_PROFILE,
             actor_args=(),
             actor_kwargs={},
         )
@@ -229,6 +237,7 @@ def test_old_detach_cannot_remove_a_same_name_successor() -> None:
     old_handle = production.cast_actor(
         LeakingActor,
         name="aba",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )

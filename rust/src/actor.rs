@@ -7,18 +7,28 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType, PyWeakrefReference};
 
+use crate::act_call::ActCall;
+use crate::act_schema::{compile_act_schema, extract_script};
 use crate::actor_registry::{NameKey, ProductionState};
-use crate::cue::Cue;
+use crate::agent_session::AgentSessionSlot;
+use crate::cue::{Cue, CueContextError};
 use crate::effect::{Effect, EffectContextError, construct_effect};
 use crate::mailbox::{
     CueOperation, DispatchOutcome, Mailbox, MailboxTerminalTransition, TerminalAction,
 };
+use crate::scene_context::{CuedScope, RunBinding};
 
 pub(crate) const ACTOR_DIRECT_ERROR: &str =
     "Actor instances can only be created by Production.cast_actor()";
 
 #[derive(Debug)]
 pub(crate) struct ActorIdentity;
+
+struct CurrentActorCuedAuthority {
+    capability: Arc<ActorCapability>,
+    binding: Arc<RunBinding>,
+    cued: Arc<CuedScope>,
+}
 
 pub(crate) struct ActorConstruction {
     actor_type: Py<PyType>,
@@ -136,6 +146,27 @@ impl Actor {
         *lock(&self.capability) = Weak::new();
         drop(production);
     }
+
+    fn current_cued_authority(&self, py: Python<'_>) -> Option<CurrentActorCuedAuthority> {
+        let capability = lock(&self.capability).upgrade()?;
+        if !Arc::ptr_eq(&capability.identity, &self.identity) {
+            return None;
+        }
+        let state = capability.production_state()?;
+        let binding = state.active_binding_for_cue().ok()?;
+        let lineage = binding.current_lineage(py).ok()??;
+        let cued = Some(lineage)
+            .filter(crate::python_task::TaskLineage::is_active)
+            .and_then(|lineage| lineage.cued())
+            .filter(|cued| {
+                cued.is_active() && cued.actor_identity() == capability.identity_address()
+            })?;
+        Some(CurrentActorCuedAuthority {
+            capability,
+            binding,
+            cued,
+        })
+    }
 }
 
 #[pymethods]
@@ -165,6 +196,31 @@ impl Actor {
             .ok_or_else(|| PyRuntimeError::new_err("Actor is no longer attached"))
     }
 
+    #[pyo3(signature = (*, script, output_schema))]
+    fn act(
+        &self,
+        py: Python<'_>,
+        script: &Bound<'_, PyAny>,
+        output_schema: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<ActCall>> {
+        const CONTEXT_ERROR: &str =
+            "Actor.act() must be called on the current actor within its active cued context";
+        let context_error = || CueContextError::new_err(CONTEXT_ERROR);
+        let authority = self.current_cued_authority(py).ok_or_else(context_error)?;
+        let session = authority
+            .capability
+            .agent_session()
+            .ok_or_else(context_error)?;
+
+        let script = extract_script(script)?;
+        let schema = Arc::new(compile_act_schema(output_schema)?);
+        let prompt = schema.render_prompt(&script)?;
+        Py::new(
+            py,
+            ActCall::new(session, prompt, schema, &authority.binding, &authority.cued),
+        )
+    }
+
     #[pyo3(signature = (effect_type, *, effect_args, effect_kwargs))]
     fn make_effect(
         &self,
@@ -175,23 +231,8 @@ impl Actor {
         const CONTEXT_ERROR: &str = "Actor.make_effect() must be called on the current actor within its active cued context";
         const TYPE_ERROR: &str = "effect_type must be a subclass of Effect";
         let context_error = || EffectContextError::new_err(CONTEXT_ERROR);
-        let capability = lock(&self.capability).upgrade().ok_or_else(context_error)?;
-        if !Arc::ptr_eq(&capability.identity, &self.identity) {
-            return Err(context_error());
-        }
-        let state = capability.production_state().ok_or_else(context_error)?;
-        let binding = state
-            .active_binding_for_cue()
-            .map_err(|_| context_error())?;
-        let lineage = binding
-            .current_lineage(effect_type.py())
-            .map_err(|_| context_error())?;
-        let cued = lineage
-            .filter(crate::python_task::TaskLineage::is_active)
-            .and_then(|lineage| lineage.cued())
-            .filter(|cued| {
-                cued.is_active() && cued.actor_identity() == capability.identity_address()
-            })
+        let authority = self
+            .current_cued_authority(effect_type.py())
             .ok_or_else(context_error)?;
 
         let effect_type = effect_type
@@ -202,13 +243,13 @@ impl Actor {
         }
         let effect_args = effect_args.cast::<PyTuple>()?;
         let effect_kwargs = effect_kwargs.cast::<PyDict>()?;
-        let id = cued.next_effect_id(effect_type.py())?;
+        let id = authority.cued.next_effect_id(effect_type.py())?;
         construct_effect(
             effect_type,
             effect_args,
             effect_kwargs,
             id,
-            cued.source(effect_type.py()),
+            authority.cued.source(effect_type.py()),
         )
     }
 
@@ -235,6 +276,7 @@ pub(crate) struct ActorCapability {
     production_state: Weak<ProductionState>,
     node: Mutex<Option<Py<PyWeakrefReference>>>,
     mailbox: Mutex<Mailbox>,
+    agent_session: Mutex<Option<Arc<AgentSessionSlot>>>,
 }
 
 impl ActorCapability {
@@ -253,7 +295,20 @@ impl ActorCapability {
             production_state,
             node: Mutex::new(None),
             mailbox: Mutex::new(Mailbox::default()),
+            agent_session: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn attach_agent_session(&self, session: Arc<AgentSessionSlot>) {
+        let previous = lock(&self.agent_session).replace(session);
+        assert!(
+            previous.is_none(),
+            "an Actor agent session is attached once"
+        );
+    }
+
+    pub(crate) fn agent_session(&self) -> Option<Arc<AgentSessionSlot>> {
+        lock(&self.agent_session).as_ref().map(Arc::clone)
     }
 
     pub(crate) fn attach_node(&self, node: &Bound<'_, ActorCapabilityNode>) -> PyResult<()> {
@@ -459,6 +514,9 @@ impl ActorCapability {
 
 impl Drop for ActorCapability {
     fn drop(&mut self) {
+        if let Some(session) = lock(&self.agent_session).take() {
+            session.cancel();
+        }
         if let Some(state) = self.production_state.upgrade() {
             state.detach(&self.key, &self.identity);
         }

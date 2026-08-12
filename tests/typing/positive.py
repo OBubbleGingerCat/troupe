@@ -1,6 +1,7 @@
 import re
+from collections.abc import Awaitable
 
-from troupe import Actor, ActorHandle, Cue, Effect, Production
+from troupe import AgentProfile, Actor, ActorHandle, Cue, Effect, Production, act_schema
 from typing_extensions import assert_type
 
 
@@ -12,6 +13,46 @@ class ExampleEffect(Effect):
 class LabelEffect(Effect):
     def __init__(self, label: str) -> None:
         self.label = label
+
+
+class EvenIntValue(act_schema.SchemaValue[int]):
+    def __init__(self) -> None:
+        super().__init__(description="an even integer", json_kind="int64")
+
+    def render_prompt(self) -> str:
+        return "must be even"
+
+    def validate(self, value: int, /) -> None:
+        if value % 2:
+            raise act_schema.ValueRejected("value must be even")
+
+
+class AsyncStringValue(act_schema.SchemaValue[str]):
+    def __init__(self) -> None:
+        super().__init__(description="an async string", json_kind="string")
+
+    def render_prompt(self) -> str:
+        return "must pass the asynchronous check"
+
+    async def validate(self, value: str, /) -> None:
+        _ = value
+
+
+even: act_schema.SchemaValue[int] = EvenIntValue()
+async_string: act_schema.SchemaValue[str] = AsyncStringValue()
+integer_list = act_schema.ListValue(even, description="integer list")
+nullable_string = act_schema.NullableValue(async_string)
+optional_string = act_schema.Field(async_string, required=False)
+assert_type(integer_list, act_schema.ListValue[int])
+assert_type(nullable_string, act_schema.NullableValue[str])
+assert_type(optional_string, act_schema.Field[str])
+assert_type(integer_list.validate([2]), None | Awaitable[None])
+
+OUTPUT_SCHEMA: dict[str, act_schema.FieldSpec] = {
+    "values": integer_list,
+    "note": optional_string,
+    "nullable": nullable_string,
+}
 
 
 class ExampleActor(Actor):
@@ -43,7 +84,12 @@ class ExampleActor(Actor):
         cue_id: str = cue.id
         effect_id: str = effect.id
         owner: str = effect.owner
-        _ = (instruction_value, source, cue_id, effect_id, owner)
+        result = await self.act(
+            script="Return the typed result.",
+            output_schema=OUTPUT_SCHEMA,
+        )
+        result_value: object = result["values"]
+        _ = (instruction_value, source, cue_id, effect_id, owner, result_value)
         return effect, label, base
 
 
@@ -62,6 +108,7 @@ class ExampleProduction(Production):
 
 
 async def exercise() -> None:
+    _ = OUTPUT_SCHEMA
     production = ExampleProduction(["--value", "1"])
     await production.start()
     await production.scene()
@@ -71,15 +118,24 @@ async def exercise() -> None:
     await base.start()
     await base.stop()
 
+    profile = AgentProfile(
+        agent="codex",
+        workspace="/tmp",
+        model="test-model",
+        effort=None,
+    )
+
     positional: ActorHandle = production.cast_actor(
         ExampleActor,
         name="positional",
+        agent_profile=profile,
         actor_args=(1,),
         actor_kwargs={"label": "first"},
     )
     keyword: ActorHandle = production.cast_actor(
         actor_type=ExampleActor,
         name="keyword",
+        agent_profile=profile,
         actor_args=(2,),
         actor_kwargs={"label": "second"},
     )

@@ -12,6 +12,12 @@ from typing import Any
 import pytest
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 TIMEOUT = 5.0
@@ -41,6 +47,7 @@ def _cast(
     return production.cast_actor(
         actor_type,
         name=name,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -111,6 +118,16 @@ def test_cue_runner_is_gc_visible_coroutine_and_reuses_never() -> None:
     expected_native_types = {
         "Actor",
         "ActorHandle",
+        "AgentAuthenticationRequiredError",
+        "AgentError",
+        "AgentResultError",
+        "AgentResultIssue",
+        "AgentResultMissingError",
+        "AgentSessionBrokenError",
+        "AgentSessionBusyError",
+        "AgentSessionError",
+        "AgentSessionStartError",
+        "AgentTurnError",
         "Cue",
         "CueContextError",
         "Effect",

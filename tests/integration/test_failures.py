@@ -12,6 +12,12 @@ from typing import Any
 import pytest
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 TIMEOUT = 5.0
@@ -136,6 +142,7 @@ def test_scene_error_waits_for_cue_cleanup_without_adding_a_phase() -> None:
             handle = self.cast_actor(
                 CleanupActor,
                 name="failure-cleanup",
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )

@@ -7,6 +7,12 @@ import weakref
 from typing import Any
 
 import troupe
+TEST_AGENT_PROFILE = troupe.AgentProfile(
+    agent="codex",
+    workspace="/tmp",
+    model="test-model",
+    effort=None,
+)
 
 
 TIMEOUT = 5.0
@@ -38,6 +44,7 @@ def test_leaked_raw_actor_does_not_extend_logical_capability_lifetime() -> None:
     handle = production.cast_actor(
         LeakingActor,
         name="leaked",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -47,6 +54,7 @@ def test_leaked_raw_actor_does_not_extend_logical_capability_lifetime() -> None:
     successor = production.cast_actor(
         troupe.Actor,
         name="leaked",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -70,6 +78,7 @@ def test_actor_keeps_original_production_wrapper_alive() -> None:
     handle = production.cast_actor(
         CapturingActor,
         name="owned",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -95,6 +104,7 @@ def test_parent_owned_child_follows_parent_physical_graph_without_external_raw_a
             self.child = self.production.cast_actor(
                 Child,
                 name="child",
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -102,6 +112,7 @@ def test_parent_owned_child_follows_parent_physical_graph_without_external_raw_a
     parent = production.cast_actor(
         Parent,
         name="parent",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -127,6 +138,7 @@ def test_separately_retained_child_outlives_parent() -> None:
             self.child = self.production.cast_actor(
                 Child,
                 name="retained-child",
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -134,6 +146,7 @@ def test_separately_retained_child_outlives_parent() -> None:
     parent = production.cast_actor(
         Parent,
         name="short-parent",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -159,6 +172,7 @@ def test_actor_handle_cycle_is_collectable_and_detaches_once() -> None:
     handle = production.cast_actor(
         CyclicActor,
         name="cycle",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -174,6 +188,7 @@ def test_actor_handle_cycle_is_collectable_and_detaches_once() -> None:
     replacement = production.cast_actor(
         troupe.Actor,
         name="cycle",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -192,6 +207,7 @@ def test_multiple_handles_share_one_collectable_capability_cycle() -> None:
     cast_handle = production.cast_actor(
         CyclicActor,
         name="multi-handle-cycle",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -220,6 +236,7 @@ def test_multiple_handles_share_one_collectable_capability_cycle() -> None:
     replacement = production.cast_actor(
         troupe.Actor,
         name="multi-handle-cycle",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -239,6 +256,7 @@ def test_str_subclass_name_cycle_is_collectable() -> None:
     handle = production.cast_actor(
         troupe.Actor,
         name=name,
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -253,6 +271,7 @@ def test_str_subclass_name_cycle_is_collectable() -> None:
     replacement = production.cast_actor(
         troupe.Actor,
         name="name-cycle",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -276,6 +295,7 @@ def test_production_handle_actor_cycle_is_collectable() -> None:
     production.actor = production.cast_actor(
         OwnedActor,
         name="owned-cycle",
+        agent_profile=TEST_AGENT_PROFILE,
         actor_args=(),
         actor_kwargs={},
     )
@@ -299,6 +319,7 @@ def test_cast_and_query_are_available_before_during_and_after_runtime() -> None:
             handle = self.cast_actor(
                 PhaseActor,
                 name=phase,
+                agent_profile=TEST_AGENT_PROFILE,
                 actor_args=(),
                 actor_kwargs={},
             )
@@ -377,6 +398,7 @@ def test_pending_requests_from_all_handles_share_one_mailbox_and_retain_actor() 
                 cast_handle = self.cast_actor(
                     SharedActor,
                     name="shared-mailbox",
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )
@@ -443,6 +465,7 @@ def test_pending_requests_from_all_handles_share_one_mailbox_and_retain_actor() 
                 self.replacement = self.cast_actor(
                     troupe.Actor,
                     name="shared-mailbox",
+                    agent_profile=TEST_AGENT_PROFILE,
                     actor_args=(),
                     actor_kwargs={},
                 )

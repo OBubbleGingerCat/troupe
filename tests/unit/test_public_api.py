@@ -15,24 +15,42 @@ def _modules() -> tuple[ModuleType, ModuleType]:
     return troupe, runtime
 
 
-def test_public_symbol_is_the_native_class() -> None:
+def test_public_symbols_have_their_declared_implementation_boundary() -> None:
     troupe, runtime = _modules()
 
     expected = [
         "Actor",
         "ActorHandle",
+        "AgentAuthenticationRequiredError",
+        "AgentError",
+        "AgentProfile",
+        "AgentResultError",
+        "AgentResultIssue",
+        "AgentResultMissingError",
+        "AgentSessionBrokenError",
+        "AgentSessionBusyError",
+        "AgentSessionError",
+        "AgentSessionStartError",
+        "AgentTurnError",
         "Cue",
         "CueContextError",
         "Effect",
         "EffectContextError",
         "Production",
+        "act_schema",
     ]
     assert troupe.__all__ == expected
     assert {name for name in vars(troupe) if not name.startswith("_")} == set(expected)
-    for name in expected:
+    native = [name for name in expected if name not in {"AgentProfile", "act_schema"}]
+    for name in native:
         public = getattr(troupe, name)
         assert public is getattr(runtime, name)
         assert public.__module__ == "troupe"
+    assert not hasattr(runtime, "AgentProfile")
+    assert troupe.AgentProfile.__module__ == "troupe"
+    assert troupe.act_schema is runtime.act_schema
+    assert troupe.act_schema.__name__ == "troupe.act_schema"
+    assert sys.modules["troupe.act_schema"] is troupe.act_schema
 
 
 def test_actor_and_effect_are_subclassable_but_handle_and_cue_are_final() -> None:
