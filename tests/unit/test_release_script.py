@@ -272,7 +272,7 @@ def _assert_quality_command_group(
 ) -> None:
     assert [(call.tool, call.arguments) for call in calls] == [
         ("uv", ["sync", "--frozen", "--all-groups"]),
-        ("cargo", ["fmt", "--check", "--manifest-path", "rust/Cargo.toml"]),
+        ("cargo", ["fmt", "--check", "--all", "--manifest-path", "rust/Cargo.toml"]),
         (
             "cargo",
             [
@@ -280,6 +280,7 @@ def _assert_quality_command_group(
                 "--locked",
                 "--manifest-path",
                 "rust/Cargo.toml",
+                "--workspace",
                 "--all-targets",
                 "--all-features",
                 "--",
@@ -287,7 +288,16 @@ def _assert_quality_command_group(
                 "warnings",
             ],
         ),
-        ("cargo", ["test", "--locked", "--manifest-path", "rust/Cargo.toml"]),
+        (
+            "cargo",
+            [
+                "test",
+                "--locked",
+                "--manifest-path",
+                "rust/Cargo.toml",
+                "--workspace",
+            ],
+        ),
         (
             "uv",
             [

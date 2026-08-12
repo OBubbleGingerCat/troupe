@@ -13,10 +13,10 @@ use pyo3::types::{PyAny, PyDict, PyInt, PyString, PyTuple, PyTupleMethods};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::actor_registry::ProductionState;
-use crate::agent_turn::AgentTurnControl;
-use crate::mailbox::CueOperation;
-use crate::python_task::{
+use crate::agent::AgentTurnControl;
+use crate::orchestration::actor_registry::ProductionState;
+use crate::orchestration::mailbox::CueOperation;
+use crate::orchestration::python_task::{
     ProvisionalPermitGuard, ProvisionalPermitStack, TaskFactoryWrapper, TaskLineage,
     TaskLineageRegistry,
 };
@@ -400,7 +400,7 @@ impl SceneScope {
     #[cfg(test)]
     pub(crate) fn operation_registered_weak_for_test(
         &self,
-        expected: &Weak<crate::mailbox::CueOperationInner>,
+        expected: &Weak<crate::orchestration::mailbox::CueOperationInner>,
     ) -> bool {
         lock(&self.state)
             .operations
@@ -890,13 +890,19 @@ impl RunBinding {
         let lineage = self
             .current_lineage(py)?
             .filter(TaskLineage::is_active)
-            .ok_or_else(|| crate::cue::CueContextError::new_err(CUE_CONTEXT_ERROR))?;
+            .ok_or_else(|| {
+                crate::orchestration::cue::CueContextError::new_err(CUE_CONTEXT_ERROR)
+            })?;
         let scene = lineage
             .scene()
             .filter(|scene| Arc::ptr_eq(scene, expected))
-            .ok_or_else(|| crate::cue::CueContextError::new_err(CUE_CONTEXT_ERROR))?;
+            .ok_or_else(|| {
+                crate::orchestration::cue::CueContextError::new_err(CUE_CONTEXT_ERROR)
+            })?;
         if !scene.is_open() {
-            return Err(crate::cue::CueContextError::new_err(CUE_CONTEXT_ERROR));
+            return Err(crate::orchestration::cue::CueContextError::new_err(
+                CUE_CONTEXT_ERROR,
+            ));
         }
         Ok(lineage)
     }
@@ -1151,11 +1157,11 @@ mod tests {
         SceneNameGenerator, SceneScope, ScopeDriver, admission_metrics_for_test,
         reset_admission_metrics_for_test,
     };
-    use crate::actor::{Actor, ActorCapability, ActorIdentity, enter_actor_permit};
-    use crate::actor_registry::{NameKey, ProductionState};
-    use crate::cue::Cue;
-    use crate::mailbox::CueOperation;
-    use crate::python_task::TaskLineage;
+    use crate::orchestration::actor::{Actor, ActorCapability, ActorIdentity, enter_actor_permit};
+    use crate::orchestration::actor_registry::{NameKey, ProductionState};
+    use crate::orchestration::cue::Cue;
+    use crate::orchestration::mailbox::CueOperation;
+    use crate::orchestration::python_task::TaskLineage;
 
     fn counter_value(py: Python<'_>, counter: &Mutex<Py<PyInt>>) -> String {
         let guard = match counter.lock() {

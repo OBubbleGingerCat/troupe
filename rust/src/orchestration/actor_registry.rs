@@ -6,14 +6,13 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
-use crate::actor::{ActorCapability, ActorIdentity};
-use crate::agent_error::AgentStartupFailure;
-use crate::agent_launch::ResolvedLaunch;
-use crate::agent_profile::ResolvedAgentProfile;
-use crate::agent_session::AgentSessionSlot;
-use crate::agent_supervisor::{AgentCastPermit, AgentSupervisor};
-use crate::cue::CueContextError;
-use crate::scene_context::RunBinding;
+use crate::agent::{
+    AgentCastPermit, AgentSessionSlot, AgentStartupFailure, AgentSupervisor, ResolvedAgentProfile,
+    ResolvedLaunch,
+};
+use crate::orchestration::actor::{ActorCapability, ActorIdentity};
+use crate::orchestration::cue::CueContextError;
+use crate::orchestration::scene_context::RunBinding;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct NameKey(Vec<u32>);
@@ -398,7 +397,7 @@ mod tests {
     use std::sync::{Arc, Mutex, Weak, atomic::Ordering, mpsc};
     use std::time::Duration;
 
-    use crate::scene_context::RunBinding;
+    use crate::orchestration::scene_context::RunBinding;
 
     use super::{ActorIdentity, ActorRegistry, NameKey, RegistryReservation, lock};
 

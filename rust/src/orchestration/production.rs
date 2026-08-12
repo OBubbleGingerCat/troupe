@@ -8,12 +8,12 @@ use pyo3::types::{
     PyTypeMethods,
 };
 
-use crate::actor::{
+use crate::agent::resolve_agent_profile;
+use crate::orchestration::actor::{
     Actor, ActorCapability, ActorCapabilityNode, ActorConstruction, enter_actor_permit,
 };
-use crate::actor_handle::ActorHandle;
-use crate::actor_registry::{NameKey, ProductionState};
-use crate::agent_profile::resolve_agent_profile;
+use crate::orchestration::actor_handle::ActorHandle;
+use crate::orchestration::actor_registry::{NameKey, ProductionState};
 
 const ACTOR_TYPE_ERROR: &str = "actor_type must be a subclass of Actor";
 const ACTOR_RESULT_ERROR: &str = "actor_type did not construct the requested Actor instance";
@@ -278,7 +278,7 @@ mod actor_factory_tests {
     use pyo3::prelude::*;
     use pyo3::types::PyString;
 
-    use crate::actor::{Actor, ActorIdentity, enter_actor_permit};
+    use crate::orchestration::actor::{Actor, ActorIdentity, enter_actor_permit};
 
     use super::{ACTOR_RESULT_ERROR, validate_actor_factory_result};
 

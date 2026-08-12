@@ -5,14 +5,16 @@ use pyo3::exceptions::PyBaseException;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyList, PyListMethods, PyString};
 
-use crate::diagnostics::{format_lifecycle_failure, format_load_failure, write_stderr};
-use crate::failure::ProductionFailed;
-use crate::invocation::{InvocationError, parse_arguments};
-use crate::loader::{ProductionLoadError, load_production};
-use crate::production::Production;
-use crate::python_task::create_run_binding;
-use crate::runtime::{RuntimeCore, run_lifecycle};
-use crate::signals::SignalGuard;
+use crate::application::diagnostics::{
+    format_lifecycle_failure, format_load_failure, write_stderr,
+};
+use crate::application::failure::ProductionFailed;
+use crate::application::invocation::{InvocationError, parse_arguments};
+use crate::application::loader::{ProductionLoadError, load_production};
+use crate::application::signals::SignalGuard;
+use crate::orchestration::production::Production;
+use crate::orchestration::python_task::create_run_binding;
+use crate::orchestration::runtime::{RuntimeCore, run_lifecycle};
 
 fn write_stream(py: Python<'_>, name: &str, text: &str) -> PyResult<()> {
     let stream = py.import("sys")?.getattr(name)?;

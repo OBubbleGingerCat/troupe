@@ -60,9 +60,9 @@ _quality_for_python() {
   fi
   export LD_LIBRARY_PATH="$managed_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-  cargo fmt --check --manifest-path rust/Cargo.toml
-  cargo clippy --locked --manifest-path rust/Cargo.toml --all-targets --all-features -- -D warnings
-  PYTHONHOME="$managed_prefix" cargo test --locked --manifest-path rust/Cargo.toml
+  cargo fmt --check --all --manifest-path rust/Cargo.toml
+  cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets --all-features -- -D warnings
+  PYTHONHOME="$managed_prefix" cargo test --locked --manifest-path rust/Cargo.toml --workspace
   env -u CONDA_PREFIX uv run --no-sync maturin develop --uv --locked \
     --features agent-test-support --manifest-path rust/Cargo.toml
   uv run --no-sync pytest -q

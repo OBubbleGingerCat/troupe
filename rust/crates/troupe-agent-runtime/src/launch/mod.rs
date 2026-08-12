@@ -12,8 +12,11 @@ use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 #[cfg(feature = "agent-test-support")]
 use tokio::sync::Notify;
 
-use crate::agent_error::AgentStartupFailure;
-use crate::agent_profile::AgentKind;
+use crate::error::AgentStartupFailure;
+use crate::profile::AgentKind;
+
+pub(super) mod fd_registry;
+pub(super) mod process;
 
 const ACP_CLIENT_SDK_VERSION: &str = "2.0.0";
 
@@ -402,7 +405,10 @@ pub(crate) struct ResolvedAgentCommand {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum ResolvedLaunch {
+pub struct ResolvedLaunch(pub(crate) ResolvedLaunchKind);
+
+#[derive(Clone, Debug)]
+pub(crate) enum ResolvedLaunchKind {
     #[cfg_attr(not(feature = "agent-test-support"), allow(dead_code))]
     Inert,
     Process(Box<ResolvedAgentCommand>),
@@ -665,48 +671,51 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
         let _ = agent;
         let configured = lock(test_launch()).clone();
         let Some(configured) = configured else {
-            return Ok(ResolvedLaunch::Inert);
+            return Ok(ResolvedLaunch(ResolvedLaunchKind::Inert));
         };
         let mut authoritative_prompt_error_codes = configured.authoritative_prompt_error_codes;
         authoritative_prompt_error_codes
             .extend_from_slice(launch_spec(agent).authoritative_prompt_error_codes);
         authoritative_prompt_error_codes.sort_unstable();
         authoritative_prompt_error_codes.dedup();
-        Ok(ResolvedLaunch::Process(Box::new(ResolvedAgentCommand {
-            program: resolve_program(&configured.program)?,
-            args: configured.args,
-            environment: Vec::new(),
-            removed_environment: launch_spec(agent)
-                .removed_environment
-                .iter()
-                .map(OsString::from)
-                .collect(),
-            mode_application: configured.legacy_mode_id.map_or_else(
-                || launch_spec(agent).mode_application.into(),
-                |mode_id| ResolvedModeApplication::LegacySessionMode { mode_id },
-            ),
-            opening_transient_errors: configured.transient_opening_errors,
-            authoritative_prompt_error_codes: Arc::from(authoritative_prompt_error_codes),
-            opening_gate: configured.opening_gate,
-            configuration_ready_gate: configured.configuration_ready_gate,
-            mcp_ready_gate: configured.mcp_ready_gate,
-            opening_backoff: configured.opening_backoff,
-            turn_gates: configured.turn_gates,
-        })))
+        Ok(ResolvedLaunch(ResolvedLaunchKind::Process(Box::new(
+            ResolvedAgentCommand {
+                program: resolve_program(&configured.program)?,
+                args: configured.args,
+                environment: Vec::new(),
+                removed_environment: launch_spec(agent)
+                    .removed_environment
+                    .iter()
+                    .map(OsString::from)
+                    .collect(),
+                mode_application: configured.legacy_mode_id.map_or_else(
+                    || launch_spec(agent).mode_application.into(),
+                    |mode_id| ResolvedModeApplication::LegacySessionMode { mode_id },
+                ),
+                opening_transient_errors: configured.transient_opening_errors,
+                authoritative_prompt_error_codes: Arc::from(authoritative_prompt_error_codes),
+                opening_gate: configured.opening_gate,
+                configuration_ready_gate: configured.configuration_ready_gate,
+                mcp_ready_gate: configured.mcp_ready_gate,
+                opening_backoff: configured.opening_backoff,
+                turn_gates: configured.turn_gates,
+            },
+        ))))
     }
 
     #[cfg(not(feature = "agent-test-support"))]
     {
         production_command(launch_spec(agent))
             .map(Box::new)
-            .map(ResolvedLaunch::Process)
+            .map(ResolvedLaunchKind::Process)
+            .map(ResolvedLaunch)
     }
 }
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_set_launch")]
 #[pyo3(signature = (*, program, args, legacy_mode_id=None, transient_opening_errors=None, authoritative_prompt_error_codes=None))]
-pub(crate) fn set_test_launch(
+pub fn set_test_launch(
     program: PathBuf,
     args: Vec<OsString>,
     legacy_mode_id: Option<String>,
@@ -744,14 +753,14 @@ pub(crate) fn set_test_launch(
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_reset_launch")]
-pub(crate) fn reset_test_launch() {
+pub fn reset_test_launch() {
     *lock(test_launch()) = None;
 }
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_opening_backoff")]
 #[pyo3(signature = (*, random_words))]
-pub(crate) fn hold_test_opening_backoff(random_words: Vec<u64>) -> pyo3::PyResult<()> {
+pub fn hold_test_opening_backoff(random_words: Vec<u64>) -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -764,7 +773,7 @@ pub(crate) fn hold_test_opening_backoff(random_words: Vec<u64>) -> pyo3::PyResul
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_opening_backoff")]
-pub(crate) fn release_test_opening_backoff() -> pyo3::PyResult<()> {
+pub fn release_test_opening_backoff() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let backoff = launch
         .as_ref()
@@ -776,7 +785,7 @@ pub(crate) fn release_test_opening_backoff() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_opening_backoff_state")]
-pub(crate) fn opening_backoff_state(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+pub fn opening_backoff_state(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     use pyo3::types::{PyDict, PyDictMethods};
 
     let launch = lock(test_launch());
@@ -795,7 +804,7 @@ pub(crate) fn opening_backoff_state(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_opening")]
-pub(crate) fn hold_test_opening() -> pyo3::PyResult<()> {
+pub fn hold_test_opening() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err("configure a test launch before holding Opening")
@@ -806,7 +815,7 @@ pub(crate) fn hold_test_opening() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_opening")]
-pub(crate) fn release_test_opening() -> pyo3::PyResult<()> {
+pub fn release_test_opening() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -818,7 +827,7 @@ pub(crate) fn release_test_opening() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_configuration_ready")]
-pub(crate) fn hold_test_configuration_ready() -> pyo3::PyResult<()> {
+pub fn hold_test_configuration_ready() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -831,7 +840,7 @@ pub(crate) fn hold_test_configuration_ready() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_configuration_ready")]
-pub(crate) fn release_test_configuration_ready() -> pyo3::PyResult<()> {
+pub fn release_test_configuration_ready() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -845,7 +854,7 @@ pub(crate) fn release_test_configuration_ready() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_mcp_ready")]
-pub(crate) fn hold_test_mcp_ready() -> pyo3::PyResult<()> {
+pub fn hold_test_mcp_ready() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -858,7 +867,7 @@ pub(crate) fn hold_test_mcp_ready() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_mcp_ready")]
-pub(crate) fn release_test_mcp_ready() -> pyo3::PyResult<()> {
+pub fn release_test_mcp_ready() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -870,7 +879,7 @@ pub(crate) fn release_test_mcp_ready() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_registration")]
-pub(crate) fn hold_test_turn_registration() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_registration() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -883,7 +892,7 @@ pub(crate) fn hold_test_turn_registration() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_registration")]
-pub(crate) fn release_test_turn_registration() -> pyo3::PyResult<()> {
+pub fn release_test_turn_registration() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -897,7 +906,7 @@ pub(crate) fn release_test_turn_registration() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_intake")]
-pub(crate) fn hold_test_turn_intake() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_intake() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -910,7 +919,7 @@ pub(crate) fn hold_test_turn_intake() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_intake")]
-pub(crate) fn release_test_turn_intake() -> pyo3::PyResult<()> {
+pub fn release_test_turn_intake() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -922,7 +931,7 @@ pub(crate) fn release_test_turn_intake() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_submission")]
-pub(crate) fn hold_test_turn_submission() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_submission() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -935,7 +944,7 @@ pub(crate) fn hold_test_turn_submission() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_submission")]
-pub(crate) fn release_test_turn_submission() -> pyo3::PyResult<()> {
+pub fn release_test_turn_submission() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -947,7 +956,7 @@ pub(crate) fn release_test_turn_submission() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_response_flush")]
-pub(crate) fn hold_test_turn_response_flush() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_response_flush() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -960,7 +969,7 @@ pub(crate) fn hold_test_turn_response_flush() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_response_flush")]
-pub(crate) fn release_test_turn_response_flush() -> pyo3::PyResult<()> {
+pub fn release_test_turn_response_flush() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -974,7 +983,7 @@ pub(crate) fn release_test_turn_response_flush() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_settlement")]
-pub(crate) fn hold_test_turn_settlement() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_settlement() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -987,7 +996,7 @@ pub(crate) fn hold_test_turn_settlement() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_settlement")]
-pub(crate) fn release_test_turn_settlement() -> pyo3::PyResult<()> {
+pub fn release_test_turn_settlement() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -999,7 +1008,7 @@ pub(crate) fn release_test_turn_settlement() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_terminal_delivery")]
-pub(crate) fn hold_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -1012,7 +1021,7 @@ pub(crate) fn hold_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_terminal_delivery")]
-pub(crate) fn release_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
+pub fn release_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -1026,7 +1035,7 @@ pub(crate) fn release_test_turn_terminal_delivery() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_hold_turn_outcome")]
-pub(crate) fn hold_test_turn_outcome() -> pyo3::PyResult<()> {
+pub fn hold_test_turn_outcome() -> pyo3::PyResult<()> {
     let mut launch = lock(test_launch());
     let launch = launch.as_mut().ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(
@@ -1039,7 +1048,7 @@ pub(crate) fn hold_test_turn_outcome() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_release_turn_outcome")]
-pub(crate) fn release_test_turn_outcome() -> pyo3::PyResult<()> {
+pub fn release_test_turn_outcome() -> pyo3::PyResult<()> {
     let launch = lock(test_launch());
     let gate = launch
         .as_ref()
@@ -1051,7 +1060,7 @@ pub(crate) fn release_test_turn_outcome() -> pyo3::PyResult<()> {
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_turn_gate_states")]
-pub(crate) fn turn_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+pub fn turn_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     use pyo3::types::{PyDict, PyDictMethods};
 
     let launch = lock(test_launch());
@@ -1084,7 +1093,7 @@ pub(crate) fn turn_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_test_readiness_gate_states")]
-pub(crate) fn readiness_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+pub fn readiness_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     use pyo3::types::{PyDict, PyDictMethods};
 
     let launch = lock(test_launch());
@@ -1110,7 +1119,7 @@ pub(crate) fn readiness_gate_states(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3
 
 #[cfg(feature = "agent-test-support")]
 #[pyo3::pyfunction(name = "_agent_launch_specs_for_test")]
-pub(crate) fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+pub fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     use pyo3::types::{PyDict, PyDictMethods};
 
     let snapshot = PyDict::new(py);

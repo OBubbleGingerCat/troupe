@@ -7,13 +7,13 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
 
-use crate::actor::ActorCapability;
-use crate::cue::Cue;
-use crate::effect::Effect;
-use crate::python_task::{TaskLineage, create_registered_scope_task};
+use crate::orchestration::actor::ActorCapability;
+use crate::orchestration::cue::Cue;
+use crate::orchestration::effect::Effect;
+use crate::orchestration::python_task::{TaskLineage, create_registered_scope_task};
 #[cfg(test)]
-use crate::scene_context::{AdmissionMetric, record_admission_metric_for_test};
-use crate::scene_context::{CuedScope, RunBinding, SceneScope, ScopeDriver};
+use crate::orchestration::scene_context::{AdmissionMetric, record_admission_metric_for_test};
+use crate::orchestration::scene_context::{CuedScope, RunBinding, SceneScope, ScopeDriver};
 
 #[cfg(test)]
 static VALIDATION_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -1061,10 +1061,10 @@ mod tests {
     use pyo3::prelude::*;
     use pyo3::types::{PyCFunction, PyCapsule, PyDict, PyModule, PyString, PyTuple};
 
-    use crate::actor::{Actor, ActorCapability, ActorIdentity, enter_actor_permit};
-    use crate::actor_registry::{NameKey, ProductionState};
-    use crate::cue::Cue;
-    use crate::scene_context::{CuedScope, SceneScope};
+    use crate::orchestration::actor::{Actor, ActorCapability, ActorIdentity, enter_actor_permit};
+    use crate::orchestration::actor_registry::{NameKey, ProductionState};
+    use crate::orchestration::cue::Cue;
+    use crate::orchestration::scene_context::{CuedScope, SceneScope};
 
     use super::{
         CancellationIntent, CueOperation, CueOperationInner, Mailbox, OperationPhase,
@@ -1086,8 +1086,8 @@ mod tests {
             let _: usize = index;
             let _: AtomicUsize = cancel_requests;
             let _: Weak<SceneScope> = scene;
-            let _: Weak<crate::actor::ActorCapability> = actor;
-            let _: Weak<crate::scene_context::RunBinding> = binding;
+            let _: Weak<crate::orchestration::actor::ActorCapability> = actor;
+            let _: Weak<crate::orchestration::scene_context::RunBinding> = binding;
             let _: Arc<CuedScope> = cued;
             let _: Mutex<OperationState> = state;
         }
