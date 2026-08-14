@@ -1,7 +1,18 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-core/tests/reference_validation.rs",
+    "tests/fixtures/diagnostics/reference-validation/cross-run.json",
+    "tests/fixtures/diagnostics/reference-validation/forward-link.json",
+    "tests/fixtures/diagnostics/reference-validation/self-link.json",
+    "tests/fixtures/diagnostics/reference-validation/finish-before-start.json",
+    "tests/fixtures/diagnostics/reference-validation/double-finish.json",
+    "tests/fixtures/diagnostics/reference-validation/child-outside-parent.json",
+    "tests/fixtures/diagnostics/reference-validation/kind-mismatch.json"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-core/src/validate.rs"
+  ],
   "removed": [],
   "generated": []
 }
