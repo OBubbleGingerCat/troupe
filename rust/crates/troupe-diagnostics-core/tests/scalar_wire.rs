@@ -1,17 +1,11 @@
-#[path = "../src/id.rs"]
-mod id;
-#[path = "../src/scalar.rs"]
-mod scalar;
-#[path = "../src/time.rs"]
-mod time;
-#[path = "../src/wire.rs"]
-mod wire;
-
 use std::time::{Duration, Instant};
 
-use id::{CanonicalUuid, MAX_RUN_LOCAL_ID_BYTES, RunLocalId};
-use scalar::{CurrencyCode, DecimalString, SchemaU64, TokenCount};
-use time::{ElapsedNs, RunClock};
+use troupe_diagnostics_core::{
+    id::{CanonicalUuid, MAX_RUN_LOCAL_ID_BYTES, RunLocalId},
+    scalar::{CurrencyCode, DecimalString, SchemaU64, TokenCount},
+    time::{ElapsedNs, RunClock, TimeError},
+    wire::WireValueError,
+};
 use uuid::Uuid;
 
 #[test]
@@ -144,7 +138,10 @@ fn canonical_uuid_has_one_lowercase_hyphenated_wire_form() {
 #[test]
 fn run_local_id_is_nonempty_bounded_opaque_ascii() {
     let maximum = "x".repeat(MAX_RUN_LOCAL_ID_BYTES);
-    assert_eq!(RunLocalId::parse(&maximum).unwrap().as_str(), maximum);
+    let id = RunLocalId::parse(&maximum).unwrap();
+    assert_eq!(id.as_str(), maximum);
+    let encoded = serde_json::to_string(&id).unwrap();
+    assert_eq!(serde_json::from_str::<RunLocalId>(&encoded).unwrap(), id);
 
     for invalid in [
         "".to_owned(),
@@ -166,12 +163,47 @@ fn elapsed_time_is_run_relative_monotonic_and_checked() {
         clock.elapsed_at(origin + Duration::from_nanos(42)).unwrap(),
         ElapsedNs::new(42),
     );
-    assert!(clock.elapsed_at(origin - Duration::from_nanos(1)).is_err());
-    assert!(ElapsedNs::from_duration(Duration::from_secs(u64::MAX)).is_err());
+    assert_eq!(
+        ElapsedNs::from_duration(Duration::from_nanos(42)),
+        Ok(ElapsedNs::new(42))
+    );
+    assert_eq!(
+        clock.elapsed_at(origin - Duration::from_nanos(1)),
+        Err(TimeError::BeforeOrigin)
+    );
+    assert_eq!(
+        ElapsedNs::from_duration(Duration::from_secs(u64::MAX)),
+        Err(TimeError::ElapsedOverflow)
+    );
     let elapsed_now = clock.elapsed_now().unwrap();
     assert_eq!(ElapsedNs::new(elapsed_now.get()), elapsed_now);
+    let maximum = ElapsedNs::new(u64::MAX);
+    let encoded = serde_json::to_string(&maximum).unwrap();
+    assert_eq!(encoded, format!("\"{}\"", u64::MAX));
     assert_eq!(
-        serde_json::to_string(&ElapsedNs::new(u64::MAX)).unwrap(),
-        format!("\"{}\"", u64::MAX)
+        serde_json::from_str::<ElapsedNs>(&encoded).unwrap(),
+        maximum
+    );
+}
+
+#[test]
+fn validation_errors_are_public_typed_errors() {
+    fn assert_error<E: std::error::Error + Send + Sync + 'static>() {}
+
+    assert_error::<WireValueError>();
+    assert_error::<TimeError>();
+
+    let wire_error: WireValueError = TokenCount::parse("-1").unwrap_err();
+    assert_eq!(
+        wire_error.to_string(),
+        "integer must contain only ASCII decimal digits"
+    );
+    assert_eq!(
+        TimeError::BeforeOrigin.to_string(),
+        "observation precedes the Run origin"
+    );
+    assert_eq!(
+        TimeError::ElapsedOverflow.to_string(),
+        "elapsed nanoseconds exceed the u64 schema"
     );
 }

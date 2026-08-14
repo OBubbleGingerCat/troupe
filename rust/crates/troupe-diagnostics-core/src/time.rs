@@ -8,18 +8,18 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::wire::{deserialize_string, parse_canonical_u64};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ElapsedNs(u64);
+pub struct ElapsedNs(u64);
 
 impl ElapsedNs {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 
-    pub(crate) fn from_duration(duration: Duration) -> Result<Self, TimeError> {
+    pub fn from_duration(duration: Duration) -> Result<Self, TimeError> {
         u64::try_from(duration.as_nanos())
             .map(Self)
             .map_err(|_| TimeError::ElapsedOverflow)
@@ -45,24 +45,24 @@ impl<'de> Deserialize<'de> for ElapsedNs {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RunClock {
+pub struct RunClock {
     origin: Instant,
 }
 
 impl RunClock {
-    pub(crate) const fn from_origin(origin: Instant) -> Self {
+    pub const fn from_origin(origin: Instant) -> Self {
         Self { origin }
     }
 
-    pub(crate) const fn origin(self) -> Instant {
+    pub const fn origin(self) -> Instant {
         self.origin
     }
 
-    pub(crate) fn elapsed_now(self) -> Result<ElapsedNs, TimeError> {
+    pub fn elapsed_now(self) -> Result<ElapsedNs, TimeError> {
         self.elapsed_at(Instant::now())
     }
 
-    pub(crate) fn elapsed_at(self, observed: Instant) -> Result<ElapsedNs, TimeError> {
+    pub fn elapsed_at(self, observed: Instant) -> Result<ElapsedNs, TimeError> {
         let duration = observed
             .checked_duration_since(self.origin)
             .ok_or(TimeError::BeforeOrigin)?;
@@ -71,7 +71,7 @@ impl RunClock {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TimeError {
+pub enum TimeError {
     BeforeOrigin,
     ElapsedOverflow,
 }

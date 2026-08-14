@@ -5,17 +5,17 @@ use uuid::Uuid;
 
 use crate::wire::{WireValueError, deserialize_string};
 
-pub(crate) const MAX_RUN_LOCAL_ID_BYTES: usize = 128;
+pub const MAX_RUN_LOCAL_ID_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct CanonicalUuid(Uuid);
+pub struct CanonicalUuid(Uuid);
 
 impl CanonicalUuid {
-    pub(crate) const fn new(value: Uuid) -> Self {
+    pub const fn new(value: Uuid) -> Self {
         Self(value)
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self, WireValueError> {
+    pub fn parse(value: &str) -> Result<Self, WireValueError> {
         let parsed = Uuid::parse_str(value).map_err(|_| WireValueError::new("UUID is invalid"))?;
         if parsed.hyphenated().to_string() != value {
             return Err(WireValueError::new(
@@ -25,7 +25,7 @@ impl CanonicalUuid {
         Ok(Self(parsed))
     }
 
-    pub(crate) const fn as_uuid(self) -> Uuid {
+    pub const fn as_uuid(self) -> Uuid {
         self.0
     }
 }
@@ -55,10 +55,10 @@ impl<'de> Deserialize<'de> for CanonicalUuid {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct RunLocalId(String);
+pub struct RunLocalId(String);
 
 impl RunLocalId {
-    pub(crate) fn parse(value: &str) -> Result<Self, WireValueError> {
+    pub fn parse(value: &str) -> Result<Self, WireValueError> {
         if value.is_empty() {
             return Err(WireValueError::new("Run-local ID must not be empty"));
         }
@@ -71,7 +71,7 @@ impl RunLocalId {
         Ok(Self(value.to_owned()))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
