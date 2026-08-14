@@ -7,14 +7,14 @@ use crate::wire::{
 const MAX_NORMALIZED_DECIMAL_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct SchemaU64(u64);
+pub struct SchemaU64(u64);
 
 impl SchemaU64 {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
@@ -38,15 +38,15 @@ impl<'de> Deserialize<'de> for SchemaU64 {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct TokenCount(String);
+pub struct TokenCount(String);
 
 impl TokenCount {
-    pub(crate) fn parse(value: &str) -> Result<Self, WireValueError> {
+    pub fn parse(value: &str) -> Result<Self, WireValueError> {
         validate_canonical_nonnegative_integer(value)?;
         Ok(Self(value.to_owned()))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -70,14 +70,14 @@ impl<'de> Deserialize<'de> for TokenCount {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct DecimalString(String);
+pub struct DecimalString(String);
 
 impl DecimalString {
-    pub(crate) fn parse(value: &str) -> Result<Self, WireValueError> {
+    pub fn parse(value: &str) -> Result<Self, WireValueError> {
         normalize_decimal(value).map(Self)
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -107,10 +107,10 @@ impl<'de> Deserialize<'de> for DecimalString {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct CurrencyCode(String);
+pub struct CurrencyCode(String);
 
 impl CurrencyCode {
-    pub(crate) fn parse(value: &str) -> Result<Self, WireValueError> {
+    pub fn parse(value: &str) -> Result<Self, WireValueError> {
         if value.len() != 3 || !value.bytes().all(|byte| byte.is_ascii_uppercase()) {
             return Err(WireValueError::new(
                 "currency must be three uppercase ASCII letters",
@@ -119,7 +119,7 @@ impl CurrencyCode {
         Ok(Self(value.to_owned()))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }

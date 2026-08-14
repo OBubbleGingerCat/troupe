@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, de};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WireValueError(&'static str);
+pub struct WireValueError(&'static str);
 
 impl WireValueError {
     pub(crate) const fn new(message: &'static str) -> Self {
