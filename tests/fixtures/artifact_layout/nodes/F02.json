@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/fixtures/artifact_layout/ownership-ledger.json"
+  ],
+  "modified": [
+    "scripts/audit_diagnostic_ownership.py",
+    "tests/unit/test_diagnostic_ownership.py"
+  ],
   "removed": [],
   "generated": []
 }
