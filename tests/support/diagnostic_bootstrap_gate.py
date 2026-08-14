@@ -52,6 +52,11 @@ def _gate_environment(
     caller: dict[str, str],
 ) -> dict[str, str]:
     environment = dict(caller)
+    caller_home = caller.get("HOME")
+    if "RUSTUP_HOME" not in environment and caller_home:
+        rustup_home = Path(caller_home) / ".rustup"
+        if rustup_home.is_dir():
+            environment["RUSTUP_HOME"] = str(rustup_home.resolve())
     for unsafe in ("CONDA_PREFIX", "PYTHONHOME", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"):
         environment.pop(unsafe, None)
     environment.update(
