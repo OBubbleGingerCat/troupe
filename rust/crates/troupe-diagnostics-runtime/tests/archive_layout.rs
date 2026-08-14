@@ -8,16 +8,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use troupe_diagnostics_core::id::CanonicalUuid;
-
-#[path = "../src/archive/layout.rs"]
-mod layout;
-#[path = "../src/archive/probe.rs"]
-mod probe;
-
-use layout::{ArchiveLayout, ArchiveStartupErrorCode};
-use probe::{
-    ArchiveDirectory, ArchiveFileSystem, ArchiveProbeFile, NodeMetadata, RealDirectory,
-    RealFileSystem, RealProbeFile, WRITE_PROBE_PREFIX,
+use troupe_diagnostics_runtime::archive::{
+    layout::{ArchiveLayout, ArchiveStartupErrorCode},
+    probe::{
+        ArchiveDirectory, ArchiveFileSystem, ArchiveProbeFile, NodeMetadata, RealDirectory,
+        RealFileSystem, RealProbeFile, WRITE_PROBE_PREFIX,
+    },
 };
 
 const RUN_ID: &str = "12345678-1234-4234-9234-123456789abc";
