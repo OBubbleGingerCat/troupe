@@ -3,7 +3,43 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[allow(unused_imports)]
-use troupe_diagnostics_runtime::{archive, query, registry, server, store};
+use troupe_diagnostics_runtime::{
+    archive::{
+        constants as archive_constants, layout as archive_layout, lease as archive_lease,
+        probe as archive_probe,
+    },
+    query::{
+        aggregate as query_aggregate, archive_views as query_archive_views, events as query_events,
+        filter as query_filter, pagination as query_pagination, reader as query_reader,
+        snapshot as query_snapshot, status as query_status, views as query_views,
+    },
+    registry::{
+        codec as registry_codec, discover as registry_discover, model as registry_model,
+        process_identity as registry_process_identity, publish as registry_publish,
+        revalidate as registry_revalidate,
+    },
+    server::{
+        assembly as server_assembly, assets as server_assets, dump as server_dump,
+        error as server_error, identity as server_identity, query as server_query,
+        routes as server_routes, runtime as server_runtime, service as server_service,
+        sse::{
+            cursor as server_sse_cursor, frame as server_sse_frame, replay as server_sse_replay,
+            subscriber as server_sse_subscriber,
+        },
+        views as server_views,
+    },
+    store::{
+        admission as store_admission, batch as store_batch, connection as store_connection,
+        key as store_key, progress as store_progress,
+        projector::{
+            counters as store_projector_counters, messages as store_projector_messages,
+            plans as store_projector_plans, snapshot as store_projector_snapshot,
+            spans as store_projector_spans, usage as store_projector_usage,
+        },
+        quota as store_quota, schema as store_schema, view_records as store_view_records,
+        watermark as store_watermark, writer as store_writer,
+    },
+};
 
 const LEAF_SLOTS: &[&str] = &[
     "archive/constants.rs",
@@ -64,31 +100,31 @@ const DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "archive/mod.rs",
-        "mod constants;\nmod layout;\nmod lease;\nmod probe;\n",
+        "pub mod constants;\npub mod layout;\npub mod lease;\npub mod probe;\n",
     ),
     (
         "query/mod.rs",
-        "mod aggregate;\nmod archive_views;\nmod events;\nmod filter;\nmod pagination;\nmod reader;\nmod snapshot;\nmod status;\nmod views;\n",
+        "pub mod aggregate;\npub mod archive_views;\npub mod events;\npub mod filter;\npub mod pagination;\npub mod reader;\npub mod snapshot;\npub mod status;\npub mod views;\n",
     ),
     (
         "registry/mod.rs",
-        "mod codec;\nmod discover;\nmod model;\nmod process_identity;\nmod publish;\nmod revalidate;\n",
+        "pub mod codec;\npub mod discover;\npub mod model;\npub mod process_identity;\npub mod publish;\npub mod revalidate;\n",
     ),
     (
         "server/mod.rs",
-        "mod assembly;\nmod assets;\nmod dump;\nmod error;\nmod identity;\nmod query;\nmod routes;\nmod runtime;\nmod service;\nmod sse;\nmod views;\n",
+        "pub mod assembly;\npub mod assets;\npub mod dump;\npub mod error;\npub mod identity;\npub mod query;\npub mod routes;\npub mod runtime;\npub mod service;\npub mod sse;\npub mod views;\n",
     ),
     (
         "server/sse/mod.rs",
-        "mod cursor;\nmod frame;\nmod replay;\nmod subscriber;\n",
+        "pub mod cursor;\npub mod frame;\npub mod replay;\npub mod subscriber;\n",
     ),
     (
         "store/mod.rs",
-        "mod admission;\nmod batch;\nmod connection;\nmod key;\nmod progress;\nmod projector;\nmod quota;\nmod schema;\nmod view_records;\nmod watermark;\nmod writer;\n",
+        "pub mod admission;\npub mod batch;\npub mod connection;\npub mod key;\npub mod progress;\npub mod projector;\npub mod quota;\npub mod schema;\npub mod view_records;\npub mod watermark;\npub mod writer;\n",
     ),
     (
         "store/projector/mod.rs",
-        "mod counters;\nmod messages;\nmod plans;\nmod snapshot;\nmod spans;\nmod usage;\n",
+        "pub mod counters;\npub mod messages;\npub mod plans;\npub mod snapshot;\npub mod spans;\npub mod usage;\n",
     ),
 ];
 

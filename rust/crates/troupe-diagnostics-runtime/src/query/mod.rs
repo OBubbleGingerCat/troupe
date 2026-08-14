@@ -1,9 +1,9 @@
-mod aggregate;
-mod archive_views;
-mod events;
-mod filter;
-mod pagination;
-mod reader;
-mod snapshot;
-mod status;
-mod views;
+pub mod aggregate;
+pub mod archive_views;
+pub mod events;
+pub mod filter;
+pub mod pagination;
+pub mod reader;
+pub mod snapshot;
+pub mod status;
+pub mod views;
