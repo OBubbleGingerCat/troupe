@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Notify;
 
 use crate::adapter::agent_adapter;
+use crate::diagnostics::observer::{AgentDiagnosticObserver, AgentDiagnosticObserverInstallError};
+use crate::diagnostics::session::AgentSessionDiagnosticContext;
 use crate::error::AgentStartupFailure;
 use crate::launch::{NpxPreparationKey, ResolvedLaunch, ResolvedLaunchKind, resolve_launch};
 use crate::profile::ResolvedAgentProfile;
@@ -28,6 +30,8 @@ struct SupervisorControl {
 
 struct SupervisorState {
     shutting_down: bool,
+    session_opening_started: bool,
+    diagnostic_observer: Option<AgentDiagnosticObserver>,
     active_casts: usize,
     sessions: Vec<Arc<AgentSessionSlot>>,
     package_preparations: HashMap<NpxPreparationKey, Arc<NpxPreparationGate>>,
@@ -44,6 +48,8 @@ impl AgentSupervisor {
             control: Arc::new(SupervisorControl {
                 state: Mutex::new(SupervisorState {
                     shutting_down: false,
+                    session_opening_started: false,
+                    diagnostic_observer: None,
                     active_casts: 0,
                     sessions: Vec::new(),
                     package_preparations: HashMap::new(),
@@ -69,6 +75,21 @@ impl AgentSupervisor {
         })
     }
 
+    pub fn install_diagnostic_observer(
+        &self,
+        observer: AgentDiagnosticObserver,
+    ) -> Result<(), AgentDiagnosticObserverInstallError> {
+        let mut state = lock(&self.control.state);
+        if state.session_opening_started {
+            return Err(AgentDiagnosticObserverInstallError::SessionOpeningStarted);
+        }
+        if state.diagnostic_observer.is_some() {
+            return Err(AgentDiagnosticObserverInstallError::AlreadyInstalled);
+        }
+        state.diagnostic_observer = Some(observer);
+        Ok(())
+    }
+
     pub fn resolve(
         &self,
         profile: &ResolvedAgentProfile,
@@ -82,13 +103,38 @@ impl AgentSupervisor {
         profile: Arc<ResolvedAgentProfile>,
         launch: ResolvedLaunch,
     ) -> Arc<AgentSessionSlot> {
+        self.start_inner(permit, profile, launch, None)
+    }
+
+    pub fn start_with_diagnostic_context(
+        &self,
+        permit: &AgentCastPermit,
+        profile: Arc<ResolvedAgentProfile>,
+        launch: ResolvedLaunch,
+        diagnostic_context: AgentSessionDiagnosticContext,
+    ) -> Arc<AgentSessionSlot> {
+        self.start_inner(permit, profile, launch, Some(diagnostic_context))
+    }
+
+    fn start_inner(
+        &self,
+        permit: &AgentCastPermit,
+        profile: Arc<ResolvedAgentProfile>,
+        launch: ResolvedLaunch,
+        diagnostic_context: Option<AgentSessionDiagnosticContext>,
+    ) -> Arc<AgentSessionSlot> {
         assert!(
             Arc::ptr_eq(&self.control, &permit.control),
             "an agent cast permit belongs to its Production"
         );
+        let diagnostic_observer = {
+            let mut state = lock(&self.control.state);
+            state.session_opening_started = true;
+            state.diagnostic_observer.clone()
+        };
         #[cfg(feature = "agent-test-support")]
         if matches!(launch.0, ResolvedLaunchKind::Inert) {
-            let slot = AgentSessionSlot::inert(&profile);
+            let slot = AgentSessionSlot::inert(&profile, diagnostic_observer, diagnostic_context);
             return slot;
         }
         let command = match launch.0 {
@@ -101,7 +147,12 @@ impl AgentSupervisor {
         let package_preparation = spec
             .npx_preparation_key()
             .map(|key| self.package_preparation(key));
-        let slot = AgentSessionSlot::new();
+        let slot = AgentSessionSlot::new_with_session_diagnostics(
+            diagnostic_observer,
+            diagnostic_context,
+            &profile,
+        );
+        slot.observe_opening();
         #[cfg(feature = "agent-test-support")]
         slot.install_test_turn_registration_gate(command.turn_gates.registration.clone());
         #[cfg(feature = "agent-test-support")]
@@ -229,5 +280,32 @@ impl Drop for AgentSupervisor {
             }
             result_service.shutdown_and_wait().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Destination;
+
+    #[test]
+    fn diagnostic_observer_installation_is_one_shot_and_pre_opening() {
+        let supervisor = AgentSupervisor::new();
+        let observer = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        assert_eq!(
+            supervisor.install_diagnostic_observer(observer.clone()),
+            Ok(())
+        );
+        assert_eq!(
+            supervisor.install_diagnostic_observer(observer.clone()),
+            Err(AgentDiagnosticObserverInstallError::AlreadyInstalled)
+        );
+
+        lock(&supervisor.control.state).session_opening_started = true;
+        assert_eq!(
+            supervisor.install_diagnostic_observer(observer),
+            Err(AgentDiagnosticObserverInstallError::SessionOpeningStarted)
+        );
     }
 }

@@ -30,6 +30,11 @@ pub(super) mod supervisor;
 pub(super) mod turn;
 
 use crate::adapter::{AcpAgentAdapter, agent_adapter};
+use crate::diagnostics::observer::AgentDiagnosticObserver;
+use crate::diagnostics::session::{
+    self as diagnostic_session, AgentDiagnosticProvider, AgentSessionDiagnosticContext,
+    SessionDiagnosticCleanupHandle, SessionDiagnostics,
+};
 use crate::error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
 use crate::launch::TestOpeningGate;
@@ -1304,11 +1309,14 @@ enum AgentSessionState {
     AuthRequired(AgentStartupFailure),
     StartFailed(AgentStartupFailure),
     Broken(AgentSessionFailure),
+    Closing,
     Closed,
 }
 
 pub struct AgentSessionSlot {
     state: Mutex<AgentSessionState>,
+    diagnostics: SessionDiagnostics,
+    diagnostic_provider: Option<AgentDiagnosticProvider>,
     changed: Notify,
     cancellation: CancellationToken,
     terminal_fault: CancellationToken,
@@ -1361,9 +1369,38 @@ pub enum AgentActError {
 }
 
 impl AgentSessionSlot {
+    #[cfg(test)]
     pub(crate) fn new() -> Arc<Self> {
+        Self::new_with_diagnostic_observer(None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_diagnostic_observer(
+        diagnostic_observer: Option<AgentDiagnosticObserver>,
+    ) -> Arc<Self> {
+        Self::new_with_diagnostics(SessionDiagnostics::new(diagnostic_observer), None)
+    }
+
+    pub(crate) fn new_with_session_diagnostics(
+        diagnostic_observer: Option<AgentDiagnosticObserver>,
+        diagnostic_context: Option<AgentSessionDiagnosticContext>,
+        profile: &ResolvedAgentProfile,
+    ) -> Arc<Self> {
+        let provider = AgentDiagnosticProvider::from_agent_kind(profile.agent);
+        Self::new_with_diagnostics(
+            SessionDiagnostics::from_profile(diagnostic_observer, diagnostic_context, profile),
+            Some(provider),
+        )
+    }
+
+    fn new_with_diagnostics(
+        diagnostics: SessionDiagnostics,
+        diagnostic_provider: Option<AgentDiagnosticProvider>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(AgentSessionState::Opening),
+            diagnostics,
+            diagnostic_provider,
             changed: Notify::new(),
             cancellation: CancellationToken::new(),
             terminal_fault: CancellationToken::new(),
@@ -1388,8 +1425,14 @@ impl AgentSessionSlot {
     }
 
     #[cfg(feature = "agent-test-support")]
-    pub(crate) fn inert(profile: &ResolvedAgentProfile) -> Arc<Self> {
-        let slot = Self::new();
+    pub(crate) fn inert(
+        profile: &ResolvedAgentProfile,
+        diagnostic_observer: Option<AgentDiagnosticObserver>,
+        diagnostic_context: Option<AgentSessionDiagnosticContext>,
+    ) -> Arc<Self> {
+        let slot =
+            Self::new_with_session_diagnostics(diagnostic_observer, diagnostic_context, profile);
+        slot.observe_opening();
         slot.commit_ready(
             AgentReadySnapshot {
                 pid: std::process::id(),
@@ -1407,6 +1450,36 @@ impl AgentSessionSlot {
         );
         slot.mark_cleanup_complete();
         slot
+    }
+
+    pub(crate) fn diagnostic_observer(&self) -> Option<&AgentDiagnosticObserver> {
+        self.diagnostics.observer()
+    }
+
+    pub(crate) fn diagnostic_context(&self) -> Option<AgentSessionDiagnosticContext> {
+        self.diagnostics.context()
+    }
+
+    pub(crate) fn diagnostic_cleanup_handle(&self) -> Option<SessionDiagnosticCleanupHandle> {
+        self.diagnostics.cleanup_handle()
+    }
+
+    pub(crate) fn observe_opening(&self) {
+        diagnostic_session::observe_opening(&self.diagnostics);
+    }
+
+    fn observe_opening_attempt(&self, generation: u64) {
+        diagnostic_session::observe_opening_attempt(&self.diagnostics, generation);
+    }
+
+    fn observe_update(
+        &self,
+        turn: Option<&AgentTurnControl>,
+        session_id: &SessionId,
+        update: &SessionUpdate,
+    ) {
+        let context = turn.and_then(AgentTurnControl::diagnostic_context);
+        diagnostic_session::observe_update(&self.diagnostics, context.as_ref(), session_id, update);
     }
 
     pub(crate) fn cancellation(&self) -> CancellationToken {
@@ -1498,15 +1571,26 @@ impl AgentSessionSlot {
             ));
         }
         let operation_id = uuid::Uuid::new_v4();
-        let armed_result =
-            match route.arm_result(operation_id, turn_index, schema, validation_bridge) {
-                Ok(armed_result) => armed_result,
-                Err(_) => {
-                    return Err(AgentActError::SessionBroken(
-                        self.mark_broken(AgentSessionFailure::result_channel_lost()),
-                    ));
-                }
-            };
+        if let Some(provider) = self.diagnostic_provider {
+            control.bind_diagnostic_metadata(provider, &session.snapshot, operation_id, turn_index);
+        } else {
+            debug_assert!(control.diagnostic_context().is_none());
+        }
+        let diagnostic_context = control.diagnostic_context();
+        let armed_result = match route.arm_result_with_diagnostics(
+            operation_id,
+            turn_index,
+            schema,
+            validation_bridge,
+            diagnostic_context,
+        ) {
+            Ok(armed_result) => armed_result,
+            Err(_) => {
+                return Err(AgentActError::SessionBroken(
+                    self.mark_broken(AgentSessionFailure::result_channel_lost()),
+                ));
+            }
+        };
         debug_assert_eq!(armed_result.operation_id(), operation_id);
         debug_assert_eq!(armed_result.turn_index(), turn_index);
         let result_failure = armed_result.failure_notification();
@@ -1566,7 +1650,9 @@ impl AgentSessionSlot {
                     AgentSessionState::Broken(failure) => {
                         Some(Err(AgentActError::SessionBroken(failure.clone())))
                     }
-                    AgentSessionState::Closed => Some(Err(AgentActError::SessionClosed)),
+                    AgentSessionState::Closing | AgentSessionState::Closed => {
+                        Some(Err(AgentActError::SessionClosed))
+                    }
                 }
             };
             if let Some(session) = session {
@@ -1743,10 +1829,12 @@ impl AgentSessionSlot {
             | AgentSessionState::BackingOff
             | AgentSessionState::AuthRequired(_)
             | AgentSessionState::StartFailed(_)
+            | AgentSessionState::Closing
             | AgentSessionState::Closed => (failure, false),
         };
         drop(state);
         if committed {
+            diagnostic_session::observe_broken(&self.diagnostics, failure.code);
             self.terminal_fault.cancel();
         }
         failure
@@ -1775,6 +1863,15 @@ impl AgentSessionSlot {
             self.changed.notify_waiters();
         }
         drop(state);
+        if entered_broken {
+            diagnostic_session::observe_broken(
+                &self.diagnostics,
+                failure
+                    .as_ref()
+                    .expect("an entered Broken transition has a failure")
+                    .code,
+            );
+        }
         result
     }
 
@@ -1791,7 +1888,7 @@ impl AgentSessionSlot {
 
     pub fn cancel(&self) {
         self.cancellation.cancel();
-        let delivery = {
+        let (delivery, entered_closing) = {
             let mut state = lock(&self.state);
             let control = if matches!(
                 *state,
@@ -1804,24 +1901,27 @@ impl AgentSessionSlot {
             } else {
                 None
             };
-            if matches!(
+            let entered_closing = !matches!(
                 *state,
-                AgentSessionState::Opening
-                    | AgentSessionState::BackingOff
-                    | AgentSessionState::Ready(_)
-                    | AgentSessionState::Active(_)
-                    | AgentSessionState::Cancelling(_)
-                    | AgentSessionState::Broken(_)
-            ) {
-                *state = AgentSessionState::Closed;
+                AgentSessionState::Closing | AgentSessionState::Closed
+            );
+            if entered_closing {
+                *state = AgentSessionState::Closing;
                 self.changed.notify_waiters();
             }
-            control.map(|control| {
-                let cleanup =
-                    control.prepare_terminal_delivery(AgentSessionFailure::transport_lost());
-                (control, cleanup)
-            })
+            (
+                control.map(|control| {
+                    let cleanup =
+                        control.prepare_terminal_delivery(AgentSessionFailure::transport_lost());
+                    (control, cleanup)
+                }),
+                entered_closing,
+            )
         };
+        if entered_closing {
+            diagnostic_session::observe_closing(&self.diagnostics);
+        }
+        self.finish_closed_state_if_cleanup_complete();
         if let Some((control, cleanup)) = delivery {
             control.finish_terminal_delivery(cleanup);
         }
@@ -1848,7 +1948,7 @@ impl AgentSessionSlot {
                         failure.message,
                     ));
                 }
-                AgentSessionState::Closed => {
+                AgentSessionState::Closing | AgentSessionState::Closed => {
                     return Err(AgentStartupFailure::start(
                         "preparation_failed",
                         "preparation",
@@ -1897,6 +1997,7 @@ impl AgentSessionSlot {
             AgentSessionState::AuthRequired(_) => "auth_required",
             AgentSessionState::StartFailed(_) => "start_failed",
             AgentSessionState::Broken(_) => "broken",
+            AgentSessionState::Closing => "closing",
             AgentSessionState::Closed => "closed",
         }
     }
@@ -1934,8 +2035,30 @@ impl AgentSessionSlot {
     }
 
     fn mark_cleanup_complete(&self) {
-        self.cleanup_complete.store(true, Ordering::Release);
+        if self.cleanup_complete.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.finish_closed_state_if_cleanup_complete();
+        diagnostic_session::observe_closed(&self.diagnostics);
         self.cleanup_changed.notify_waiters();
+    }
+
+    fn finish_closed_state_if_cleanup_complete(&self) {
+        if !self.cleanup_is_complete() {
+            return;
+        }
+        let closed = {
+            let mut state = lock(&self.state);
+            if matches!(*state, AgentSessionState::Closing) {
+                *state = AgentSessionState::Closed;
+                true
+            } else {
+                false
+            }
+        };
+        if closed {
+            self.changed.notify_waiters();
+        }
     }
 
     fn commit_ready(
@@ -1953,6 +2076,10 @@ impl AgentSessionSlot {
             }));
             self.ready_committed.store(true, Ordering::Release);
             self.changed.notify_waiters();
+            let AgentSessionState::Ready(session) = &*state else {
+                unreachable!("the Ready state was just committed")
+            };
+            diagnostic_session::observe_ready(&self.diagnostics, &session.snapshot);
             true
         } else {
             false
@@ -1991,12 +2118,14 @@ impl AgentSessionSlot {
             *state,
             AgentSessionState::Opening | AgentSessionState::BackingOff
         ) {
+            let code = failure.code;
             *state = if failure.authentication_required {
                 AgentSessionState::AuthRequired(failure)
             } else {
                 AgentSessionState::StartFailed(failure)
             };
             self.changed.notify_waiters();
+            diagnostic_session::observe_broken(&self.diagnostics, code);
         }
     }
 
@@ -2013,8 +2142,10 @@ impl AgentSessionSlot {
             let mut state = lock(&self.state);
             let failure = match &*state {
                 AgentSessionState::Opening | AgentSessionState::BackingOff => {
+                    let code = startup_failure.code;
                     *state = AgentSessionState::StartFailed(startup_failure);
                     self.changed.notify_waiters();
+                    diagnostic_session::observe_broken(&self.diagnostics, code);
                     return;
                 }
                 AgentSessionState::Ready(_)
@@ -2022,6 +2153,7 @@ impl AgentSessionSlot {
                 | AgentSessionState::Cancelling(_) => failure,
                 AgentSessionState::AuthRequired(_)
                 | AgentSessionState::StartFailed(_)
+                | AgentSessionState::Closing
                 | AgentSessionState::Closed => return,
                 AgentSessionState::Broken(existing) => existing.clone(),
             };
@@ -2032,6 +2164,7 @@ impl AgentSessionSlot {
             });
             *state = AgentSessionState::Broken(failure.clone());
             self.changed.notify_waiters();
+            diagnostic_session::observe_broken(&self.diagnostics, failure.code);
             delivery
         };
         self.turn_requested.notify_waiters();
@@ -2189,7 +2322,22 @@ impl Drop for SessionTurnLease {
 impl Drop for AgentSessionSlot {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        *lock(&self.state) = AgentSessionState::Closed;
+        let mut state = lock(&self.state);
+        let entered_closing = !matches!(
+            *state,
+            AgentSessionState::Closing | AgentSessionState::Closed
+        );
+        if entered_closing {
+            *state = if self.cleanup_complete.load(Ordering::Acquire) {
+                AgentSessionState::Closed
+            } else {
+                AgentSessionState::Closing
+            };
+        }
+        drop(state);
+        if entered_closing {
+            diagnostic_session::observe_closing(&self.diagnostics);
+        }
         self.changed.notify_waiters();
     }
 }
@@ -2203,6 +2351,7 @@ pub(crate) fn spawn_opening(
     package_preparation: Option<Arc<NpxPreparationGate>>,
     cleanup_complete: Box<dyn FnOnce(Arc<AgentSessionSlot>) + Send>,
 ) {
+    let diagnostic_cleanup = slot.diagnostic_cleanup_handle();
     let slot = Arc::downgrade(slot);
     pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
         open_agent_session(
@@ -2217,6 +2366,8 @@ pub(crate) fn spawn_opening(
         if let Some(slot) = slot.upgrade() {
             slot.mark_cleanup_complete();
             cleanup_complete(slot);
+        } else if let Some(diagnostic_cleanup) = diagnostic_cleanup {
+            diagnostic_cleanup.complete();
         }
     });
 }
@@ -2283,6 +2434,11 @@ async fn open_agent_session(
     let mut previous_ambiguous = None;
     let mut consecutive_ambiguous = 0_u8;
     loop {
+        let Some(strong_slot) = slot.upgrade() else {
+            return;
+        };
+        strong_slot.observe_opening_attempt(generation);
+        drop(strong_slot);
         let outcome = run_opening_attempt(
             &slot,
             &profile,
@@ -2669,15 +2825,22 @@ async fn run_opening_attempt(
                                         | SessionUpdate::SessionInfoUpdate(_)
                                         | SessionUpdate::UsageUpdate(_)
                                 );
-                                let invalid_after_ready = matches!(
-                                    configuration_monitor_for_handler.observe(
+                                let configuration_observation = configuration_monitor_for_handler
+                                    .observe(
                                         &notification,
                                         agent_adapter(spec.agent),
                                         turn_is_active,
-                                    ),
+                                    );
+                                let invalid_after_ready = matches!(
+                                    configuration_observation,
                                     ConfigurationObservation::InvalidAfterReady
                                 );
+                                let mut accepted_for_diagnostics = matches!(
+                                    configuration_observation,
+                                    ConfigurationObservation::Accepted
+                                );
                                 if invalid_after_ready {
+                                    accepted_for_diagnostics = false;
                                     if let Some(slot) = slot_for_updates.upgrade() {
                                         slot.commit_protocol_violation("configure");
                                     }
@@ -2685,9 +2848,10 @@ async fn run_opening_attempt(
                                     let accepted = (session_scoped_update
                                         && configuration_monitor_for_handler
                                             .owns_session(&notification.session_id))
-                                        || submitted_turn.is_some_and(|control| {
+                                        || submitted_turn.as_ref().is_some_and(|control| {
                                             control.accepts_ordinary_update()
                                         });
+                                    accepted_for_diagnostics &= accepted;
                                     if !accepted {
                                         protocol_violation_observed_for_handler.mark_observed();
                                         let phase =
@@ -2697,6 +2861,15 @@ async fn run_opening_attempt(
                                         }
                                         protocol_violation_for_handler.cancel();
                                     }
+                                }
+                                if accepted_for_diagnostics
+                                    && let Some(slot) = slot_for_updates.upgrade()
+                                {
+                                    slot.observe_update(
+                                        submitted_turn.as_deref(),
+                                        &notification.session_id,
+                                        &notification.update,
+                                    );
                                 }
                             }
                             Ok(Err(_)) => unreachable!("the notification method matched"),
@@ -3536,6 +3709,164 @@ async fn wait_for_stderr_drain(
 fn commit_failure(slot: &Weak<AgentSessionSlot>, failure: AgentStartupFailure) {
     if let Some(slot) = slot.upgrade() {
         slot.commit_failure(failure);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_lifecycle_tests {
+    use super::*;
+
+    struct Destination;
+
+    fn diagnostic_slot() -> (Arc<AgentSessionSlot>, SessionDiagnosticCleanupHandle) {
+        let observer = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        let diagnostics = SessionDiagnostics::for_test(observer);
+        let slot = AgentSessionSlot::new_with_diagnostics(
+            diagnostics,
+            Some(AgentDiagnosticProvider::Codex),
+        );
+        let cleanup = slot
+            .diagnostic_cleanup_handle()
+            .expect("the diagnostic lifecycle owns a cleanup latch");
+        (slot, cleanup)
+    }
+
+    #[test]
+    fn diagnostic_inert_cleanup_closes_only_after_logical_cancellation() {
+        let (slot, cleanup) = diagnostic_slot();
+
+        slot.mark_cleanup_complete();
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Opening));
+        assert_eq!(cleanup.lifecycle_counts(), (0, 0));
+
+        slot.cancel();
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Closed));
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+        slot.cancel();
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+    }
+
+    #[test]
+    fn diagnostic_cancel_stays_closing_until_cleanup_completes() {
+        let (slot, cleanup) = diagnostic_slot();
+
+        slot.cancel();
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Closing));
+        assert_eq!(cleanup.lifecycle_counts(), (1, 0));
+        slot.cancel();
+        assert_eq!(cleanup.lifecycle_counts(), (1, 0));
+
+        slot.mark_cleanup_complete();
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Closed));
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+        slot.mark_cleanup_complete();
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+    }
+
+    #[test]
+    fn diagnostic_start_failure_enters_the_same_cleanup_lifecycle() {
+        let (slot, cleanup) = diagnostic_slot();
+        slot.commit_failure(AgentStartupFailure::start(
+            "preparation_failed",
+            "preparation",
+            "test startup failure",
+        ));
+        assert!(matches!(
+            *lock(&slot.state),
+            AgentSessionState::StartFailed(_)
+        ));
+
+        slot.cancel();
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Closing));
+        assert_eq!(cleanup.lifecycle_counts(), (1, 0));
+        slot.mark_cleanup_complete();
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Closed));
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+    }
+
+    #[test]
+    fn diagnostic_drop_leaves_closed_to_the_cleanup_guardian() {
+        let (slot, cleanup) = diagnostic_slot();
+
+        drop(slot);
+        assert_eq!(cleanup.lifecycle_counts(), (1, 0));
+
+        cleanup.complete();
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+        cleanup.complete();
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+    }
+
+    #[test]
+    fn diagnostic_cancel_and_cleanup_race_keeps_lifecycle_order() {
+        let (slot, cleanup) = diagnostic_slot();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let cancel_slot = Arc::clone(&slot);
+        let cancel_barrier = Arc::clone(&barrier);
+        let cancel = std::thread::spawn(move || {
+            cancel_barrier.wait();
+            cancel_slot.cancel();
+        });
+        let cleanup_slot = Arc::clone(&slot);
+        let cleanup_barrier = Arc::clone(&barrier);
+        let complete = std::thread::spawn(move || {
+            cleanup_barrier.wait();
+            cleanup_slot.mark_cleanup_complete();
+        });
+
+        barrier.wait();
+        cancel.join().expect("cancel thread finishes");
+        complete.join().expect("cleanup thread finishes");
+
+        assert!(matches!(*lock(&slot.state), AgentSessionState::Closed));
+        assert_eq!(cleanup.lifecycle_counts(), (1, 1));
+        assert_eq!(cleanup.lifecycle_observations(), ["closing", "closed"]);
+    }
+
+    #[test]
+    fn diagnostic_session_metadata_tracks_attempt_and_ready_generation() {
+        let (slot, _cleanup) = diagnostic_slot();
+        slot.observe_opening_attempt(7);
+        let opening = slot
+            .diagnostics
+            .metadata()
+            .expect("opening metadata is retained");
+        assert_eq!(opening.context().actor_id(), "actor-test");
+        assert_eq!(opening.context().session_id(), "session-test");
+        assert_eq!(opening.provider(), AgentDiagnosticProvider::Codex);
+        assert_eq!(opening.generation(), Some(7));
+        assert_eq!(opening.requested_model(), "test-model");
+        assert_eq!(opening.effective_model(), None);
+
+        assert!(slot.commit_ready(
+            AgentReadySnapshot {
+                pid: std::process::id(),
+                session_id: "provider-session-7".to_owned(),
+                agent_info: None,
+                agent_capabilities: AgentCapabilities::default(),
+                generation: 7,
+                server_name: "test-result-route".to_owned(),
+                endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+                effective_model: "effective-model".to_owned(),
+                effective_effort: Some("high".to_owned()),
+            },
+            None,
+            None,
+        ));
+        let ready = slot
+            .diagnostics
+            .metadata()
+            .expect("ready metadata is retained");
+        assert_eq!(ready.generation(), Some(7));
+        assert_eq!(ready.provider_session_id(), Some("provider-session-7"));
+        assert_eq!(ready.effective_model(), Some("effective-model"));
+        assert_eq!(ready.effective_effort(), Some("high"));
+    }
+
+    #[test]
+    fn diagnostics_disabled_slot_has_no_cleanup_observer_state() {
+        let slot = AgentSessionSlot::new();
+        assert!(slot.diagnostic_cleanup_handle().is_none());
     }
 }
 
