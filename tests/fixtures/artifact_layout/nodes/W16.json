@@ -1,6 +1,11 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/scripts/provision_browsers.mjs",
+    "frontend/diagnostics/tests/tooling/playwright-browsers.json",
+    "frontend/diagnostics/tests/unit/browser-provisioning.test.ts",
+    "tests/unit/test_diagnostic_browser_cache.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
