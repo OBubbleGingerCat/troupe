@@ -4,8 +4,8 @@ use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use troupe_diagnostics_core::id::CanonicalUuid;
 
@@ -17,7 +17,7 @@ mod probe;
 use layout::{ArchiveLayout, ArchiveStartupErrorCode};
 use probe::{
     ArchiveDirectory, ArchiveFileSystem, ArchiveProbeFile, NodeMetadata, RealDirectory,
-    RealFileSystem, RealProbeFile, WRITE_PROBE_NAME,
+    RealFileSystem, RealProbeFile, WRITE_PROBE_PREFIX,
 };
 
 const RUN_ID: &str = "12345678-1234-4234-9234-123456789abc";
@@ -124,22 +124,43 @@ fn creates_only_the_fixed_layout_and_real_probe_under_umask_zero() {
     assert_eq!(layout.runs_directory(), expected[3]);
     assert_eq!(layout.run_directory(), expected[4]);
     assert_eq!(layout.run_id(), run_id());
-    assert_eq!(mode(root.path()), 0o777, "the caller-owned root is untouched");
+    assert_eq!(
+        mode(root.path()),
+        0o777,
+        "the caller-owned root is untouched"
+    );
     for path in &expected {
-        assert_eq!(mode(path), DIRECTORY_MODE, "wrong mode for {}", path.display());
+        assert_eq!(
+            mode(path),
+            DIRECTORY_MODE,
+            "wrong mode for {}",
+            path.display()
+        );
     }
-    assert!(!layout.run_directory().join(WRITE_PROBE_NAME).exists());
+    let probe_name = format!("{WRITE_PROBE_PREFIX}{}", run_id());
+    assert!(!layout.troupe_directory().join(probe_name).exists());
 }
 
 #[test]
-fn safely_tightens_existing_wide_directory_modes() {
+fn preserves_existing_state_root_mode_and_tightens_owned_archive_modes() {
     let root = TestProductionRoot::new();
     create_existing_archive(root.path());
 
     let layout = ArchiveLayout::prepare(root.path(), run_id()).expect("prepare existing archive");
 
-    for path in archive_paths(root.path()) {
-        assert_eq!(mode(&path), DIRECTORY_MODE, "wrong mode for {}", path.display());
+    let paths = archive_paths(root.path());
+    assert_eq!(
+        mode(&paths[0]),
+        0o777,
+        "the existing state-root mode is outside S00's exact policy"
+    );
+    for path in &paths[1..] {
+        assert_eq!(
+            mode(path),
+            DIRECTORY_MODE,
+            "wrong mode for {}",
+            path.display()
+        );
     }
     assert!(layout.run_directory().is_dir());
 }
@@ -247,7 +268,10 @@ impl FaultFileSystem {
 
     fn assert_confined_to(&self, root: &Path) {
         let paths = self.state.paths.borrow();
-        assert!(!paths.is_empty(), "fault adapter observed no filesystem operations");
+        assert!(
+            !paths.is_empty(),
+            "fault adapter observed no filesystem operations"
+        );
         assert!(
             paths.iter().all(|path| path.starts_with(root)),
             "filesystem operation escaped production root: {paths:?}"
@@ -362,14 +386,32 @@ impl ArchiveFileSystem for FaultFileSystem {
 #[test]
 fn injected_filesystem_failures_are_stable_and_never_fall_back() {
     for (point, code) in [
-        (FaultPoint::Mkdir, ArchiveStartupErrorCode::DirectoryCreateFailed),
-        (FaultPoint::Chmod, ArchiveStartupErrorCode::DirectoryPermissionFailed),
-        (FaultPoint::Fstat, ArchiveStartupErrorCode::DirectoryInspectFailed),
-        (FaultPoint::ProbeCreate, ArchiveStartupErrorCode::ProbeCreateFailed),
+        (
+            FaultPoint::Mkdir,
+            ArchiveStartupErrorCode::DirectoryCreateFailed,
+        ),
+        (
+            FaultPoint::Chmod,
+            ArchiveStartupErrorCode::DirectoryPermissionFailed,
+        ),
+        (
+            FaultPoint::Fstat,
+            ArchiveStartupErrorCode::DirectoryInspectFailed,
+        ),
+        (
+            FaultPoint::ProbeCreate,
+            ArchiveStartupErrorCode::ProbeCreateFailed,
+        ),
         (FaultPoint::Write, ArchiveStartupErrorCode::ProbeWriteFailed),
         (FaultPoint::Fsync, ArchiveStartupErrorCode::ProbeSyncFailed),
-        (FaultPoint::Unlink, ArchiveStartupErrorCode::ProbeUnlinkFailed),
-        (FaultPoint::ModeMismatch, ArchiveStartupErrorCode::DirectoryModeMismatch),
+        (
+            FaultPoint::Unlink,
+            ArchiveStartupErrorCode::ProbeUnlinkFailed,
+        ),
+        (
+            FaultPoint::ModeMismatch,
+            ArchiveStartupErrorCode::DirectoryModeMismatch,
+        ),
     ] {
         let root = TestProductionRoot::new();
         let filesystem = FaultFileSystem::new(point);
@@ -378,7 +420,10 @@ fn injected_filesystem_failures_are_stable_and_never_fall_back() {
             .expect_err("injected operation must fail startup");
 
         assert_eq!(error.code(), code, "wrong stable code for {point:?}");
-        assert!(filesystem.state.fired.get(), "fault did not fire: {point:?}");
+        assert!(
+            filesystem.state.fired.get(),
+            "fault did not fire: {point:?}"
+        );
         filesystem.assert_confined_to(root.path());
         assert_eq!(
             error.to_string(),
@@ -404,6 +449,26 @@ fn relative_production_root_is_rejected_before_filesystem_access() {
 }
 
 #[test]
+fn write_probe_targets_state_root_and_cleans_a_new_empty_root_on_failure() {
+    let root = TestProductionRoot::new();
+    let filesystem = FaultFileSystem::new(FaultPoint::ProbeCreate);
+    let expected_probe = root
+        .path()
+        .join(".troupe")
+        .join(format!("{WRITE_PROBE_PREFIX}{}", run_id()));
+
+    let error = ArchiveLayout::prepare_with(&filesystem, root.path(), run_id())
+        .expect_err("state-root probe failure must fail startup");
+
+    assert_eq!(error.code(), ArchiveStartupErrorCode::ProbeCreateFailed);
+    assert_eq!(error.path(), expected_probe);
+    assert!(
+        !root.path().join(".troupe").exists(),
+        "a newly created empty state root should be removed after probe failure"
+    );
+}
+
+#[test]
 fn read_only_and_identity_mismatch_fail_closed() {
     let root = TestProductionRoot::new();
     create_existing_archive(root.path());
@@ -423,7 +488,10 @@ fn read_only_and_identity_mismatch_fail_closed() {
     let collision = FaultFileSystem::new(FaultPoint::IdentityMismatch);
     let error = ArchiveLayout::prepare_with(&collision, root.path(), run_id())
         .expect_err("path/fstat identity mismatch must fail");
-    assert_eq!(error.code(), ArchiveStartupErrorCode::DirectoryIdentityChanged);
+    assert_eq!(
+        error.code(),
+        ArchiveStartupErrorCode::DirectoryIdentityChanged
+    );
     collision.assert_confined_to(root.path());
 }
 

@@ -6,7 +6,7 @@ use troupe_diagnostics_core::id::CanonicalUuid;
 
 use super::probe::{
     ArchiveDirectory, ArchiveFileSystem, NodeKind, NodeMetadata, ProbeError, ProbeErrorCode,
-    RealFileSystem, verify_directory_is_writable,
+    RealFileSystem, WRITE_PROBE_PREFIX, verify_directory_is_writable,
 };
 
 const OWNER_DIRECTORY_MODE: u32 = 0o700;
@@ -154,7 +154,17 @@ impl ArchiveLayout {
         inspect_directory(filesystem, production_root, false)?;
 
         let troupe_directory = production_root.join(".troupe");
-        ensure_owned_directory(filesystem, &troupe_directory)?;
+        let (troupe_identity, troupe_created) =
+            ensure_state_directory(filesystem, &troupe_directory)?;
+        let probe_name = format!("{WRITE_PROBE_PREFIX}{run_id}");
+        if let Err(error) = verify_directory_is_writable(filesystem, &troupe_directory, &probe_name)
+        {
+            if troupe_created {
+                cleanup_new_directory(filesystem, &troupe_directory, troupe_identity);
+            }
+            return Err(ArchiveStartupError::from_probe(error));
+        }
+
         let diagnostics_directory = troupe_directory.join("diagnostics");
         ensure_owned_directory(filesystem, &diagnostics_directory)?;
         let instances_directory = diagnostics_directory.join("instances");
@@ -162,12 +172,7 @@ impl ArchiveLayout {
         let runs_directory = diagnostics_directory.join("runs");
         ensure_owned_directory(filesystem, &runs_directory)?;
         let run_directory = runs_directory.join(run_id.to_string());
-        let run_identity = create_run_directory(filesystem, &run_directory)?;
-
-        if let Err(error) = verify_directory_is_writable(filesystem, &run_directory) {
-            cleanup_new_run_directory(filesystem, &run_directory, run_identity);
-            return Err(ArchiveStartupError::from_probe(error));
-        }
+        create_run_directory(filesystem, &run_directory)?;
 
         Ok(Self {
             production_root: production_root.to_path_buf(),
@@ -259,10 +264,7 @@ fn inspect_directory<F: ArchiveFileSystem>(
     Ok(secured_metadata)
 }
 
-fn validate_directory_kind(
-    path: &Path,
-    metadata: NodeMetadata,
-) -> Result<(), ArchiveStartupError> {
+fn validate_directory_kind(path: &Path, metadata: NodeMetadata) -> Result<(), ArchiveStartupError> {
     match metadata.kind {
         NodeKind::Directory => Ok(()),
         NodeKind::Symlink => Err(ArchiveStartupError::logical(
@@ -300,14 +302,16 @@ fn ensure_owned_directory<F: ArchiveFileSystem>(
             validate_directory_kind(path, metadata)?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            filesystem.mkdir(path, OWNER_DIRECTORY_MODE).map_err(|error| {
-                let code = if error.kind() == io::ErrorKind::AlreadyExists {
-                    ArchiveStartupErrorCode::DirectoryIdentityChanged
-                } else {
-                    ArchiveStartupErrorCode::DirectoryCreateFailed
-                };
-                ArchiveStartupError::new(code, path, error)
-            })?;
+            filesystem
+                .mkdir(path, OWNER_DIRECTORY_MODE)
+                .map_err(|error| {
+                    let code = if error.kind() == io::ErrorKind::AlreadyExists {
+                        ArchiveStartupErrorCode::DirectoryIdentityChanged
+                    } else {
+                        ArchiveStartupErrorCode::DirectoryCreateFailed
+                    };
+                    ArchiveStartupError::new(code, path, error)
+                })?;
         }
         Err(error) => {
             return Err(ArchiveStartupError::new(
@@ -318,6 +322,39 @@ fn ensure_owned_directory<F: ArchiveFileSystem>(
         }
     }
     inspect_directory(filesystem, path, true)
+}
+
+fn ensure_state_directory<F: ArchiveFileSystem>(
+    filesystem: &F,
+    path: &Path,
+) -> Result<(NodeMetadata, bool), ArchiveStartupError> {
+    let created = match filesystem.path_metadata(path) {
+        Ok(metadata) => {
+            validate_directory_kind(path, metadata)?;
+            false
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            filesystem
+                .mkdir(path, OWNER_DIRECTORY_MODE)
+                .map_err(|error| {
+                    let code = if error.kind() == io::ErrorKind::AlreadyExists {
+                        ArchiveStartupErrorCode::DirectoryIdentityChanged
+                    } else {
+                        ArchiveStartupErrorCode::DirectoryCreateFailed
+                    };
+                    ArchiveStartupError::new(code, path, error)
+                })?;
+            true
+        }
+        Err(error) => {
+            return Err(ArchiveStartupError::new(
+                ArchiveStartupErrorCode::DirectoryInspectFailed,
+                path,
+                error,
+            ));
+        }
+    };
+    inspect_directory(filesystem, path, created).map(|metadata| (metadata, created))
 }
 
 fn create_run_directory<F: ArchiveFileSystem>(
@@ -360,7 +397,7 @@ fn classify_run_collision<F: ArchiveFileSystem>(
     }
 }
 
-fn cleanup_new_run_directory<F: ArchiveFileSystem>(
+fn cleanup_new_directory<F: ArchiveFileSystem>(
     filesystem: &F,
     path: &Path,
     expected: NodeMetadata,

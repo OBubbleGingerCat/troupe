@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const WRITE_PROBE_NAME: &str = ".troupe-write-probe";
+pub const WRITE_PROBE_PREFIX: &str = ".troupe-write-probe-";
 const WRITE_PROBE_MODE: u32 = 0o600;
 const WRITE_PROBE_PAYLOAD: &[u8] = b"troupe-diagnostics-write-probe-v1\n";
 
@@ -79,7 +79,9 @@ impl ArchiveDirectory for RealDirectory {
     }
 
     fn fstat(&self) -> io::Result<NodeMetadata> {
-        self.0.metadata().map(|value| NodeMetadata::from_metadata(&value))
+        self.0
+            .metadata()
+            .map(|value| NodeMetadata::from_metadata(&value))
     }
 }
 
@@ -199,8 +201,9 @@ fn close_and_unlink_after_failure<F: ArchiveFileSystem>(
 pub fn verify_directory_is_writable<F: ArchiveFileSystem>(
     filesystem: &F,
     directory: &Path,
+    probe_name: &str,
 ) -> Result<(), ProbeError> {
-    let path = directory.join(WRITE_PROBE_NAME);
+    let path = directory.join(probe_name);
     let mut file = filesystem
         .create_probe(&path, WRITE_PROBE_MODE)
         .map_err(|error| ProbeError::new(ProbeErrorCode::Create, &path, error))?;
