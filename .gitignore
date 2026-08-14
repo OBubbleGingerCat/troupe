@@ -33,3 +33,4 @@ __pycache__/
 *.py[cod]
 src/troupe/_runtime*.so
 wheel-artifact/
+/.troupe-test/
