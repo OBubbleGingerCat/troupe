@@ -5,6 +5,7 @@ use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 
+use crate::diagnostic_runtime::cue_producer::{self, CueHook};
 use crate::orchestration::actor::ActorCapability;
 use crate::orchestration::cue::{Cue, CueContextError};
 use crate::orchestration::mailbox::CueOperation;
@@ -92,6 +93,11 @@ impl CueCall {
     }
 
     fn finish(&mut self) {
+        if self.phase != CueCallPhase::Done
+            && let Some(operation) = &self.operation
+        {
+            cue_producer::observe(operation, CueHook::CallerFinished);
+        }
         self.phase = CueCallPhase::Done;
         self.clear();
     }
@@ -127,6 +133,7 @@ impl CueCall {
         let transaction = scene
             .begin_admission()
             .ok_or_else(|| CueContextError::new_err(CUE_CONTEXT_ERROR))?;
+        cue_producer::admission_started(&binding, &scene);
         let instruction = self
             .instruction
             .as_ref()
@@ -165,6 +172,7 @@ impl CueCall {
             CueOperation::new_runtime(&scene, &target, &binding, cued, cue, signal.clone_ref(py));
         let waiter = Self::fresh_waiter(py, &signal)?;
         prepared.commit(operation.clone())?;
+        cue_producer::observe(&operation, CueHook::Admitted);
         Ok((signal, waiter, operation))
     }
 

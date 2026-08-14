@@ -19,6 +19,7 @@ crate-type = ["cdylib"]
 [features]
 default = []
 agent-test-support = ["troupe-agent-runtime/agent-test-support"]
+diagnostics-test-support = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

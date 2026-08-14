@@ -11,6 +11,7 @@ use pyo3::types::{
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::oneshot;
 
+use crate::diagnostic_runtime::scene_producer::{self, SceneHook};
 use crate::orchestration::production::Production;
 use crate::orchestration::scene_context::{
     CuedScope, RunBinding, SceneScope, ScopeDriver, TaskFactoryAction,
@@ -551,13 +552,17 @@ pub(crate) fn create_registered_scope_task(
     driver: &Bound<'_, PyAny>,
     lineage: TaskLineage,
 ) -> PyResult<Py<PyAny>> {
+    let diagnostic_lineage = lineage.clone();
     let permit = binding.enter_task_permit(py, driver, lineage);
     let task_result = py
         .import("asyncio")
         .and_then(|module| module.call_method1("create_task", (driver,)));
     drop(permit);
     match task_result {
-        Ok(task) => Ok(task.unbind()),
+        Ok(task) => {
+            scene_producer::observe_task(&diagnostic_lineage, SceneHook::TaskRegistered);
+            Ok(task.unbind())
+        }
         Err(error) => {
             let _ = driver.call_method0("close");
             Err(error)
@@ -840,8 +845,9 @@ impl PythonTask {
                 self.task.clone_ref(py).into_bound(py),
             )
         })?;
-        future.await?;
-        Ok(())
+        let result = future.await;
+        scene_producer::task_finished(&self.scene, result.as_ref().err());
+        result.map(|_| ())
     }
 
     pub(crate) async fn wait_scene_closed(&self) {

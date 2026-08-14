@@ -1,4 +1,5 @@
 pub(crate) mod cli;
+pub(crate) mod diagnostic_cli;
 pub(crate) mod diagnostics;
 pub(crate) mod failure;
 pub(crate) mod invocation;

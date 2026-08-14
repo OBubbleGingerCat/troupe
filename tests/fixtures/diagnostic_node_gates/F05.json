@@ -1,8 +1,30 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "rust/Cargo.toml",
+      "--package",
+      "troupe",
+      "--test",
+      "diagnostic_native_slots"
+    ],
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_public_api.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_lifecycle.py"
+    ]
+  ],
   "env": {},
-  "maturin_features": [],
+  "maturin_features": [
+    "agent-test-support",
+    "diagnostics-test-support"
+  ],
   "cache_requirements": [],
   "exclusive_resources": []
 }
