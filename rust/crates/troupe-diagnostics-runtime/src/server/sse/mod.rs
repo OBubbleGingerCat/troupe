@@ -1,4 +1,4 @@
-mod cursor;
-mod frame;
-mod replay;
-mod subscriber;
+pub mod cursor;
+pub mod frame;
+pub mod replay;
+pub mod subscriber;
