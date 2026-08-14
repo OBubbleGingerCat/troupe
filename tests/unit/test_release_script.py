@@ -14,12 +14,19 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "test_linux_release.sh"
 WORKFLOWS = ROOT / ".github" / "workflows"
+SUPPORT = ROOT / "tests" / "support"
+sys.path.insert(0, str(SUPPORT))
+
+from artifact_layout import load_artifact_layout  # noqa: E402
+
+
+BASE_ARTIFACTS = load_artifact_layout(ROOT).base
 
 VERSIONS = ["3.10", "3.11", "3.12", "3.13", "3.14"]
 QUALITY_VERSIONS = ["3.10", "3.14"]
 QUALITY_GROUP_SIZE = 9
 QUALITY_CALL_COUNT = 1 + len(QUALITY_VERSIONS) * QUALITY_GROUP_SIZE
-WHEEL_NAME = "troupe-0.1.0-cp310-abi3-manylinux_2_17_x86_64.whl"
+WHEEL_NAME = BASE_ARTIFACTS.release_wheel_name
 CALLER_LIBRARY_PATH = "/caller/lib-one:/caller/lib-two"
 CALLER_CONDA_PREFIX = "/caller/conda"
 CALLER_PYTHON_HOME = sys.base_prefix
