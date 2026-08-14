@@ -2,6 +2,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[allow(unused_imports)]
+use troupe_diagnostics_core::{
+    detail, event, hub, id, kinds, scalar, time, validate, view_protocol, wire,
+};
+
 const MODULES: &[&str] = &[
     "detail",
     "event",
@@ -32,12 +37,12 @@ fn rust_sources(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {
 }
 
 #[test]
-fn core_module_slots_are_exact_and_private() {
+fn core_module_slots_are_exact_and_workspace_visible() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source_root = crate_root.join("src");
     let declarations = MODULES
         .iter()
-        .map(|module| format!("mod {module};"))
+        .map(|module| format!("pub mod {module};"))
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(

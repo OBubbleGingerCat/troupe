@@ -2,6 +2,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[allow(unused_imports)]
+use troupe_diagnostics_runtime::{archive, query, registry, server, store};
+
 const LEAF_SLOTS: &[&str] = &[
     "archive/constants.rs",
     "archive/layout.rs",
@@ -57,7 +60,7 @@ const LEAF_SLOTS: &[&str] = &[
 const DECLARATIONS: &[(&str, &str)] = &[
     (
         "lib.rs",
-        "#![allow(dead_code)]\n\nmod archive;\nmod query;\nmod registry;\nmod server;\nmod store;\n",
+        "#![allow(dead_code)]\n\npub mod archive;\npub mod query;\npub mod registry;\npub mod server;\npub mod store;\n",
     ),
     (
         "archive/mod.rs",
@@ -106,7 +109,7 @@ fn rust_sources(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {
 }
 
 #[test]
-fn runtime_module_slots_are_exact_and_private() {
+fn runtime_module_slots_are_exact_and_workspace_visible() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let source_root = crate_root.join("src");
 
