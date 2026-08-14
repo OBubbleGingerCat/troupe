@@ -1,0 +1,32 @@
+{
+  "name": "troupe-diagnostics-frontend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": [
+    "src/**/*.css"
+  ],
+  "packageManager": "npm@10.9.4",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "dependencies": {
+    "@preact/signals": "2.11.1",
+    "lucide-preact": "1.31.0",
+    "preact": "10.29.8",
+    "uplot": "1.6.32"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1",
+    "@preact/preset-vite": "2.10.6",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/preact": "3.2.4",
+    "@types/node": "26.2.0",
+    "axe-core": "4.13.0",
+    "jsdom": "28.1.0",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}

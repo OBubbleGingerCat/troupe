@@ -1,6 +1,22 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/.node-version",
+    "frontend/diagnostics/index.html",
+    "frontend/diagnostics/package-lock.json",
+    "frontend/diagnostics/package.json",
+    "frontend/diagnostics/playwright.config.ts",
+    "frontend/diagnostics/scripts/maintain.mjs",
+    "frontend/diagnostics/src/app.tsx",
+    "frontend/diagnostics/src/main.tsx",
+    "frontend/diagnostics/src/styles/base.css",
+    "frontend/diagnostics/tests/tooling/npm-cache.schema.json",
+    "frontend/diagnostics/tests/unit/toolchain.test.ts",
+    "frontend/diagnostics/tsconfig.json",
+    "frontend/diagnostics/vite.config.ts",
+    "frontend/diagnostics/vitest.config.ts",
+    "tests/unit/test_diagnostic_frontend_contract.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
