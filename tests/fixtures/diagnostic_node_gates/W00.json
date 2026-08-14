@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_diagnostic_frontend_contract.py"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
