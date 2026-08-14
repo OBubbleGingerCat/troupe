@@ -19,6 +19,8 @@ pub(crate) enum InvocationError {
     Clap(clap::Error),
 }
 
+pub(crate) type ProductionInvocation<'py> = (Bound<'py, PyString>, Bound<'py, PyList>);
+
 fn prepare_invocation<'py>(
     py: Python<'py>,
     argv: &Bound<'py, PyList>,
@@ -58,7 +60,7 @@ fn prepare_invocation<'py>(
 pub(crate) fn parse_arguments<'py>(
     py: Python<'py>,
     argv: &Bound<'py, PyList>,
-) -> Result<(Bound<'py, PyString>, Bound<'py, PyList>), InvocationError> {
+) -> Result<ProductionInvocation<'py>, InvocationError> {
     let (clap_args, production_args) =
         prepare_invocation(py, argv).map_err(InvocationError::Python)?;
     let parsed = TroupeArgs::try_parse_from(clap_args).map_err(InvocationError::Clap)?;
@@ -76,7 +78,7 @@ pub(crate) fn parse_arguments<'py>(
 pub fn parse_invocation<'py>(
     py: Python<'py>,
     argv: &Bound<'py, PyList>,
-) -> PyResult<(Bound<'py, PyString>, Bound<'py, PyList>)> {
+) -> PyResult<ProductionInvocation<'py>> {
     parse_arguments(py, argv).map_err(|error| match error {
         InvocationError::Python(error) => error,
         InvocationError::Clap(error) => PyValueError::new_err(error.to_string()),
