@@ -171,10 +171,7 @@ impl AdmissionReserver for FakeDurableReserver {
     type Error = FakeReserveError;
     type Reservation = FakeReservation;
 
-    fn try_reserve(
-        &mut self,
-        size: AdmissionSize,
-    ) -> Result<Self::Reservation, Self::Error> {
+    fn try_reserve(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
         self.0.try_reserve(size)
     }
 }
@@ -188,10 +185,7 @@ impl AdmissionReserver for FakeBoundedReserver {
     type Error = FakeReserveError;
     type Reservation = FakeReservation;
 
-    fn try_reserve(
-        &mut self,
-        size: AdmissionSize,
-    ) -> Result<Self::Reservation, Self::Error> {
+    fn try_reserve(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
         self.0.try_reserve(size)
     }
 }
@@ -210,10 +204,7 @@ impl RecordingLiveNotifier {
 }
 
 impl LiveEventNotifier for RecordingLiveNotifier {
-    fn notify(
-        &mut self,
-        event: AcceptedDiagnosticEvent,
-    ) -> Result<(), DeliveryFailure> {
+    fn notify(&mut self, event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure> {
         self.events.lock().unwrap().push(event);
         Ok(())
     }
@@ -266,19 +257,14 @@ fn production_admission_reserves_exact_bytes_and_fans_out_one_immutable_fact() {
         Box::new(live),
     );
 
-    let receipt = hub
-        .admit(counter_candidate(11), Some(&subscriber))
-        .unwrap();
+    let receipt = hub.admit(counter_candidate(11), Some(&subscriber)).unwrap();
     let accepted = receipt.accepted();
 
     assert_eq!(accepted.identity().run_id(), run_id());
     assert_eq!(accepted.identity().sequence().get(), 1);
     assert_eq!(accepted.event().header().sequence().get(), 1);
     assert_eq!(receipt.live_delivery(), &DeliveryOutcome::Delivered);
-    assert_eq!(
-        receipt.subscriber_delivery(),
-        &DeliveryOutcome::Delivered
-    );
+    assert_eq!(receipt.subscriber_delivery(), &DeliveryOutcome::Delivered);
     assert_eq!(
         serde_json::from_slice::<DiagnosticEvent>(accepted.canonical_bytes()).unwrap(),
         *accepted.event()
@@ -296,7 +282,10 @@ fn production_admission_reserves_exact_bytes_and_fans_out_one_immutable_fact() {
     assert!(durable.committed[0].same_fact(accepted));
     assert!(live[0].same_fact(accepted));
     assert!(subscriber[0].same_fact(accepted));
-    assert_eq!(durable.committed[0].canonical_bytes(), live[0].canonical_bytes());
+    assert_eq!(
+        durable.committed[0].canonical_bytes(),
+        live[0].canonical_bytes()
+    );
     assert_eq!(live[0].canonical_bytes(), subscriber[0].canonical_bytes());
 }
 
@@ -337,7 +326,9 @@ fn reference_failure_releases_reservation_without_consuming_sequence() {
         Box::new(RecordingLiveNotifier::default()),
     );
 
-    let error = hub.admit(finish_before_start_candidate(), None).unwrap_err();
+    let error = hub
+        .admit(finish_before_start_candidate(), None)
+        .unwrap_err();
     assert!(matches!(
         error,
         HubAdmissionError::Reference(ref error)
@@ -380,7 +371,10 @@ fn candidate_cannot_override_hub_identity_and_failure_is_not_admitted() {
             None,
         )
         .unwrap_err();
-    assert!(matches!(error, HubAdmissionError::CandidateIdentityMismatch { .. }));
+    assert!(matches!(
+        error,
+        HubAdmissionError::CandidateIdentityMismatch { .. }
+    ));
     assert!(reserver.snapshot().requests.is_empty());
 
     let accepted = hub.admit(counter_candidate(1), None).unwrap();
@@ -399,9 +393,7 @@ fn subscriber_failure_is_reported_without_rolling_back_the_fact() {
         Box::new(live),
     );
 
-    let first = hub
-        .admit(counter_candidate(1), Some(&subscriber))
-        .unwrap();
+    let first = hub.admit(counter_candidate(1), Some(&subscriber)).unwrap();
     assert!(matches!(
         first.subscriber_delivery(),
         DeliveryOutcome::Failed(error) if error.code() == "subscriber_unavailable"
@@ -423,17 +415,11 @@ fn subscriber_failure_is_reported_without_rolling_back_the_fact() {
 fn sink_only_profile_has_no_live_delivery_and_keeps_local_gap_out_of_event_stream() {
     let reserver = FakeReserver::default();
     let subscriber = RecordingSubscriber::default();
-    let hub = SinkOnlyDiagnosticHub::sink_only(
-        run_id(),
-        FakeBoundedReserver(reserver.clone()),
-    );
+    let hub = SinkOnlyDiagnosticHub::sink_only(run_id(), FakeBoundedReserver(reserver.clone()));
 
     let counter = hub.admit(counter_candidate(1), &subscriber).unwrap();
     assert_eq!(counter.live_delivery(), &DeliveryOutcome::NotConfigured);
-    assert_eq!(
-        counter.subscriber_delivery(),
-        &DeliveryOutcome::Delivered
-    );
+    assert_eq!(counter.subscriber_delivery(), &DeliveryOutcome::Delivered);
     assert_eq!(counter.accepted().identity().sequence().get(), 1);
     assert!(subscriber.events()[0].same_fact(counter.accepted()));
 
@@ -456,9 +442,7 @@ fn sink_only_profile_has_no_live_delivery_and_keeps_local_gap_out_of_event_strea
     assert_eq!(gap.dropped_events(), 3);
     assert_eq!(gap.dropped_canonical_bytes(), 120);
 
-    let canonical_gap = hub
-        .admit(observation_gap_candidate(), &subscriber)
-        .unwrap();
+    let canonical_gap = hub.admit(observation_gap_candidate(), &subscriber).unwrap();
     assert_eq!(
         canonical_gap.accepted().event().kind(),
         DiagnosticEventKind::ObservationGap
@@ -514,8 +498,8 @@ fn concurrent_producers_are_dense_and_ordered_across_repeated_barrier_seeds() {
             .flat_map(|handle| handle.join().unwrap())
             .collect::<Vec<_>>();
         observed.sort_unstable();
-        let expected = (1..=u64::try_from(PRODUCERS * EVENTS_PER_PRODUCER).unwrap())
-            .collect::<Vec<_>>();
+        let expected =
+            (1..=u64::try_from(PRODUCERS * EVENTS_PER_PRODUCER).unwrap()).collect::<Vec<_>>();
         assert_eq!(observed, expected, "seed {seed}");
 
         let durable = reserver.snapshot();

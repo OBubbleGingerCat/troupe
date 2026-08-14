@@ -75,10 +75,7 @@ pub trait AdmissionReserver: Send {
     type Error: std::error::Error + Send + Sync + 'static;
     type Reservation: AdmissionReservation;
 
-    fn try_reserve(
-        &mut self,
-        size: AdmissionSize,
-    ) -> Result<Self::Reservation, Self::Error>;
+    fn try_reserve(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error>;
 }
 
 pub trait MandatoryDurableReserver: AdmissionReserver {}
@@ -153,10 +150,7 @@ pub enum DeliveryOutcome {
 }
 
 pub trait LiveEventNotifier: Send {
-    fn notify(
-        &mut self,
-        event: AcceptedDiagnosticEvent,
-    ) -> Result<(), DeliveryFailure>;
+    fn notify(&mut self, event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure>;
 }
 
 pub trait ActEventSubscriber: Send + Sync {
@@ -240,7 +234,9 @@ impl<E: fmt::Display> fmt::Display for HubAdmissionError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StatePoisoned => formatter.write_str("diagnostic hub state is poisoned"),
-            Self::SequenceExhausted => formatter.write_str("diagnostic event sequence is exhausted"),
+            Self::SequenceExhausted => {
+                formatter.write_str("diagnostic event sequence is exhausted")
+            }
             Self::CandidateIdentityMismatch { expected, actual } => write!(
                 formatter,
                 "diagnostic candidate identity {}:{} differs from assigned {}:{}",
@@ -374,10 +370,7 @@ where
         let identity = EventIdentity::new(state.run_id, SchemaU64::new(next));
 
         let event = candidate.materialize(identity);
-        let actual = EventIdentity::new(
-            event.header().run_id(),
-            event.header().sequence(),
-        );
+        let actual = EventIdentity::new(event.header().run_id(), event.header().sequence());
         if actual != identity {
             return Err(HubAdmissionError::CandidateIdentityMismatch {
                 expected: identity,
