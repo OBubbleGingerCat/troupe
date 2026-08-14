@@ -29,270 +29,19 @@ from wheel.wheelfile import WheelError, WheelFile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PACKAGE = ROOT / "src" / "troupe"
-EXPECTED_WRAPPER = (
-    b"from dataclasses import dataclass as _dataclass\n"
-    b"from os import PathLike as _PathLike\n"
-    b"from typing import Literal as _Literal\n"
-    b"\n"
-    b"from ._runtime import Actor as Actor\n"
-    b"from ._runtime import ActorHandle as ActorHandle\n"
-    b"from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError\n"
-    b"from ._runtime import AgentError as AgentError\n"
-    b"from ._runtime import AgentResultError as AgentResultError\n"
-    b"from ._runtime import AgentResultIssue as AgentResultIssue\n"
-    b"from ._runtime import AgentResultMissingError as AgentResultMissingError\n"
-    b"from ._runtime import AgentSessionBrokenError as AgentSessionBrokenError\n"
-    b"from ._runtime import AgentSessionBusyError as AgentSessionBusyError\n"
-    b"from ._runtime import AgentSessionError as AgentSessionError\n"
-    b"from ._runtime import AgentSessionStartError as AgentSessionStartError\n"
-    b"from ._runtime import AgentTurnError as AgentTurnError\n"
-    b"from ._runtime import act_schema as act_schema\n"
-    b"from ._runtime import Cue as Cue\n"
-    b"from ._runtime import CueContextError as CueContextError\n"
-    b"from ._runtime import Effect as Effect\n"
-    b"from ._runtime import EffectContextError as EffectContextError\n"
-    b"from ._runtime import Production as Production\n"
-    b"\n"
-    b"\n"
-    b"@_dataclass(frozen=True, slots=True, kw_only=True)\n"
-    b"class AgentProfile:\n"
-    b'    agent: _Literal["codex", "claude", "kimi"]\n'
-    b"    workspace: str | _PathLike[str]\n"
-    b"    model: str\n"
-    b"    effort: str | None\n"
-    b"\n"
-    b"    def __post_init__(self) -> None:\n"
-    b"        if not isinstance(self.agent, str):\n"
-    b'            raise TypeError("agent must be a str")\n'
-    b'        if self.agent not in {"codex", "claude", "kimi"}:\n'
-    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi'\")\n"
-    b"        if not isinstance(self.model, str):\n"
-    b'            raise TypeError("model must be a str")\n'
-    b"        if not self.model:\n"
-    b'            raise ValueError("model must not be empty")\n'
-    b"        if self.effort is not None and not isinstance(self.effort, str):\n"
-    b'            raise TypeError("effort must be a str or None")\n'
-    b'        if self.effort == "":\n'
-    b'            raise ValueError("effort must not be empty")\n'
-    b"\n"
-    b"\n"
-    b"__all__ = [\n"
-    b'    "Actor",\n'
-    b'    "ActorHandle",\n'
-    b'    "AgentAuthenticationRequiredError",\n'
-    b'    "AgentError",\n'
-    b'    "AgentProfile",\n'
-    b'    "AgentResultError",\n'
-    b'    "AgentResultIssue",\n'
-    b'    "AgentResultMissingError",\n'
-    b'    "AgentSessionBrokenError",\n'
-    b'    "AgentSessionBusyError",\n'
-    b'    "AgentSessionError",\n'
-    b'    "AgentSessionStartError",\n'
-    b'    "AgentTurnError",\n'
-    b'    "Cue",\n'
-    b'    "CueContextError",\n'
-    b'    "Effect",\n'
-    b'    "EffectContextError",\n'
-    b'    "Production",\n'
-    b'    "act_schema",\n'
-    b"]\n"
-)
-EXPECTED_STUB = (
-    b"from __future__ import annotations\n"
-    b"\n"
-    b"from collections.abc import Mapping\n"
-    b"from dataclasses import dataclass\n"
-    b"from os import PathLike\n"
-    b"from re import Pattern\n"
-    b"from typing import Any, Literal, NoReturn, TypeVar, final, overload\n"
-    b"from typing_extensions import disjoint_base\n"
-    b"\n"
-    b"from . import act_schema as act_schema\n"
-    b"\n"
-    b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
-    b'_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]\n'
-    b"\n"
-    b"class AgentError(RuntimeError):\n"
-    b"    code: str\n"
-    b"\n"
-    b"class AgentSessionBusyError(AgentError): ...\n"
-    b"\n"
-    b"class AgentSessionError(AgentError): ...\n"
-    b"\n"
-    b"class AgentSessionStartError(AgentSessionError):\n"
-    b"    phase: str\n"
-    b"\n"
-    b"class AgentAuthenticationRequiredError(AgentSessionStartError): ...\n"
-    b"\n"
-    b"class AgentSessionBrokenError(AgentSessionError): ...\n"
-    b"\n"
-    b"class AgentTurnError(AgentError): ...\n"
-    b"\n"
-    b"@final\n"
-    b"class AgentResultIssue:\n"
-    b"    def __new__(cls, _token: NoReturn, /) -> AgentResultIssue: ...\n"
-    b"    @property\n"
-    b"    def path(self) -> str: ...\n"
-    b"    @property\n"
-    b"    def code(self) -> str: ...\n"
-    b"    @property\n"
-    b"    def message(self) -> str: ...\n"
-    b"\n"
-    b"class AgentResultError(AgentTurnError):\n"
-    b"    issues: tuple[AgentResultIssue, ...]\n"
-    b"    invalid_calls: int\n"
-    b"    details_truncated: bool\n"
-    b"\n"
-    b"class AgentResultMissingError(AgentResultError): ...\n"
-    b"\n"
-    b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
-    b"class AgentProfile:\n"
-    b'    agent: Literal["codex", "claude", "kimi"]\n'
-    b"    workspace: str | PathLike[str]\n"
-    b"    model: str\n"
-    b"    effort: str | None\n"
-    b"    def __post_init__(self) -> None: ...\n"
-    b"\n"
-    b"@disjoint_base\n"
-    b"class Actor:\n"
-    b"    def __init__(self) -> None: ...\n"
-    b"    @property\n"
-    b"    def name(self) -> str: ...\n"
-    b"    @property\n"
-    b"    def production(self) -> Production: ...\n"
-    b"    def make_effect(\n"
-    b"        self,\n"
-    b"        effect_type: type[_EffectT],\n"
-    b"        *,\n"
-    b"        effect_args: tuple[Any, ...],\n"
-    b"        effect_kwargs: dict[str, Any],\n"
-    b"    ) -> _EffectT: ...\n"
-    b"    async def act(\n"
-    b"        self,\n"
-    b"        *,\n"
-    b"        script: str,\n"
-    b"        output_schema: dict[str, act_schema.FieldSpec],\n"
-    b"    ) -> dict[str, _JsonValue]:\n"
-    b'        """Return one validated JSON object from this Actor\'s persistent agent session."""\n'
-    b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
-    b"\n"
-    b"@final\n"
-    b"class ActorHandle:\n"
-    b"    @property\n"
-    b"    def name(self) -> str: ...\n"
-    b"    async def cue(self, instruction: dict[Any, Any]) -> tuple[Effect, ...]: ...\n"
-    b"\n"
-    b"@final\n"
-    b"class Cue:\n"
-    b"    @property\n"
-    b"    def id(self) -> str: ...\n"
-    b"    @property\n"
-    b"    def instruction(self) -> Mapping[Any, Any]: ...\n"
-    b"    @property\n"
-    b"    def source(self) -> str: ...\n"
-    b"\n"
-    b"class CueContextError(RuntimeError): ...\n"
-    b"\n"
-    b"@disjoint_base\n"
-    b"class Effect:\n"
-    b"    @property\n"
-    b"    def id(self) -> str: ...\n"
-    b"    @property\n"
-    b"    def owner(self) -> str: ...\n"
-    b"\n"
-    b"class EffectContextError(RuntimeError): ...\n"
-    b"\n"
-    b"@disjoint_base\n"
-    b"class Production:\n"
-    b"    def __new__(cls, args: list[str], /) -> Production: ...\n"
-    b"    def cast_actor(\n"
-    b"        self,\n"
-    b"        actor_type: type[Actor],\n"
-    b"        *,\n"
-    b"        name: str,\n"
-    b"        agent_profile: AgentProfile,\n"
-    b"        actor_args: tuple[Any, ...],\n"
-    b"        actor_kwargs: dict[str, Any],\n"
-    b"    ) -> ActorHandle: ...\n"
-    b"    @overload\n"
-    b"    def get_actor(self, name: str) -> ActorHandle | None: ...\n"
-    b"    @overload\n"
-    b"    def get_actor(self, pattern: Pattern[str]) -> list[ActorHandle]: ...\n"
-    b"    def get_actors(self) -> list[ActorHandle]: ...\n"
-    b"    async def start(self) -> None: ...\n"
-    b"    async def scene(self) -> None: ...\n"
-    b"    async def stop(self) -> None: ...\n"
-    b"\n"
-    b"__all__ = [\n"
-    b'    "Actor",\n'
-    b'    "ActorHandle",\n'
-    b'    "AgentAuthenticationRequiredError",\n'
-    b'    "AgentError",\n'
-    b'    "AgentProfile",\n'
-    b'    "AgentResultError",\n'
-    b'    "AgentResultIssue",\n'
-    b'    "AgentResultMissingError",\n'
-    b'    "AgentSessionBrokenError",\n'
-    b'    "AgentSessionBusyError",\n'
-    b'    "AgentSessionError",\n'
-    b'    "AgentSessionStartError",\n'
-    b'    "AgentTurnError",\n'
-    b'    "Cue",\n'
-    b'    "CueContextError",\n'
-    b'    "Effect",\n'
-    b'    "EffectContextError",\n'
-    b'    "Production",\n'
-    b'    "act_schema",\n'
-    b"]\n"
-)
-EXPECTED_ACT_SCHEMA_STUB_SHA256 = (
-    "3236d84d315e43785d82edb677fb1c50ade695aeafc7ec22e469a9e52d85a75b"
-)
-EXPECTED_PY_TYPED = b""
-PUBLIC_EXPORTS = [
-    "Actor",
-    "ActorHandle",
-    "AgentAuthenticationRequiredError",
-    "AgentError",
-    "AgentProfile",
-    "AgentResultError",
-    "AgentResultIssue",
-    "AgentResultMissingError",
-    "AgentSessionBrokenError",
-    "AgentSessionBusyError",
-    "AgentSessionError",
-    "AgentSessionStartError",
-    "AgentTurnError",
-    "Cue",
-    "CueContextError",
-    "Effect",
-    "EffectContextError",
-    "Production",
-    "act_schema",
-]
-EXPECTED_EXAMPLE_FILES = (
-    "README.md",
-    "actor_pipeline/__init__.py",
-    "actor_pipeline/production.py",
-    "cancellation_cleanup/__init__.py",
-    "cancellation_cleanup/production.py",
-    "cooperative_workers/__init__.py",
-    "cooperative_workers/production.py",
-    "hello_actor/__init__.py",
-    "hello_actor/production.py",
-    "live_agents/README.md",
-    "live_agents/claude_actor/__init__.py",
-    "live_agents/claude_actor/production.py",
-    "live_agents/codex_actor/__init__.py",
-    "live_agents/codex_actor/production.py",
-    "live_agents/kimi_actor/__init__.py",
-    "live_agents/kimi_actor/production.py",
-    "live_agents/mixed_repository_repair/__init__.py",
-    "live_agents/mixed_repository_repair/production.py",
-    "repeating_scenes/__init__.py",
-    "repeating_scenes/production.py",
-)
+SUPPORT = ROOT / "tests" / "support"
+sys.path.insert(0, str(SUPPORT))
+
+from artifact_layout import load_artifact_layout  # noqa: E402
+
+
+BASE_ARTIFACTS = load_artifact_layout(ROOT).base
+EXPECTED_WRAPPER = BASE_ARTIFACTS.package_files["__init__.py"].data
+EXPECTED_STUB = BASE_ARTIFACTS.package_files["__init__.pyi"].data
+EXPECTED_ACT_SCHEMA_STUB_SHA256 = BASE_ARTIFACTS.package_files["act_schema.pyi"].sha256
+EXPECTED_PY_TYPED = BASE_ARTIFACTS.package_files["py.typed"].data
+PUBLIC_EXPORTS = list(BASE_ARTIFACTS.public_exports)
+EXPECTED_EXAMPLE_FILES = tuple(BASE_ARTIFACTS.examples)
 SMOKE_TIMEOUT = 10.0
 
 
@@ -332,9 +81,9 @@ def _assert_thin_package(names: Sequence[str], prefix: str) -> None:
     relative = _relative_package_files(names, prefix)
     python_files = [name for name in relative if name.endswith(".py")]
     stub_files = [name for name in relative if name.endswith(".pyi")]
-    if python_files != ["__init__.py"]:
+    if python_files != list(BASE_ARTIFACTS.package_python_members):
         raise VerificationError(f"unexpected Python package files: {python_files}")
-    if stub_files != ["__init__.pyi", "act_schema.pyi"]:
+    if stub_files != list(BASE_ARTIFACTS.package_stub_members):
         raise VerificationError(f"unexpected stub files: {stub_files}")
     if relative.count("py.typed") != 1:
         raise VerificationError("py.typed is missing or ambiguous")
@@ -470,12 +219,10 @@ def _validate_sdist(
             prefix = _sdist_package_prefix(regular_names)
             package_names = [name for name in regular_names if name.startswith(prefix)]
             _assert_thin_package(package_names, prefix)
-            if set(package_names) != {
-                f"{prefix}__init__.py",
-                f"{prefix}__init__.pyi",
-                f"{prefix}act_schema.pyi",
-                f"{prefix}py.typed",
-            }:
+            expected_package_names = {
+                f"{prefix}{name}" for name in BASE_ARTIFACTS.sdist_package_members
+            }
+            if set(package_names) != expected_package_names:
                 raise VerificationError("sdist runtime package inventory is not exact")
 
             distribution_prefix = prefix.removesuffix("src/troupe/")
@@ -652,15 +399,8 @@ def _validate_wheel(
             dist_info = "troupe-0.1.0.dist-info"
             record = f"{dist_info}/RECORD"
             expected_names = {
-                "troupe/__init__.py",
-                "troupe/__init__.pyi",
-                "troupe/act_schema.pyi",
-                "troupe/py.typed",
-                native_libraries[0],
-                f"{dist_info}/METADATA",
-                f"{dist_info}/WHEEL",
-                f"{dist_info}/entry_points.txt",
-                record,
+                native_libraries[0] if name == "troupe/<native>" else name
+                for name in BASE_ARTIFACTS.wheel_members
             }
             if set(names) != expected_names:
                 unexpected = sorted(set(names) - expected_names)
