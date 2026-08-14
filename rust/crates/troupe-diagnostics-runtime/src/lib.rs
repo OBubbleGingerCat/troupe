@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-mod archive;
-mod query;
-mod registry;
-mod server;
-mod store;
+pub mod archive;
+pub mod query;
+pub mod registry;
+pub mod server;
+pub mod store;

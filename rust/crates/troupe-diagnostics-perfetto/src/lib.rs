@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-mod atomic_file;
-mod collect;
-mod dump;
-mod identity;
-mod project;
-mod schema;
-mod tracks;
+pub mod atomic_file;
+pub mod collect;
+pub mod dump;
+pub mod identity;
+pub mod project;
+pub mod schema;
+pub mod tracks;
