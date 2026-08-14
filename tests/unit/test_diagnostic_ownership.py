@@ -96,17 +96,52 @@ def _initialize_git(repository: Path) -> str:
     return _git(repository, "rev-parse", "HEAD")
 
 
+def _plan_node(repository: Path, node_id: str) -> None:
+    _write(
+        _artifact(repository, node_id),
+        {
+            "state": "planned",
+            "introduced": [],
+            "modified": [],
+            "removed": [],
+            "generated": [],
+        },
+    )
+    _write(
+        _gate(repository, node_id),
+        {
+            "state": "planned",
+            "argv": [],
+            "env": {},
+            "maturin_features": [],
+            "cache_requirements": [],
+            "exclusive_resources": [],
+        },
+    )
+
+
 def _realize_f01(repository: Path, introduced: list[str]) -> None:
-    fragment_path = _artifact(repository, "F01")
-    fragment = _json(fragment_path)
-    fragment["state"] = "realized"
-    fragment["introduced"] = introduced
-    _write(fragment_path, fragment)
-    gate_path = _gate(repository, "F01")
-    gate = _json(gate_path)
-    gate["state"] = "realized"
-    gate["argv"] = [["pytest", "-q"]]
-    _write(gate_path, gate)
+    _write(
+        _artifact(repository, "F01"),
+        {
+            "state": "realized",
+            "introduced": introduced,
+            "modified": [],
+            "removed": [],
+            "generated": [],
+        },
+    )
+    _write(
+        _gate(repository, "F01"),
+        {
+            "state": "realized",
+            "argv": [["pytest", "-q"]],
+            "env": {},
+            "maturin_features": [],
+            "cache_requirements": [],
+            "exclusive_resources": [],
+        },
+    )
 
 
 def test_index_is_byte_exact_with_the_accepted_plan() -> None:
@@ -116,33 +151,24 @@ def test_index_is_byte_exact_with_the_accepted_plan() -> None:
     )
 
 
-def test_only_f00_lifecycle_files_are_realized() -> None:
+def test_artifact_and_gate_lifecycle_states_advance_together() -> None:
     layout = load_artifact_layout(ROOT)
     gates = load_gate_descriptors(ROOT)
 
-    assert layout.fragments["F00"].state == "realized"
-    assert gates["F00"].state == "realized"
-    assert all(
-        fragment.state == "planned" and not fragment.static_paths and not fragment.generated
-        for node_id, fragment in layout.fragments.items()
-        if node_id != "F00"
-    )
-    assert all(
-        gate.state == "planned"
-        and not gate.argv
-        and not gate.env
-        and not gate.maturin_features
-        and not gate.cache_requirements
-        and not gate.exclusive_resources
-        for node_id, gate in gates.items()
-        if node_id != "F00"
-    )
+    realized_fragments = {
+        node_id for node_id, fragment in layout.fragments.items() if fragment.state == "realized"
+    }
+    realized_gates = {node_id for node_id, gate in gates.items() if gate.state == "realized"}
+
+    assert "F00" in realized_fragments
+    assert realized_fragments == realized_gates
 
 
 def test_realized_fragments_extend_baseline_inventories_without_rewriting_base(
     tmp_path: Path,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01")
     fragment = _json(path)
     fragment["state"] = "realized"
@@ -243,6 +269,7 @@ def test_illegal_lifecycle_state_is_rejected(tmp_path: Path, kind: str) -> None:
 
 def test_planned_artifact_fragment_must_be_empty(tmp_path: Path) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01")
     value = _json(path)
     value["introduced"] = ["tests/future.py"]
@@ -254,6 +281,7 @@ def test_planned_artifact_fragment_must_be_empty(tmp_path: Path) -> None:
 
 def test_planned_gate_descriptor_must_be_empty(tmp_path: Path) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _gate(repository, "F01")
     value = _json(path)
     value["argv"] = [["pytest", "-q"]]
@@ -278,6 +306,7 @@ def test_every_planned_artifact_category_must_be_empty(
     value: object,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01")
     fragment = _json(path)
     fragment[field] = value
@@ -304,6 +333,7 @@ def test_every_planned_gate_field_must_be_empty(
     value: object,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, node_id)
     path = _gate(repository, node_id)
     gate = _json(path)
     gate[field] = value
@@ -316,6 +346,7 @@ def test_every_planned_gate_field_must_be_empty(
 @pytest.mark.parametrize("kind", ["artifact", "gate"])
 def test_realized_lifecycle_file_must_be_closed(tmp_path: Path, kind: str) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
     value = _json(path)
     value["state"] = "realized"
@@ -362,6 +393,7 @@ def test_fragment_paths_are_unique_within_and_across_categories(
     change: str,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01")
     value = _json(path)
     value["state"] = "realized"
@@ -391,6 +423,7 @@ def test_fragment_rejects_globs_subsets_and_noncanonical_paths(
     message: str,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01")
     value = _json(path)
     value["state"] = "realized"
@@ -403,6 +436,7 @@ def test_fragment_rejects_globs_subsets_and_noncanonical_paths(
 
 def test_fragment_rejects_directory_authorization(tmp_path: Path) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     (repository / "tests/unit").mkdir()
     path = _artifact(repository, "F01")
     value = _json(path)
@@ -427,6 +461,7 @@ def test_fragment_rejects_ignore_rules(tmp_path: Path) -> None:
 
 def test_removed_artifact_requires_its_preimage_hash(tmp_path: Path) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _artifact(repository, "F01")
     value = _json(path)
     value["state"] = "realized"
@@ -453,6 +488,7 @@ def test_gate_rejects_unknown_environment_feature_cache_and_resource(
     message: str,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _gate(repository, "F01")
     gate = _json(path)
     gate["state"] = "realized"
@@ -466,6 +502,7 @@ def test_gate_rejects_unknown_environment_feature_cache_and_resource(
 
 def test_gate_rejects_shell_command_strings(tmp_path: Path) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _gate(repository, "F01")
     gate = _json(path)
     gate["state"] = "realized"
@@ -478,6 +515,7 @@ def test_gate_rejects_shell_command_strings(tmp_path: Path) -> None:
 
 def test_gate_argv_may_repeat_a_literal_argument(tmp_path: Path) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     path = _gate(repository, "F01")
     gate = _json(path)
     gate["state"] = "realized"
@@ -537,6 +575,7 @@ def test_bootstrap_ownership_audit_matches_lifecycle_and_declared_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     base = _initialize_git(repository)
     _realize_f01(repository, ["tests/new.py"])
     (repository / "tests/new.py").write_text("new\n", encoding="utf-8")
@@ -553,6 +592,7 @@ def test_bootstrap_ownership_audit_rejects_undeclared_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     base = _initialize_git(repository)
     _realize_f01(repository, ["tests/new.py"])
     (repository / "tests/new.py").write_text("new\n", encoding="utf-8")
@@ -571,6 +611,7 @@ def test_bootstrap_ownership_audit_checks_removed_preimage_hash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _copy_contract(tmp_path)
+    _plan_node(repository, "F01")
     old = repository / "tests/old.py"
     old.write_text("old\n", encoding="utf-8")
     base = _initialize_git(repository)
