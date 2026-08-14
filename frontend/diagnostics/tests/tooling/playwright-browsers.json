@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "lockSha256": "d02077d88fce2afe6c62a2f6d5aa75b2a5bcfe6cbbda040f1cffbffe35eba595",
+  "playwrightCore": {
+    "version": "1.62.1",
+    "integrity": "sha512-wPYSwEBJY9GHraISXqyqtx0na0LpO3XEX7jNDhntbex7tzUS7kLnZsOlFruFJB4Hi/rhDMjXGqHewDZ68nYZVw==",
+    "browsersSha256": "f306eed529599b1eaf2f8a85db9de2b23e1a3fe36c2b66434b7c9434fb627a99"
+  },
+  "platforms": {
+    "linux-x64": {
+      "playwrightPlatform": "ubuntu22.04-x64",
+      "archives": [
+        {
+          "name": "chromium",
+          "revision": "1234",
+          "browserVersion": "151.0.7922.34",
+          "cacheDirectory": "chromium-1234",
+          "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip",
+          "archiveSha256": "ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8",
+          "treeSha256": "0c68002263531845df3e9deb876725556b38d01efcaf7c2f6be47c3a1f9dd9df",
+          "memberCount": 303,
+          "executable": "chrome-linux64/chrome",
+          "executableSha256": "0b20b130e7edd9dd51873be867761295fe0cfad490c2b9a64f95bd3cfc08fa71",
+          "materializedLinks": []
+        },
+        {
+          "name": "chromium-headless-shell",
+          "revision": "1234",
+          "browserVersion": "151.0.7922.34",
+          "cacheDirectory": "chromium_headless_shell-1234",
+          "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip",
+          "archiveSha256": "3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14",
+          "treeSha256": "255452dbbacd7c0e43cf0a414af9c65c64452c9c5b9295fd5ef037f4f75d4208",
+          "memberCount": 287,
+          "executable": "chrome-headless-shell-linux64/chrome-headless-shell",
+          "executableSha256": "e11fc9ce65c96313476f7ee9844b6fb6a9220fb048693cfe9eee00acf4170a9f",
+          "materializedLinks": []
+        },
+        {
+          "name": "firefox",
+          "revision": "1538",
+          "browserVersion": "153.0",
+          "cacheDirectory": "firefox-1538",
+          "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/firefox/1538/firefox-ubuntu-22.04.zip",
+          "archiveSha256": "f97de5eb169b41cbbc64fd976e27486ed794a589392d0d12a2f64d127caba07e",
+          "treeSha256": "3f634ce7de1af286781b6102706d9e3bae8dd7324b597ef19633b6bf5b814b55",
+          "memberCount": 48,
+          "executable": "firefox/firefox",
+          "executableSha256": "e919c9e8ce4263daff820977f5eac7c78f473abfec40f5bc555287f87d354dea",
+          "materializedLinks": []
+        },
+        {
+          "name": "webkit",
+          "revision": "2336",
+          "browserVersion": "26.5",
+          "cacheDirectory": "webkit-2336",
+          "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/webkit/2336/webkit-ubuntu-22.04.zip",
+          "archiveSha256": "ed690a0a0ececa5ee59f16faa88cb5298b4b6c9bad37c5b7213ca2f681f5aa0c",
+          "treeSha256": "3c39d6d27a1524409e86016293a92bb75e78ff2b13a8528c504c8141ea56777e",
+          "memberCount": 58,
+          "executable": "pw_run.sh",
+          "executableSha256": "a85baad3d8c07173ac387a59b41500c382b21ed692afe0964d29aac247ccc63b",
+          "materializedLinks": [
+            { "path": "minibrowser-gtk/lib/libjavascriptcoregtk-6.0.so.1", "target": "libjavascriptcoregtk-6.0.so.1.8.3" },
+            { "path": "minibrowser-gtk/lib/libwebkitgtk-6.0.so.4", "target": "libwebkitgtk-6.0.so.4.18.0" },
+            { "path": "minibrowser-gtk/sys/lib/libbacktrace.so.0", "target": "libbacktrace.so.0.0.0" },
+            { "path": "minibrowser-gtk/sys/lib/libbrotlicommon.so.1", "target": "libbrotlicommon.so.1.0.7" },
+            { "path": "minibrowser-gtk/sys/lib/libbrotlidec.so.1", "target": "libbrotlidec.so.1.0.7" },
+            { "path": "minibrowser-gtk/sys/lib/libbrotlienc.so.1", "target": "libbrotlienc.so.1.0.7" },
+            { "path": "minibrowser-gtk/sys/lib/libdrm.so.2", "target": "libdrm.so.2.4.0" },
+            { "path": "minibrowser-gtk/sys/lib/libjxl.so.0.8", "target": "libjxl.so.0.8.2" },
+            { "path": "minibrowser-gtk/sys/lib/libsoup-3.0.so.0", "target": "libsoup-3.0.so.0.7.4" },
+            { "path": "minibrowser-wpe/lib/libWPEBackend-fdo-1.0.so", "target": "libWPEBackend-fdo-1.0.so.1" },
+            { "path": "minibrowser-wpe/lib/libWPEBackend-fdo-1.0.so.1", "target": "libWPEBackend-fdo-1.0.so.1.9.5" },
+            { "path": "minibrowser-wpe/lib/libWPEWebKit-2.0.so.1", "target": "libWPEWebKit-2.0.so.1.10.2" },
+            { "path": "minibrowser-wpe/lib/libwpe-1.0.so.1", "target": "libwpe-1.0.so.1.9.3" },
+            { "path": "minibrowser-wpe/sys/lib/libbacktrace.so.0", "target": "libbacktrace.so.0.0.0" },
+            { "path": "minibrowser-wpe/sys/lib/libbrotlicommon.so.1", "target": "libbrotlicommon.so.1.0.7" },
+            { "path": "minibrowser-wpe/sys/lib/libbrotlidec.so.1", "target": "libbrotlidec.so.1.0.7" },
+            { "path": "minibrowser-wpe/sys/lib/libbrotlienc.so.1", "target": "libbrotlienc.so.1.0.7" },
+            { "path": "minibrowser-wpe/sys/lib/libdrm.so.2", "target": "libdrm.so.2.4.0" },
+            { "path": "minibrowser-wpe/sys/lib/libjxl.so.0.8", "target": "libjxl.so.0.8.2" },
+            { "path": "minibrowser-wpe/sys/lib/libsoup-3.0.so.0", "target": "libsoup-3.0.so.0.7.4" }
+          ]
+        },
+        {
+          "name": "ffmpeg",
+          "revision": "1011",
+          "browserVersion": null,
+          "cacheDirectory": "ffmpeg-1011",
+          "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-linux.zip",
+          "archiveSha256": "ebc74fc5b94830176a3c2914ae96bd8bc7f6a91f4f33890230f84a172ee61ccc",
+          "treeSha256": "587800d68336e7dd181cf38e4735e0d6e3cefadb3a491cb29f5ea651edee7e83",
+          "memberCount": 2,
+          "executable": "ffmpeg-linux",
+          "executableSha256": "460d44f3416005662f528d4b92e7b94ace924e8a0288106d3803b73c56eaadc8",
+          "materializedLinks": []
+        }
+      ]
+    }
+  }
+}
