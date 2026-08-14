@@ -55,6 +55,9 @@ def test_runner_uses_fresh_external_environment_and_structured_argv(
     repository = _copy_contract(tmp_path)
     external = tmp_path / "external"
     external.mkdir()
+    caller_home = tmp_path / "caller-home"
+    rustup_home = caller_home / ".rustup"
+    rustup_home.mkdir(parents=True)
     calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
     def fake_run(
@@ -72,7 +75,11 @@ def test_runner_uses_fresh_external_environment_and_structured_argv(
     bootstrap.run_bootstrap_gate(
         repository,
         "F00",
-        environ={"PATH": "/usr/bin:/bin", "TROUPE_GATE_TMP": str(external)},
+        environ={
+            "HOME": str(caller_home),
+            "PATH": "/usr/bin:/bin",
+            "TROUPE_GATE_TMP": str(external),
+        },
     )
 
     assert calls[0][0] == [
@@ -91,6 +98,8 @@ def test_runner_uses_fresh_external_environment_and_structured_argv(
     ]
     assert Path(calls[1][0][0]).name == "pytest"
     assert all(cwd == repository.resolve() for _, cwd, _ in calls)
+    assert calls[0][2]["HOME"].startswith(str(external))
+    assert calls[0][2]["RUSTUP_HOME"] == str(rustup_home.resolve())
     assert calls[0][2]["UV_PROJECT_ENVIRONMENT"].startswith(str(external))
     assert calls[0][2]["UV_CACHE_DIR"].startswith(str(external))
     assert list(external.iterdir()) == []
