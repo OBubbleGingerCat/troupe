@@ -1,6 +1,23 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_diagnostics_workspace.py",
+      "tests/unit/test_artifact_layout.py"
+    ],
+    [
+      "cargo",
+      "check",
+      "--locked",
+      "--manifest-path",
+      "rust/Cargo.toml",
+      "--workspace",
+      "--all-targets",
+      "--all-features"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
