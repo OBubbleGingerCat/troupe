@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use pyo3::class::gc::{PyTraverseError, PyVisit};
@@ -5,12 +6,18 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 
+use crate::diagnostic_runtime::actor_producer::{self, ActorHook};
 use crate::orchestration::actor::{ActorCapability, ActorCapabilityNode};
 use crate::orchestration::cue::CueContextError;
 use crate::orchestration::cue_future::CueCall;
 use crate::orchestration::scene_context::CUE_CONTEXT_ERROR;
 
 const HANDLE_DIRECT_ERROR: &str = "ActorHandle cannot be constructed directly";
+
+static NEXT_HANDLE_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ActorHandleIdentity(u64);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -21,13 +28,28 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[pyclass(name = "ActorHandle", module = "troupe")]
 pub struct ActorHandle {
     capability: Mutex<Option<Py<ActorCapabilityNode>>>,
+    diagnostic_identity: ActorHandleIdentity,
 }
 
 impl ActorHandle {
     pub(crate) fn from_node(capability: Py<ActorCapabilityNode>) -> Self {
-        Self {
+        let mut handle = Self {
             capability: Mutex::new(Some(capability)),
-        }
+            diagnostic_identity: ActorHandleIdentity(
+                NEXT_HANDLE_IDENTITY.fetch_add(1, Ordering::Relaxed),
+            ),
+        };
+        actor_producer::observe_handle(
+            handle.diagnostic_identity,
+            handle
+                .capability
+                .get_mut()
+                .expect("a fresh handle capability mutex is not poisoned")
+                .as_ref()
+                .expect("a fresh handle retains its capability"),
+            ActorHook::HandleCreated,
+        );
+        handle
     }
 
     pub(crate) fn from_capability(
@@ -39,6 +61,13 @@ impl ActorHandle {
 
     fn clear_capability(&self) {
         let capability = lock(&self.capability).take();
+        if let Some(capability) = &capability {
+            actor_producer::observe_handle(
+                self.diagnostic_identity,
+                capability,
+                ActorHook::HandleCleared,
+            );
+        }
         drop(capability);
     }
 
@@ -49,6 +78,11 @@ impl ActorHandle {
             .ok_or_else(|| PyRuntimeError::new_err("ActorHandle is no longer attached"))?;
         let capability = node.bind(py).borrow().capability();
         capability.ok_or_else(|| PyRuntimeError::new_err("ActorHandle is no longer attached"))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_identity(&self) -> ActorHandleIdentity {
+        self.diagnostic_identity
     }
 }
 

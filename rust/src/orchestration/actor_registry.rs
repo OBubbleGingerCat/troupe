@@ -10,6 +10,7 @@ use crate::agent::{
     AgentCastPermit, AgentSessionSlot, AgentStartupFailure, AgentSupervisor, ResolvedAgentProfile,
     ResolvedLaunch,
 };
+use crate::diagnostic_runtime::actor_producer::{self, ActorHook};
 use crate::orchestration::actor::{ActorCapability, ActorIdentity};
 use crate::orchestration::cue::CueContextError;
 use crate::orchestration::scene_context::RunBinding;
@@ -202,6 +203,7 @@ impl<T> RegistryReservation<T> {
 
     pub(crate) fn commit(mut self, capability: &Arc<T>) {
         lock(&self.registry).commit(&self.key, &self.identity, capability);
+        actor_producer::observe_identity(None, &self.identity, None, ActorHook::RegistryCommitted);
         self.committed = true;
     }
 }
@@ -245,7 +247,15 @@ impl ProductionState {
 
         match RegistryReservation::reserve(Arc::clone(&self.registry), key, Arc::new(ActorIdentity))
         {
-            Ok(reservation) => Ok(reservation),
+            Ok(reservation) => {
+                actor_producer::observe_identity(
+                    Some(self),
+                    reservation.identity(),
+                    Some(name),
+                    ActorHook::RegistryReserved,
+                );
+                Ok(reservation)
+            }
             Err(()) => {
                 let name_repr = python_str_repr(name)?;
                 Err(PyValueError::new_err(format!(
@@ -265,6 +275,7 @@ impl ProductionState {
 
     pub(crate) fn detach(&self, key: &NameKey, identity: &Arc<ActorIdentity>) {
         lock(&self.registry).detach(key, identity);
+        actor_producer::observe_identity(Some(self), identity, None, ActorHook::RegistryDetached);
     }
 
     pub(crate) fn resolve_agent_launch(

@@ -14,6 +14,12 @@ pub(crate) fn initialize_python_for_test() -> std::sync::MutexGuard<'static, ()>
 
 mod act_call;
 mod application;
+#[allow(dead_code)]
+mod diagnostic_python;
+#[allow(dead_code)]
+mod diagnostic_runtime;
+#[allow(dead_code)]
+mod diagnostic_sink;
 mod orchestration;
 
 use troupe_agent_runtime as agent;
@@ -74,6 +80,7 @@ mod _runtime {
     #[pymodule_init]
     fn init_private_coroutines(module: &Bound<'_, PyModule>) -> PyResult<()> {
         crate::agent::install_schema(module)?;
+        crate::diagnostic_python::install(module)?;
         let coroutine = module
             .py()
             .import("collections.abc")?

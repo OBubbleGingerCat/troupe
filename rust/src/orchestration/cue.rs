@@ -7,6 +7,8 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyString};
 
+use crate::diagnostic_runtime::cue_producer;
+
 const CUE_DIRECT_ERROR: &str = "Cue cannot be constructed directly";
 
 create_exception!(troupe, CueContextError, PyRuntimeError);
@@ -30,6 +32,7 @@ impl Cue {
         instruction: Py<PyAny>,
         source: Py<PyString>,
     ) -> Self {
+        cue_producer::created(&id, &source);
         Self {
             id: Mutex::new(Some(id)),
             instruction: Mutex::new(Some(instruction)),

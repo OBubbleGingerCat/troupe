@@ -9,3 +9,5 @@ pub(crate) mod production;
 pub(crate) mod python_task;
 pub(crate) mod runtime;
 pub(crate) mod scene_context;
+
+pub(crate) use crate::diagnostic_runtime::hooks::DiagnosticAdmissionSlot;

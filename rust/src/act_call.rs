@@ -11,12 +11,21 @@ use crate::agent::{
     MAX_REPAIRABLE_INVALID_CALLS, PythonSchemaValidationBridge, SchemaValidationMode, busy_error,
     missing_result_error, result_error, session_broken_error, turn_error,
 };
+use crate::diagnostic_runtime::act_producer::{self, ActCallerExit, ActHook};
+use crate::diagnostic_runtime::hooks::DiagnosticActBinding;
 use crate::orchestration::cue::CueContextError;
 use crate::orchestration::scene_context::{CuedScope, RunBinding};
 
 const ACT_CONTEXT_ERROR: &str =
     "Actor.act() must be called on the current actor within its active cued context";
 const REUSE_ERROR: &str = "cannot reuse already awaited coroutine";
+
+pub(crate) fn preflight_diagnostic_sink(
+    _py: Python<'_>,
+    _sink: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DiagnosticActBinding> {
+    Ok(DiagnosticActBinding::inactive())
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ActCallPhase {
@@ -32,6 +41,7 @@ pub(crate) struct ActCall {
     schema: Option<Arc<CompiledActSchema>>,
     binding: Weak<RunBinding>,
     cued: Weak<CuedScope>,
+    diagnostics: DiagnosticActBinding,
     control: Option<Arc<AgentTurnControl>>,
     signal: Option<Py<PyAny>>,
     driver: Option<Py<PyAny>>,
@@ -45,6 +55,7 @@ impl ActCall {
         schema: Arc<CompiledActSchema>,
         binding: &Arc<RunBinding>,
         cued: &Arc<CuedScope>,
+        diagnostics: DiagnosticActBinding,
     ) -> Self {
         let control = AgentTurnControl::new(Arc::clone(&session));
         Self {
@@ -53,6 +64,7 @@ impl ActCall {
             schema: Some(schema),
             binding: Arc::downgrade(binding),
             cued: Arc::downgrade(cued),
+            diagnostics,
             control: Some(control),
             signal: None,
             driver: None,
@@ -60,7 +72,7 @@ impl ActCall {
         }
     }
 
-    fn validate_context(&self, py: Python<'_>) -> PyResult<()> {
+    fn validate_context(&self, py: Python<'_>) -> PyResult<Arc<RunBinding>> {
         let binding = self
             .binding
             .upgrade()
@@ -77,11 +89,11 @@ impl ActCall {
         if current.is_none() {
             return Err(CueContextError::new_err(ACT_CONTEXT_ERROR));
         }
-        Ok(())
+        Ok(binding)
     }
 
     fn start_driver(&mut self, py: Python<'_>) -> PyResult<()> {
-        self.validate_context(py)?;
+        let binding = self.validate_context(py)?;
         let cued = self
             .cued
             .upgrade()
@@ -112,6 +124,10 @@ impl ActCall {
         if !control.install_admission(admission) {
             return Err(cancelled_error(py));
         }
+        act_producer::admitted(&binding, &cued, &control);
+        let diagnostics =
+            std::mem::replace(&mut self.diagnostics, DiagnosticActBinding::inactive());
+        crate::diagnostic_runtime::sink_binding::admit_act(py, &binding, &control, diagnostics)?;
         let validation_bridge = match schema.validation_mode() {
             SchemaValidationMode::NativeOnly => None,
             SchemaValidationMode::Hybrid => Some(PythonSchemaValidationBridge::new(py)?),
@@ -127,6 +143,9 @@ impl ActCall {
         self.driver = Some(Self::fresh_waiter(py, &signal)?);
         self.signal = Some(signal);
         self.phase = ActCallPhase::Running;
+        if let Some(control) = &self.control {
+            act_producer::observe(control, ActHook::DriverStarted);
+        }
         Ok(())
     }
 
@@ -158,6 +177,7 @@ impl ActCall {
         self.control
             .as_ref()
             .map_or(AgentTurnCancelDecision::Accepted, |control| {
+                act_producer::observe(control, ActHook::CancelRequested);
                 control.request_cancel()
             })
     }
@@ -182,14 +202,17 @@ impl ActCall {
         match driver.bind(py).call_method1(method, (value,)) {
             Ok(yielded) => Ok(yielded.unbind()),
             Err(error) => {
-                self.finish();
+                self.finish(ActCallerExit::Returned, Some(&error));
                 Err(error)
             }
         }
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, exit: ActCallerExit, error: Option<&PyErr>) {
         if let Some(control) = &self.control {
+            if self.phase != ActCallPhase::Done {
+                act_producer::caller_finished(control, exit, error);
+            }
             control.request_cancel();
             control.finish_caller();
         }
@@ -200,6 +223,7 @@ impl ActCall {
         self.control = None;
         self.signal = None;
         self.driver = None;
+        self.diagnostics.clear();
     }
 }
 
@@ -277,13 +301,14 @@ impl ActCall {
         match self.phase {
             ActCallPhase::Created => {
                 if !value.is_none() {
-                    self.finish();
-                    return Err(PyTypeError::new_err(
+                    let error = PyTypeError::new_err(
                         "can't send non-None value to a just-started coroutine",
-                    ));
+                    );
+                    self.finish(ActCallerExit::AdmissionFailed, Some(&error));
+                    return Err(error);
                 }
                 if let Err(error) = self.start_driver(py) {
-                    self.finish();
+                    self.finish(ActCallerExit::AdmissionFailed, Some(&error));
                     return Err(error);
                 }
                 self.drive(py, "send", value)
@@ -296,16 +321,18 @@ impl ActCall {
     fn throw(&mut self, py: Python<'_>, exc: Py<PyAny>) -> PyResult<Py<PyAny>> {
         match self.phase {
             ActCallPhase::Created => {
-                self.finish();
-                Err(PyErr::from_value(exc.into_bound(py)))
+                let error = PyErr::from_value(exc.into_bound(py));
+                self.finish(ActCallerExit::AdmissionFailed, Some(&error));
+                Err(error)
             }
             ActCallPhase::Running if Self::is_cancelled_error(py, exc.bind(py))? => {
                 if self.request_cancel() == AgentTurnCancelDecision::Rejected {
                     return self.replace_shield_and_wait(py);
                 }
                 self.cancel_signal(py);
-                self.finish();
-                Err(PyErr::from_value(exc.into_bound(py)))
+                let error = PyErr::from_value(exc.into_bound(py));
+                self.finish(ActCallerExit::Cancelled, Some(&error));
+                Err(error)
             }
             ActCallPhase::Running => self.drive(py, "throw", exc.bind(py)),
             ActCallPhase::Done => Err(PyRuntimeError::new_err(REUSE_ERROR)),
@@ -320,7 +347,7 @@ impl ActCall {
             .as_ref()
             .map(|driver| driver.bind(py).call_method0("close"))
             .transpose();
-        self.finish();
+        self.finish(ActCallerExit::Closed, result.as_ref().err());
         result.map(|_| ())
     }
 
@@ -343,10 +370,11 @@ impl ActCall {
         if let Some(schema) = &self.schema {
             schema.traverse(&visit)?;
         }
+        self.diagnostics.traverse(&visit)?;
         Ok(())
     }
 
     fn __clear__(&mut self) {
-        self.finish();
+        self.finish(ActCallerExit::Cleared, None);
     }
 }

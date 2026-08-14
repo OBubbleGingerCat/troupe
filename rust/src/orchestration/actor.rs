@@ -7,8 +7,10 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType, PyWeakrefReference};
 
-use crate::act_call::ActCall;
+use crate::act_call::{ActCall, preflight_diagnostic_sink};
 use crate::agent::{AgentSessionSlot, compile_act_schema, extract_script};
+use crate::diagnostic_runtime::actor_producer::{self, ActorHook};
+use crate::diagnostic_runtime::cue_producer::{self, CueMailboxHook};
 use crate::orchestration::actor_registry::{NameKey, ProductionState};
 use crate::orchestration::cue::{Cue, CueContextError};
 use crate::orchestration::effect::{Effect, EffectContextError, construct_effect};
@@ -59,6 +61,21 @@ impl ActorConstruction {
 
     pub(crate) fn matches(&self, actor: &Bound<'_, Actor>) -> bool {
         Arc::ptr_eq(&self.identity, &actor.borrow().identity)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_identity(&self) -> &Arc<ActorIdentity> {
+        &self.identity
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_name(&self, py: Python<'_>) -> Py<PyString> {
+        self.name.clone_ref(py)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_production(&self, py: Python<'_>) -> Py<PyAny> {
+        self.production.clone_ref(py)
     }
 }
 
@@ -113,6 +130,12 @@ fn consume_actor_permit(cls: &Bound<'_, PyType>) -> PyResult<Actor> {
         return Err(PyTypeError::new_err(ACTOR_DIRECT_ERROR));
     }
 
+    actor_producer::observe_identity(
+        None,
+        &construction.identity,
+        Some(construction.name.bind(cls.py())),
+        ActorHook::Constructed,
+    );
     Ok(Actor {
         name: construction.name.clone_ref(cls.py()),
         production: Mutex::new(Some(construction.production.clone_ref(cls.py()))),
@@ -143,6 +166,9 @@ impl Actor {
     fn clear_runtime_edges(&self) {
         let production = lock(&self.production).take();
         *lock(&self.capability) = Weak::new();
+        if production.is_some() {
+            actor_producer::cleared(self, production.as_ref());
+        }
         drop(production);
     }
 
@@ -204,6 +230,7 @@ impl Actor {
     ) -> PyResult<Py<ActCall>> {
         const CONTEXT_ERROR: &str =
             "Actor.act() must be called on the current actor within its active cued context";
+        let diagnostics = preflight_diagnostic_sink(py, None)?;
         let context_error = || CueContextError::new_err(CONTEXT_ERROR);
         let authority = self.current_cued_authority(py).ok_or_else(context_error)?;
         let session = authority
@@ -216,7 +243,14 @@ impl Actor {
         let prompt = schema.render_prompt(&script)?;
         Py::new(
             py,
-            ActCall::new(session, prompt, schema, &authority.binding, &authority.cued),
+            ActCall::new(
+                session,
+                prompt,
+                schema,
+                &authority.binding,
+                &authority.cued,
+                diagnostics,
+            ),
         )
     }
 
@@ -350,6 +384,11 @@ impl ActorCapability {
         Arc::as_ptr(&self.identity) as usize
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn identity(&self) -> &Arc<ActorIdentity> {
+        &self.identity
+    }
+
     pub(crate) fn source_name_snapshot(&self, py: Python<'_>) -> PyResult<Py<PyString>> {
         let length = unsafe { pyo3::ffi::PyUnicode_GetLength(self.name.as_ptr()) };
         if length < 0 {
@@ -366,11 +405,14 @@ impl ActorCapability {
     }
 
     pub(crate) fn enqueue_operation(&self, operation: CueOperation) -> PyResult<()> {
-        let start = {
+        let observed = operation.clone();
+        let (start, queued, running) = {
             let mut mailbox = lock(&self.mailbox);
             mailbox.enqueue(operation);
-            mailbox.claim_next_if_idle()
+            let start = mailbox.claim_next_if_idle();
+            (start, mailbox.queue.len(), mailbox.running.is_some())
         };
+        cue_producer::mailbox_changed(&observed, CueMailboxHook::Enqueued, queued, running);
         if let Some(operation) = start {
             self.drain_from(operation);
         }
@@ -397,7 +439,13 @@ impl ActorCapability {
         &self,
         operation: &CueOperation,
     ) -> MailboxTerminalTransition {
-        lock(&self.mailbox).terminal_transition(operation)
+        let (transition, queued, running) = {
+            let mut mailbox = lock(&self.mailbox);
+            let transition = mailbox.terminal_transition(operation);
+            (transition, mailbox.queue.len(), mailbox.running.is_some())
+        };
+        cue_producer::mailbox_changed(operation, CueMailboxHook::Retired, queued, running);
+        transition
     }
 
     pub(crate) fn finish_terminal_action(

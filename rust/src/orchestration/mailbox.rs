@@ -7,6 +7,8 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
 
+use crate::diagnostic_runtime::cue_producer::{self, CueHook, CueTerminalOutcome};
+use crate::diagnostic_runtime::effect_producer::{self, EffectHook};
 use crate::orchestration::actor::ActorCapability;
 use crate::orchestration::cue::Cue;
 use crate::orchestration::effect::Effect;
@@ -36,6 +38,12 @@ fn validate_cued_result(value: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
                 "Actor.cued() return item at index {index} is not an Effect"
             )));
         }
+    }
+    for item in tuple.iter() {
+        let effect = item
+            .cast::<Effect>()
+            .expect("validated cued result items are Effects");
+        effect_producer::observe(&effect.borrow(), EffectHook::Consumed);
     }
     Ok(tuple.clone().unbind())
 }
@@ -81,6 +89,7 @@ pub(crate) struct OperationState {
 }
 
 pub(crate) struct TerminalAction {
+    diagnostic_outcome: CueTerminalOutcome,
     close_cued: bool,
     displaced_phase: OperationPhase,
     displaced_intent: Option<CancellationIntent>,
@@ -138,6 +147,26 @@ pub(crate) struct CueOperationInner {
 }
 
 impl CueOperation {
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_binding(&self) -> Option<Arc<RunBinding>> {
+        self.inner.binding.upgrade()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_scene(&self) -> Option<Arc<SceneScope>> {
+        self.inner.scene.upgrade()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_actor(&self) -> Option<Arc<ActorCapability>> {
+        self.inner.actor.upgrade()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_cued(&self) -> &Arc<CuedScope> {
+        &self.inner.cued
+    }
+
     pub(crate) fn enqueue(&self) -> PyResult<()> {
         if self.is_terminal() {
             return Ok(());
@@ -299,6 +328,7 @@ impl CueOperation {
         if let Err(error) = self.attach_done_callback(py, task.bind(py), callback.bind(py)) {
             self.begin_attachment_failure(py, &binding, task.bind(py), error);
         }
+        cue_producer::observe(self, CueHook::Dispatched);
         Ok(())
     }
 
@@ -394,6 +424,7 @@ impl CueOperation {
                         state.phase =
                             OperationPhase::Terminal(TerminalOutcome::Cancelled(cancelled));
                         let action = TerminalAction {
+                            diagnostic_outcome: CueTerminalOutcome::Cancelled,
                             close_cued: true,
                             displaced_phase: OperationPhase::Queued,
                             displaced_intent: state.intent.take(),
@@ -424,6 +455,7 @@ impl CueOperation {
             let Some(action) = action else {
                 return false;
             };
+            cue_producer::observe(self, CueHook::CancelRequested);
             #[cfg(test)]
             self.inner.cancel_requests.fetch_add(1, Ordering::Relaxed);
             match action {
@@ -470,6 +502,24 @@ impl CueOperation {
                 panic!("cancelling operation must retain its intent")
             }
         }
+    }
+
+    fn terminal_error(&self) -> Option<PyErr> {
+        Python::attach(|py| {
+            let state = lock(&self.inner.state);
+            let error = match &state.phase {
+                OperationPhase::Terminal(
+                    TerminalOutcome::Failure(error)
+                    | TerminalOutcome::Cancelled(error)
+                    | TerminalOutcome::CleanupFailure(error),
+                ) => Some(error),
+                OperationPhase::Terminal(TerminalOutcome::Success(_))
+                | OperationPhase::Queued
+                | OperationPhase::Running { .. }
+                | OperationPhase::CancellingRunning { .. } => None,
+            }?;
+            Some(PyErr::from_value(error.clone_ref(py).into_bound(py)))
+        })
     }
 
     fn transition_from_result(
@@ -568,8 +618,15 @@ impl CueOperation {
             },
             OperationPhase::Terminal(_) => unreachable!(),
         };
+        let diagnostic_outcome = match &outcome {
+            TerminalOutcome::Success(_) => CueTerminalOutcome::Completed,
+            TerminalOutcome::Failure(_) => CueTerminalOutcome::Failed,
+            TerminalOutcome::Cancelled(_) => CueTerminalOutcome::Cancelled,
+            TerminalOutcome::CleanupFailure(_) => CueTerminalOutcome::CleanupFailed,
+        };
         state.phase = OperationPhase::Terminal(outcome);
         let action = TerminalAction {
+            diagnostic_outcome,
             close_cued: matches!(displaced_phase, OperationPhase::Queued),
             displaced_phase,
             displaced_intent,
@@ -597,6 +654,7 @@ impl CueOperation {
     }
 
     fn perform_terminal_action(&self, action: TerminalAction) {
+        cue_producer::terminal(self, action.diagnostic_outcome, || self.terminal_error());
         if let Some(actor) = self.inner.actor.upgrade() {
             actor.finish_terminal_action(self.clone(), action);
         } else {
@@ -612,6 +670,7 @@ impl CueOperation {
         actor: Option<&ActorCapability>,
     ) -> TerminalDelivery {
         let TerminalAction {
+            diagnostic_outcome,
             close_cued,
             displaced_phase,
             displaced_intent,
@@ -637,6 +696,7 @@ impl CueOperation {
             .and_then(|scene| scene.operation_finished(self));
         #[cfg(test)]
         drop((
+            diagnostic_outcome,
             displaced_phase,
             displaced_intent,
             displaced_cue,
@@ -647,6 +707,7 @@ impl CueOperation {
         ));
         #[cfg(not(test))]
         drop((
+            diagnostic_outcome,
             displaced_phase,
             displaced_intent,
             displaced_cue,
