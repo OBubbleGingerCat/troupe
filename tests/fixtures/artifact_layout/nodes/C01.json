@@ -1,7 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-core/tests/event_taxonomy.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-core/src/detail.rs",
+    "rust/crates/troupe-diagnostics-core/src/event.rs",
+    "rust/crates/troupe-diagnostics-core/src/kinds.rs"
+  ],
   "removed": [],
   "generated": []
 }
