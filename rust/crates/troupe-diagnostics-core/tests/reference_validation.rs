@@ -2,8 +2,9 @@ use serde::Deserialize;
 use troupe_diagnostics_core::{
     detail::{DiagnosticAttributes, EmptyDetail, InstantDetail, SpanStartDetail},
     event::{
-        CausalLink, CounterSampled, CustomSpanStarted, DiagnosticEvent, DiagnosticEventHeader,
-        DiagnosticScope, InstantOccurred, ObservationGap, SpanFinished, SpanStarted,
+        CausalLink, CounterSampled, CustomInstantOccurred, CustomSpanStarted, DiagnosticEvent,
+        DiagnosticEventHeader, DiagnosticScope, InstantOccurred, ObservationGap, SpanFinished,
+        SpanStarted,
     },
     id::{CanonicalUuid, RunLocalId},
     kinds::{CausalRelation, CounterKind, SpanOutcome},
@@ -147,16 +148,45 @@ fn builtin_instant(
     ))
 }
 
+fn custom_instant(
+    run_id: &str,
+    sequence: u64,
+    elapsed_ns: u64,
+    scope: DiagnosticScope,
+    containing_span_id: Option<u64>,
+) -> DiagnosticEvent {
+    DiagnosticEvent::CustomInstantOccurred(
+        CustomInstantOccurred::new(
+            header(run_id, sequence, elapsed_ns, scope, Vec::new()),
+            "example.marker".to_owned(),
+            containing_span_id.map(SchemaU64::new),
+            None,
+            DiagnosticAttributes::new(),
+        )
+        .unwrap(),
+    )
+}
+
 #[test]
 fn checked_in_invalid_streams_return_stable_codes() {
     let fixtures = [
         include_str!("../../../../tests/fixtures/diagnostics/reference-validation/cross-run.json"),
-        include_str!("../../../../tests/fixtures/diagnostics/reference-validation/forward-link.json"),
+        include_str!(
+            "../../../../tests/fixtures/diagnostics/reference-validation/forward-link.json"
+        ),
         include_str!("../../../../tests/fixtures/diagnostics/reference-validation/self-link.json"),
-        include_str!("../../../../tests/fixtures/diagnostics/reference-validation/finish-before-start.json"),
-        include_str!("../../../../tests/fixtures/diagnostics/reference-validation/double-finish.json"),
-        include_str!("../../../../tests/fixtures/diagnostics/reference-validation/child-outside-parent.json"),
-        include_str!("../../../../tests/fixtures/diagnostics/reference-validation/kind-mismatch.json"),
+        include_str!(
+            "../../../../tests/fixtures/diagnostics/reference-validation/finish-before-start.json"
+        ),
+        include_str!(
+            "../../../../tests/fixtures/diagnostics/reference-validation/double-finish.json"
+        ),
+        include_str!(
+            "../../../../tests/fixtures/diagnostics/reference-validation/child-outside-parent.json"
+        ),
+        include_str!(
+            "../../../../tests/fixtures/diagnostics/reference-validation/kind-mismatch.json"
+        ),
     ];
 
     for source in fixtures {
@@ -248,17 +278,22 @@ fn failed_validation_does_not_commit_partial_state() {
 }
 
 #[test]
-fn parent_and_containing_references_require_family_scope_time_and_open_state() {
+fn parent_and_containing_references_require_scope_time_and_open_state() {
     let parent = builtin_start(RUN_A, 1, 10, scene_scope("scene-1"), None);
 
-    let family_mismatch = vec![
+    let custom_child = vec![
         parent.clone(),
         custom_start(RUN_A, 2, 20, actor_scope("scene-1", "actor-1"), Some(1)),
     ];
-    assert_eq!(
-        validate_event_stream(&family_mismatch).unwrap_err().code(),
-        ReferenceValidationCode::KindMismatch
-    );
+    validate_event_stream(&custom_child)
+        .expect("custom diagnostics may inherit an open built-in span");
+
+    let custom_contained = vec![
+        parent.clone(),
+        custom_instant(RUN_A, 2, 25, actor_scope("scene-1", "actor-1"), Some(1)),
+    ];
+    validate_event_stream(&custom_contained)
+        .expect("custom diagnostics may be contained by an open built-in span");
 
     let scope_mismatch = vec![
         parent.clone(),
@@ -307,13 +342,7 @@ fn parent_cannot_finish_with_an_open_child() {
 fn containing_instant_cannot_end_after_its_span() {
     let events = vec![
         builtin_start(RUN_A, 1, 10, scene_scope("scene-1"), None),
-        builtin_instant(
-            RUN_A,
-            2,
-            40,
-            actor_scope("scene-1", "actor-1"),
-            Some(1),
-        ),
+        builtin_instant(RUN_A, 2, 40, actor_scope("scene-1", "actor-1"), Some(1)),
         builtin_finish(RUN_A, 3, 30, scene_scope("scene-1"), 1),
     ];
 
@@ -345,15 +374,8 @@ fn missing_scope_is_none_and_unknown_scope_sentinels_are_invalid() {
     assert_eq!(scope.session_generation(), None);
     assert!(RunLocalId::parse("").is_err());
 
-    let zero_generation = DiagnosticScope::new(
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(SchemaU64::new(0)),
-    );
+    let zero_generation =
+        DiagnosticScope::new(None, None, None, None, None, None, Some(SchemaU64::new(0)));
     let invalid = counter(RUN_A, 1, 1, zero_generation, Vec::new());
     assert_eq!(
         validate_event_stream(std::slice::from_ref(&invalid))
@@ -362,15 +384,8 @@ fn missing_scope_is_none_and_unknown_scope_sentinels_are_invalid() {
         ReferenceValidationCode::InvalidScope
     );
 
-    let affected_scope = DiagnosticScope::new(
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(SchemaU64::new(0)),
-    );
+    let affected_scope =
+        DiagnosticScope::new(None, None, None, None, None, None, Some(SchemaU64::new(0)));
     let invalid_gap = DiagnosticEvent::ObservationGap(ObservationGap::new(
         header(RUN_A, 1, 1, empty_scope(), Vec::new()),
         "runtime".to_owned(),

@@ -188,32 +188,24 @@ impl ReferenceValidator {
         self.validate_causal_links(event)?;
 
         let change = match event {
-            DiagnosticEvent::SpanStarted(start) => self.validate_span_start(
-                event,
-                SpanFamily::BuiltIn,
-                start.parent_span_id(),
-            )?,
-            DiagnosticEvent::CustomSpanStarted(start) => self.validate_span_start(
-                event,
-                SpanFamily::Custom,
-                start.parent_span_id(),
-            )?,
+            DiagnosticEvent::SpanStarted(start) => {
+                self.validate_span_start(event, SpanFamily::BuiltIn, start.parent_span_id())?
+            }
+            DiagnosticEvent::CustomSpanStarted(start) => {
+                self.validate_span_start(event, SpanFamily::Custom, start.parent_span_id())?
+            }
             DiagnosticEvent::SpanFinished(finish) => {
                 self.validate_span_finish(event, SpanFamily::BuiltIn, finish.span_id())?
             }
             DiagnosticEvent::CustomSpanFinished(finish) => {
                 self.validate_span_finish(event, SpanFamily::Custom, finish.span_id())?
             }
-            DiagnosticEvent::InstantOccurred(instant) => self.validate_containing_span(
-                event,
-                SpanFamily::BuiltIn,
-                instant.containing_span_id(),
-            )?,
-            DiagnosticEvent::CustomInstantOccurred(instant) => self.validate_containing_span(
-                event,
-                SpanFamily::Custom,
-                instant.containing_span_id(),
-            )?,
+            DiagnosticEvent::InstantOccurred(instant) => {
+                self.validate_containing_span(event, instant.containing_span_id())?
+            }
+            DiagnosticEvent::CustomInstantOccurred(instant) => {
+                self.validate_containing_span(event, instant.containing_span_id())?
+            }
             DiagnosticEvent::CounterSampled(_)
             | DiagnosticEvent::AgentMessageDelta(_)
             | DiagnosticEvent::AgentMessageCompleted(_)
@@ -225,7 +217,10 @@ impl ReferenceValidator {
         };
 
         let inserted = self.event_sequences.insert(sequence);
-        debug_assert!(inserted, "duplicate event sequence was checked before commit");
+        debug_assert!(
+            inserted,
+            "duplicate event sequence was checked before commit"
+        );
         match change {
             StateChange::RecordEvent => {}
             StateChange::StartSpan(record) => {
@@ -310,7 +305,7 @@ impl ReferenceValidator {
         parent_span_id: Option<SchemaU64>,
     ) -> Result<StateChange, ReferenceValidationError> {
         if let Some(parent_span_id) = parent_span_id {
-            let parent = self.validate_open_span_reference(event, family, parent_span_id)?;
+            let parent = self.validate_open_span_reference(event, parent_span_id)?;
             if !scope_contains(&parent.scope, event.header().scope()) {
                 return Err(error(
                     event,
@@ -353,11 +348,7 @@ impl ReferenceValidator {
         }
 
         let Some(span) = self.spans.get(&span_id) else {
-            return Err(error(
-                event,
-                self.missing_span_code(span_id),
-                Some(span_id),
-            ));
+            return Err(error(event, self.missing_span_code(span_id), Some(span_id)));
         };
         if span.family != family {
             return Err(error(
@@ -424,13 +415,12 @@ impl ReferenceValidator {
     fn validate_containing_span(
         &self,
         event: &DiagnosticEvent,
-        family: SpanFamily,
         containing_span_id: Option<SchemaU64>,
     ) -> Result<StateChange, ReferenceValidationError> {
         let Some(containing_span_id) = containing_span_id else {
             return Ok(StateChange::RecordEvent);
         };
-        let containing = self.validate_open_span_reference(event, family, containing_span_id)?;
+        let containing = self.validate_open_span_reference(event, containing_span_id)?;
         if !scope_contains(&containing.scope, event.header().scope()) {
             return Err(error(
                 event,
@@ -454,7 +444,6 @@ impl ReferenceValidator {
     fn validate_open_span_reference(
         &self,
         event: &DiagnosticEvent,
-        family: SpanFamily,
         span_id: SchemaU64,
     ) -> Result<&SpanRecord, ReferenceValidationError> {
         let header = event.header();
@@ -474,19 +463,8 @@ impl ReferenceValidator {
         }
 
         let Some(span) = self.spans.get(&span_id) else {
-            return Err(error(
-                event,
-                self.missing_span_code(span_id),
-                Some(span_id),
-            ));
+            return Err(error(event, self.missing_span_code(span_id), Some(span_id)));
         };
-        if span.family != family {
-            return Err(error(
-                event,
-                ReferenceValidationCode::KindMismatch,
-                Some(span_id),
-            ));
-        }
         if span.finished_at.is_some() {
             return Err(error(
                 event,
@@ -539,18 +517,13 @@ enum StateChange {
 fn validate_scope(event: &DiagnosticEvent) -> Result<(), ReferenceValidationError> {
     let header_invalid = has_unknown_scope_sentinel(event.header().scope());
     let affected_invalid = match event {
-        DiagnosticEvent::ObservationGap(gap) => gap
-            .affected_scope()
-            .is_some_and(has_unknown_scope_sentinel),
+        DiagnosticEvent::ObservationGap(gap) => {
+            gap.affected_scope().is_some_and(has_unknown_scope_sentinel)
+        }
         _ => false,
     };
-    if header_invalid || affected_invalid
-    {
-        return Err(error(
-            event,
-            ReferenceValidationCode::InvalidScope,
-            None,
-        ));
+    if header_invalid || affected_invalid {
+        return Err(error(event, ReferenceValidationCode::InvalidScope, None));
     }
     Ok(())
 }
