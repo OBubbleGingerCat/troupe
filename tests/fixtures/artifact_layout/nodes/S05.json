@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/archive_lease.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/archive/constants.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/archive/lease.rs"
+  ],
   "removed": [],
   "generated": []
 }
