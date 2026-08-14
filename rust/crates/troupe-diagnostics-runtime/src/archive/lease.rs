@@ -151,7 +151,7 @@ impl FileIdentity {
     }
 }
 
-pub trait ArchiveLeaseHandle: Send {
+pub trait ArchiveLeaseHandle: Send + Sync {
     fn metadata(&self) -> io::Result<LeaseAnchorMetadata>;
     fn set_owner_only(&self) -> io::Result<()>;
     fn try_lock_shared(&self) -> Result<(), TryLockError>;
@@ -159,16 +159,26 @@ pub trait ArchiveLeaseHandle: Send {
 }
 
 pub trait ArchiveLeaseOpener: Send + Sync {
-    fn open(&self, path: &Path, create_new: bool) -> io::Result<Box<dyn ArchiveLeaseHandle>>;
+    fn open(
+        &self,
+        path: &Path,
+        create_new: bool,
+        writable: bool,
+    ) -> io::Result<Box<dyn ArchiveLeaseHandle>>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RealArchiveLeaseOpener;
 
 impl ArchiveLeaseOpener for RealArchiveLeaseOpener {
-    fn open(&self, path: &Path, create_new: bool) -> io::Result<Box<dyn ArchiveLeaseHandle>> {
+    fn open(
+        &self,
+        path: &Path,
+        create_new: bool,
+        writable: bool,
+    ) -> io::Result<Box<dyn ArchiveLeaseHandle>> {
         let mut options = OpenOptions::new();
-        options.read(true).write(true);
+        options.read(true).write(writable);
         if create_new {
             options.create_new(true);
         }
@@ -237,15 +247,11 @@ pub struct ActiveArchiveLeaseGuard<'a> {
 
 impl ActiveArchiveLease {
     pub fn acquire(run_directory: &Path) -> Result<Self, ArchiveLeaseError> {
-        Self::acquire_with(&RealArchiveLeaseOpener, run_directory)
-    }
-
-    pub fn acquire_with<O: ArchiveLeaseOpener>(
-        opener: &O,
-        run_directory: &Path,
-    ) -> Result<Self, ArchiveLeaseError> {
-        let (handle, anchor_path) =
-            acquire(opener, run_directory, ArchiveLeaseMode::Active, true, false)?;
+        let (handle, anchor_path) = acquire(
+            &RealArchiveLeaseOpener,
+            run_directory,
+            ArchiveLeaseMode::Active,
+        )?;
         Ok(Self {
             _handle: handle,
             anchor_path,
@@ -284,19 +290,10 @@ impl fmt::Debug for SharedArchiveLease {
 
 impl SharedArchiveLease {
     pub fn acquire(run_directory: &Path) -> Result<Self, ArchiveLeaseError> {
-        Self::acquire_with(&RealArchiveLeaseOpener, run_directory)
-    }
-
-    pub fn acquire_with<O: ArchiveLeaseOpener>(
-        opener: &O,
-        run_directory: &Path,
-    ) -> Result<Self, ArchiveLeaseError> {
         let (handle, anchor_path) = acquire(
-            opener,
+            &RealArchiveLeaseOpener,
             run_directory,
             ArchiveLeaseMode::SharedReader,
-            false,
-            true,
         )?;
         Ok(Self {
             _handle: handle,
@@ -326,19 +323,10 @@ impl fmt::Debug for CleanupArchiveLease {
 
 impl CleanupArchiveLease {
     pub fn acquire(run_directory: &Path) -> Result<Self, ArchiveLeaseError> {
-        Self::acquire_with(&RealArchiveLeaseOpener, run_directory)
-    }
-
-    pub fn acquire_with<O: ArchiveLeaseOpener>(
-        opener: &O,
-        run_directory: &Path,
-    ) -> Result<Self, ArchiveLeaseError> {
         let (handle, anchor_path) = acquire(
-            opener,
+            &RealArchiveLeaseOpener,
             run_directory,
             ArchiveLeaseMode::Cleanup,
-            false,
-            false,
         )?;
         Ok(Self {
             _handle: handle,
@@ -351,24 +339,41 @@ impl CleanupArchiveLease {
     }
 }
 
+pub fn probe_archive_lease_with<O: ArchiveLeaseOpener>(
+    opener: &O,
+    run_directory: &Path,
+    mode: ArchiveLeaseMode,
+) -> Result<(), ArchiveLeaseError> {
+    let (handle, _) = acquire(opener, run_directory, mode)?;
+    drop(handle);
+    Ok(())
+}
+
 fn acquire<O: ArchiveLeaseOpener>(
     opener: &O,
     run_directory: &Path,
     mode: ArchiveLeaseMode,
-    create_anchor: bool,
-    shared: bool,
 ) -> Result<(Box<dyn ArchiveLeaseHandle>, PathBuf), ArchiveLeaseError> {
     validate_run_directory(run_directory, mode)?;
     let anchor_path = run_directory.join(ARCHIVE_LEASE_ANCHOR_FILENAME);
+    let create_anchor = mode == ArchiveLeaseMode::Active;
     let handle = open_anchor(opener, &anchor_path, mode, create_anchor)?;
-    secure_and_revalidate_anchor(&anchor_path, handle.as_ref(), mode)?;
-    let lock_result = if shared {
+    secure_and_revalidate_anchor(
+        &anchor_path,
+        handle.as_ref(),
+        mode,
+        mode == ArchiveLeaseMode::Active,
+    )?;
+    let lock_result = if mode == ArchiveLeaseMode::SharedReader {
         handle.try_lock_shared()
     } else {
         handle.try_lock_exclusive()
     };
     match lock_result {
-        Ok(()) => Ok((handle, anchor_path)),
+        Ok(()) => {
+            revalidate_locked_anchor(&anchor_path, handle.as_ref(), mode)?;
+            Ok((handle, anchor_path))
+        }
         Err(TryLockError::WouldBlock) => Err(ArchiveLeaseError::new(
             ArchiveLeaseErrorCode::Contended,
             mode,
@@ -413,8 +418,9 @@ fn open_anchor<O: ArchiveLeaseOpener>(
     mode: ArchiveLeaseMode,
     create_anchor: bool,
 ) -> Result<Box<dyn ArchiveLeaseHandle>, ArchiveLeaseError> {
+    let writable = mode == ArchiveLeaseMode::Active;
     match inspect_anchor(anchor_path, mode)? {
-        Some(_) => opener.open(anchor_path, false).map_err(|error| {
+        Some(_) => opener.open(anchor_path, false, writable).map_err(|error| {
             ArchiveLeaseError::new(
                 ArchiveLeaseErrorCode::AnchorOpenFailed,
                 mode,
@@ -428,18 +434,20 @@ fn open_anchor<O: ArchiveLeaseOpener>(
             anchor_path,
             Some(io::Error::from(io::ErrorKind::NotFound)),
         )),
-        None => match opener.open(anchor_path, true) {
+        None => match opener.open(anchor_path, true, true) {
             Ok(handle) => Ok(handle),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 inspect_anchor(anchor_path, mode)?;
-                opener.open(anchor_path, false).map_err(|retry_error| {
-                    ArchiveLeaseError::new(
-                        ArchiveLeaseErrorCode::AnchorOpenFailed,
-                        mode,
-                        anchor_path,
-                        Some(retry_error),
-                    )
-                })
+                opener
+                    .open(anchor_path, false, writable)
+                    .map_err(|retry_error| {
+                        ArchiveLeaseError::new(
+                            ArchiveLeaseErrorCode::AnchorOpenFailed,
+                            mode,
+                            anchor_path,
+                            Some(retry_error),
+                        )
+                    })
             }
             Err(error) => Err(ArchiveLeaseError::new(
                 ArchiveLeaseErrorCode::AnchorOpenFailed,
@@ -475,6 +483,7 @@ fn secure_and_revalidate_anchor(
     anchor_path: &Path,
     handle: &dyn ArchiveLeaseHandle,
     mode: ArchiveLeaseMode,
+    secure_permissions: bool,
 ) -> Result<(), ArchiveLeaseError> {
     let opened = handle.metadata().map_err(|error| {
         ArchiveLeaseError::new(
@@ -485,30 +494,17 @@ fn secure_and_revalidate_anchor(
         )
     })?;
     validate_anchor_kind(opened, anchor_path, mode)?;
-    let path_metadata = inspect_anchor(anchor_path, mode)?.ok_or_else(|| {
-        ArchiveLeaseError::new(
-            ArchiveLeaseErrorCode::AnchorIdentityChanged,
-            mode,
-            anchor_path,
-            None,
-        )
-    })?;
-    if opened.identity != path_metadata.identity {
-        return Err(ArchiveLeaseError::new(
-            ArchiveLeaseErrorCode::AnchorIdentityChanged,
-            mode,
-            anchor_path,
-            None,
-        ));
+    verify_path_identity(anchor_path, opened.identity, mode)?;
+    if secure_permissions {
+        handle.set_owner_only().map_err(|error| {
+            ArchiveLeaseError::new(
+                ArchiveLeaseErrorCode::AnchorPermissionFailed,
+                mode,
+                anchor_path,
+                Some(error),
+            )
+        })?;
     }
-    handle.set_owner_only().map_err(|error| {
-        ArchiveLeaseError::new(
-            ArchiveLeaseErrorCode::AnchorPermissionFailed,
-            mode,
-            anchor_path,
-            Some(error),
-        )
-    })?;
     let secured = handle.metadata().map_err(|error| {
         ArchiveLeaseError::new(
             ArchiveLeaseErrorCode::AnchorInspectFailed,
@@ -526,9 +522,50 @@ fn secure_and_revalidate_anchor(
         ));
     }
     #[cfg(unix)]
-    if secured.mode != ARCHIVE_LEASE_ANCHOR_MODE {
+    if secure_permissions && secured.mode != ARCHIVE_LEASE_ANCHOR_MODE {
         return Err(ArchiveLeaseError::new(
             ArchiveLeaseErrorCode::AnchorModeMismatch,
+            mode,
+            anchor_path,
+            None,
+        ));
+    }
+    verify_path_identity(anchor_path, secured.identity, mode)
+}
+
+fn revalidate_locked_anchor(
+    anchor_path: &Path,
+    handle: &dyn ArchiveLeaseHandle,
+    mode: ArchiveLeaseMode,
+) -> Result<(), ArchiveLeaseError> {
+    let locked = handle.metadata().map_err(|error| {
+        ArchiveLeaseError::new(
+            ArchiveLeaseErrorCode::AnchorInspectFailed,
+            mode,
+            anchor_path,
+            Some(error),
+        )
+    })?;
+    validate_anchor_kind(locked, anchor_path, mode)?;
+    verify_path_identity(anchor_path, locked.identity, mode)
+}
+
+fn verify_path_identity(
+    anchor_path: &Path,
+    expected: FileIdentity,
+    mode: ArchiveLeaseMode,
+) -> Result<(), ArchiveLeaseError> {
+    let path_metadata = inspect_anchor(anchor_path, mode)?.ok_or_else(|| {
+        ArchiveLeaseError::new(
+            ArchiveLeaseErrorCode::AnchorIdentityChanged,
+            mode,
+            anchor_path,
+            None,
+        )
+    })?;
+    if expected != path_metadata.identity {
+        return Err(ArchiveLeaseError::new(
+            ArchiveLeaseErrorCode::AnchorIdentityChanged,
             mode,
             anchor_path,
             None,
