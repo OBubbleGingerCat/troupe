@@ -1,6 +1,20 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_diagnostic_ownership.py",
+      "tests/unit/test_artifact_layout.py"
+    ],
+    [
+      "python",
+      "scripts/audit_diagnostic_ownership.py",
+      "--plan-only",
+      "--plan",
+      "docs/plan/production-diagnostics-implementation-plan.md"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
