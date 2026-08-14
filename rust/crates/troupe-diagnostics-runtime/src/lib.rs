@@ -1,3 +1,7 @@
 #![allow(dead_code)]
 
-mod placeholder {}
+mod archive;
+mod query;
+mod registry;
+mod server;
+mod store;
