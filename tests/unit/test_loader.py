@@ -148,6 +148,41 @@ def _traceback_frames(error: BaseException) -> list[tuple[str, str]]:
     return frames
 
 
+def test_loader_source_exposes_path_class_and_construct_phases() -> None:
+    application = ROOT / "rust" / "src" / "application"
+    legacy = application / "loader.rs"
+    loader = application / "loader"
+
+    assert not legacy.exists()
+    assert {path.name for path in loader.iterdir()} == {
+        "class.rs",
+        "construct.rs",
+        "mod.rs",
+        "path.rs",
+    }
+
+    module_source = (loader / "mod.rs").read_text(encoding="utf-8")
+    for marker in (
+        "resolve_production_path",
+        "resolve_production_class",
+        "construct_production",
+        "ResolvedProductionClass",
+        "ResolvedProductionPath",
+    ):
+        assert marker in module_source
+
+    class_source = (loader / "class.rs").read_text(encoding="utf-8")
+    path_source = (loader / "path.rs").read_text(encoding="utf-8")
+    assert "pub(crate) fn production_root" in path_source
+    assert "pub(crate) fn inspect_static_attribute" in class_source
+    assert "pub(crate) fn rollback" in class_source
+    assert 'getattr("getattr_static")' in class_source
+
+    invocation_source = (application / "invocation.rs").read_text(encoding="utf-8")
+    assert "type ProductionInvocation<'py>" in invocation_source
+    assert "Result<ProductionInvocation<'py>, InvocationError>" in invocation_source
+
+
 def test_recording_package_loads_with_canonical_identity(
     modules: ModuleSandbox,
 ) -> None:

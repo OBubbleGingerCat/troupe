@@ -1,65 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyImportError, PySystemExit};
+use pyo3::exceptions::PyImportError;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyModuleMethods, PyString,
-    PyStringMethods, PyType, PyTypeMethods,
+    PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyModule, PyModuleMethods, PyString,
+    PyType, PyTypeMethods,
 };
 
 use crate::orchestration::production::Production;
 
-create_exception!(troupe._runtime, ProductionLoadError, PyException);
-
-#[derive(Clone, Copy)]
-enum Reason {
-    PathNotDirectory,
-    InvalidPackageName,
-    MissingInit,
-    MissingProduction,
-    PackageNameConflict,
-    ImportFailed,
-    MissingSymbol,
-    SymbolNotClass,
-    SymbolIsBase,
-    SymbolNotSubclass,
-    ConstructionFailed,
-}
-
-impl Reason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::PathNotDirectory => "path-not-directory",
-            Self::InvalidPackageName => "invalid-package-name",
-            Self::MissingInit => "missing-init",
-            Self::MissingProduction => "missing-production",
-            Self::PackageNameConflict => "package-name-conflict",
-            Self::ImportFailed => "import-failed",
-            Self::MissingSymbol => "missing-symbol",
-            Self::SymbolNotClass => "symbol-not-class",
-            Self::SymbolIsBase => "symbol-is-base",
-            Self::SymbolNotSubclass => "symbol-not-subclass",
-            Self::ConstructionFailed => "construction-failed",
-        }
-    }
-}
-
-enum LoadFailure {
-    Reason(Reason),
-    Caused(Reason, PyErr),
-    Propagate(PyErr),
-}
-
-impl LoadFailure {
-    fn from_error(py: Python<'_>, reason: Reason, error: PyErr) -> Self {
-        if error.is_instance_of::<PySystemExit>(py) {
-            Self::Propagate(error)
-        } else {
-            Self::Caused(reason, error)
-        }
-    }
-}
+use super::path::resolved_path;
+use super::{LoadFailure, Reason, ResolvedProductionPath, fail, finish_failure};
 
 struct ModuleSnapshot {
     key: Py<PyString>,
@@ -68,7 +19,7 @@ struct ModuleSnapshot {
     saved_dictionary: Py<PyDict>,
 }
 
-struct ImportTransaction {
+pub(super) struct ImportTransaction {
     root: String,
     modules: Py<PyDict>,
     snapshots: Vec<ModuleSnapshot>,
@@ -129,6 +80,54 @@ impl ImportTransaction {
     }
 }
 
+pub(crate) struct ResolvedProductionClass {
+    pub(super) path: ResolvedProductionPath,
+    pub(super) production_type: Py<PyType>,
+    pub(super) transaction: ImportTransaction,
+}
+
+impl ResolvedProductionClass {
+    // B08 consumes this seam before calling construct_production.
+    #[allow(dead_code)]
+    pub(crate) fn inspect_static_attribute(
+        &self,
+        py: Python<'_>,
+        name: &str,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        inspect_static_class_attribute(py, self.production_type.bind(py), name)
+    }
+
+    pub(super) fn package_dir<'py>(&self, py: Python<'py>) -> &Bound<'py, PyAny> {
+        self.path.production_root(py)
+    }
+
+    pub(super) fn production_type<'py>(&self, py: Python<'py>) -> &Bound<'py, PyType> {
+        self.production_type.bind(py)
+    }
+
+    pub(crate) fn rollback(self, py: Python<'_>) -> PyResult<()> {
+        self.transaction.rollback(py)
+    }
+}
+
+fn inspect_static_class_attribute(
+    py: Python<'_>,
+    production_type: &Bound<'_, PyType>,
+    name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let sentinel = PyDict::new(py);
+    let value = py.import("inspect")?.getattr("getattr_static")?.call1((
+        production_type,
+        name,
+        &sentinel,
+    ))?;
+    if value.is(sentinel.as_any()) {
+        Ok(None)
+    } else {
+        Ok(Some(value.unbind()))
+    }
+}
+
 fn is_prefix_key(key: &Bound<'_, PyString>, root: &str) -> PyResult<bool> {
     if key == root {
         return Ok(true);
@@ -148,37 +147,12 @@ fn string_depth(key: &Bound<'_, PyString>) -> PyResult<usize> {
         .extract()
 }
 
-fn production_load_error(
-    py: Python<'_>,
-    package_dir: &Bound<'_, PyAny>,
-    reason: Reason,
-) -> PyResult<PyErr> {
-    let reason = reason.as_str();
-    let message = PyString::new(py, "cannot load Production from {}: {}")
-        .call_method1("format", (package_dir, reason))?;
-    let error = PyErr::from_value(py.get_type::<ProductionLoadError>().call1((message,))?);
-    error.value(py).setattr("package_dir", package_dir)?;
-    error.value(py).setattr("reason", reason)?;
-    Ok(error)
-}
-
-fn fail<T>(py: Python<'_>, package_dir: &Bound<'_, PyAny>, reason: Reason) -> PyResult<T> {
-    Err(production_load_error(py, package_dir, reason)?)
-}
-
-fn resolved_path<'py>(py: Python<'py>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-    py.import("pathlib")?
-        .getattr("Path")?
-        .call1((value,))?
-        .call_method0("resolve")
+fn module_dictionary<'py>(module: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    Ok(module.cast::<PyModule>()?.dict())
 }
 
 fn path_is_inside(path: &Path, package_dir: &Path) -> bool {
     path == package_dir || path.starts_with(package_dir)
-}
-
-fn module_dictionary<'py>(module: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
-    Ok(module.cast::<PyModule>()?.dict())
 }
 
 fn module_belongs_to_package(
@@ -364,29 +338,31 @@ fn execute_production<'py>(
     canonical_module(modules, name)
 }
 
-fn load_in_transaction(
+fn resolve_in_transaction(
     py: Python<'_>,
-    root: &str,
-    package_dir: &Bound<'_, PyAny>,
-    init_path: &Bound<'_, PyAny>,
-    production_path: &Bound<'_, PyAny>,
+    path: &ResolvedProductionPath,
     preloaded_production: Option<&Py<PyAny>>,
-    args: &Bound<'_, PyList>,
-) -> Result<Py<PyAny>, LoadFailure> {
+) -> Result<Py<PyType>, LoadFailure> {
     let modules = py
         .import("sys")
         .and_then(|sys| sys.getattr("modules"))
         .and_then(|modules| modules.cast_into::<PyDict>().map_err(Into::into))
         .map_err(|error| LoadFailure::from_error(py, Reason::ImportFailed, error))?;
-    let package = import_package(py, &modules, root, package_dir, init_path)
-        .map_err(|error| LoadFailure::from_error(py, Reason::ImportFailed, error))?;
-    let production_name = format!("{root}.production");
+    let package = import_package(
+        py,
+        &modules,
+        &path.root,
+        path.production_root(py),
+        path.init_path(py),
+    )
+    .map_err(|error| LoadFailure::from_error(py, Reason::ImportFailed, error))?;
+    let production_name = format!("{}.production", path.root);
     let production_module = import_production(
         py,
         &modules,
         &package,
         &production_name,
-        production_path,
+        path.production_path(py),
         preloaded_production,
     )
     .map_err(|error| LoadFailure::from_error(py, Reason::ImportFailed, error))?;
@@ -412,57 +388,25 @@ fn load_in_transaction(
         return Err(LoadFailure::Reason(Reason::SymbolNotSubclass));
     }
 
-    production_type
-        .call1((args,))
-        .map(Bound::unbind)
-        .map_err(|error| LoadFailure::from_error(py, Reason::ConstructionFailed, error))
+    Ok(production_type.unbind())
 }
 
-#[pyfunction(name = "_load_production")]
-pub fn load_production(
+pub(crate) fn resolve_production_class(
     py: Python<'_>,
-    package_dir: &Bound<'_, PyString>,
-    args: &Bound<'_, PyList>,
-) -> PyResult<Py<PyAny>> {
-    let resolved = resolved_path(py, package_dir.as_any())?;
-    if !resolved.call_method0("is_dir")?.is_truthy()? {
-        return fail(py, &resolved, Reason::PathNotDirectory);
-    }
-
-    let basename = resolved.getattr("name")?.cast_into::<PyString>()?;
-    let is_identifier = basename.call_method0("isidentifier")?.is_truthy()?;
-    let is_keyword = py
-        .import("keyword")?
-        .call_method1("iskeyword", (&basename,))?
-        .is_truthy()?;
-    let normalized = py
-        .import("unicodedata")?
-        .call_method1("normalize", ("NFKC", &basename))?;
-    if !is_identifier || is_keyword || !normalized.eq(&basename)? {
-        return fail(py, &resolved, Reason::InvalidPackageName);
-    }
-    let root = basename.to_str()?.to_owned();
-
-    let init_path = resolved.call_method1("joinpath", ("__init__.py",))?;
-    if !init_path.call_method0("is_file")?.is_truthy()? {
-        return fail(py, &resolved, Reason::MissingInit);
-    }
-    let production_path = resolved.call_method1("joinpath", ("production.py",))?;
-    if !production_path.call_method0("is_file")?.is_truthy()? {
-        return fail(py, &resolved, Reason::MissingProduction);
-    }
-
-    let package_path = resolved.extract::<PathBuf>()?;
+    path: ResolvedProductionPath,
+) -> PyResult<ResolvedProductionClass> {
+    let package_path = path.production_root(py).extract::<PathBuf>()?;
     let modules = py
         .import("sys")?
         .getattr("modules")?
         .cast_into::<PyDict>()?;
-    if has_package_conflict(py, &modules, &root, &package_path)? {
-        return fail(py, &resolved, Reason::PackageNameConflict);
+    if has_package_conflict(py, &modules, &path.root, &package_path)? {
+        return fail(py, path.production_root(py), Reason::PackageNameConflict);
     }
 
-    let production_name = format!("{root}.production");
-    let expected_production_path = production_path
+    let production_name = format!("{}.production", path.root);
+    let expected_production_path = path
+        .production_path(py)
         .call_method0("resolve")?
         .extract::<PathBuf>()?;
     let preloaded_production = match modules.get_item(&production_name)? {
@@ -471,28 +415,77 @@ pub fn load_production(
         }
         _ => None,
     };
-    let transaction = ImportTransaction::snapshot(&root, &modules)?;
-    match load_in_transaction(
-        py,
-        &root,
-        &resolved,
-        &init_path,
-        &production_path,
-        preloaded_production.as_ref(),
-        args,
-    ) {
-        Ok(production) => Ok(production),
+    let transaction = ImportTransaction::snapshot(&path.root, &modules)?;
+    let production_type = match resolve_in_transaction(py, &path, preloaded_production.as_ref()) {
+        Ok(production_type) => production_type,
         Err(failure) => {
             transaction.rollback(py)?;
-            match failure {
-                LoadFailure::Reason(reason) => fail(py, &resolved, reason),
-                LoadFailure::Caused(reason, cause) => {
-                    let error = production_load_error(py, &resolved, reason)?;
-                    error.set_cause(py, Some(cause));
-                    Err(error)
-                }
-                LoadFailure::Propagate(error) => Err(error),
-            }
+            return finish_failure(py, path.production_root(py), failure);
         }
+    };
+
+    Ok(ResolvedProductionClass {
+        path,
+        production_type,
+        transaction,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use pyo3::types::{PyDict, PyDictMethods, PyList};
+
+    use super::*;
+
+    #[test]
+    fn static_class_inspection_does_not_invoke_descriptor_or_constructor() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            globals.set_item("BaseProduction", py.get_type::<Production>())?;
+            py.run(
+                c"state = {'descriptor_calls': 0, 'constructor_calls': 0}\n\nclass Probe:\n    def __get__(self, instance, owner):\n        state['descriptor_calls'] += 1\n        return ('dynamic',)\n\nprobe = Probe()\n\nclass Candidate(BaseProduction):\n    diagnostic_views = probe\n\n    def __init__(self, args):\n        state['constructor_calls'] += 1\n",
+                Some(&globals),
+                None,
+            )?;
+            let candidate = globals
+                .get_item("Candidate")?
+                .expect("candidate class must exist")
+                .cast_into::<PyType>()?;
+            let probe = globals.get_item("probe")?.expect("probe must exist");
+            let state = globals
+                .get_item("state")?
+                .expect("state must exist")
+                .cast_into::<PyDict>()?;
+
+            let inspected = inspect_static_class_attribute(py, &candidate, "diagnostic_views")?
+                .expect("diagnostic_views must exist");
+            assert!(inspected.bind(py).is(&probe));
+            assert_eq!(
+                state
+                    .get_item("descriptor_calls")?
+                    .expect("descriptor count must exist")
+                    .extract::<usize>()?,
+                0
+            );
+            assert_eq!(
+                state
+                    .get_item("constructor_calls")?
+                    .expect("constructor count must exist")
+                    .extract::<usize>()?,
+                0
+            );
+
+            candidate.call1((PyList::empty(py),))?;
+            assert_eq!(
+                state
+                    .get_item("constructor_calls")?
+                    .expect("constructor count must exist")
+                    .extract::<usize>()?,
+                1
+            );
+            Ok::<_, PyErr>(())
+        })
+        .expect("static inspection must stay before construction");
     }
 }
