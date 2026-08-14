@@ -35,7 +35,10 @@ def test_f00_contract_uses_separate_indexed_artifact_and_gate_families() -> None
             "tests/unit/test_release_script.py",
         ),
     )
-    assert all(path.startswith("tests/") or path.startswith("scripts/") for path in layout.paths)
+    assert all(
+        path.startswith("tests/") or path.startswith("scripts/")
+        for path in layout.fragments["F00"].static_paths
+    )
 
 
 def _copy_contract(tmp_path: Path) -> Path:
