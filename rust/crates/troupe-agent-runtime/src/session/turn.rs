@@ -12,6 +12,13 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{AcpAgentAdapter, RemotePromptErrorSettlement, SupervisorResponseSettlement};
+use crate::diagnostics::observer::AgentDiagnosticObserver;
+use crate::diagnostics::payload::ToolPayloadCapturePolicy;
+use crate::diagnostics::session::{
+    self as diagnostic_session, AgentDiagnosticProvider, AgentTurnDiagnosticIdentity,
+    TurnDiagnosticContext, TurnDiagnosticContextAttachError,
+};
+use crate::diagnostics::usage::TurnTerminalObservation;
 use crate::error::AgentSessionFailure;
 #[cfg(feature = "agent-test-support")]
 use crate::launch::TestTurnGates;
@@ -21,13 +28,25 @@ use crate::result::{
 };
 use crate::schema::{ValidatedActValue, ValidationIssue};
 use crate::session::{
-    ActAdmissionLease, AgentSessionSlot, ProtocolViolationBoundary, SessionTurnLease,
+    ActAdmissionLease, AgentReadySnapshot, AgentSessionSlot, ProtocolViolationBoundary,
+    SessionTurnLease,
 };
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[allow(clippy::question_mark)]
+fn retain_prompt_response_for_diagnostics(
+    context: Option<&TurnDiagnosticContext>,
+    response: &Result<PromptResponse, Error>,
+) -> Option<PromptResponse> {
+    if context.is_none() {
+        return None;
+    }
+    response.as_ref().ok().cloned()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +123,8 @@ enum AgentTurnControlPhase {
 struct AgentTurnControlState {
     phase: AgentTurnControlPhase,
     prompt_response_observed: bool,
+    turn_terminal_observed: bool,
+    diagnostic_context: Option<TurnDiagnosticContext>,
     caller_admission: Option<ActAdmissionLease>,
     armed_result: Option<ArmedResultLease>,
     session_turn: Option<SessionTurnLease>,
@@ -138,6 +159,8 @@ impl AgentTurnControl {
             state: Mutex::new(AgentTurnControlState {
                 phase: AgentTurnControlPhase::Preparing,
                 prompt_response_observed: false,
+                turn_terminal_observed: false,
+                diagnostic_context: None,
                 caller_admission: None,
                 armed_result: None,
                 session_turn: None,
@@ -147,6 +170,56 @@ impl AgentTurnControl {
             caller_cancelled: CancellationToken::new(),
             supervisor_requested: CancellationToken::new(),
         })
+    }
+
+    pub fn new_diagnostic_context(
+        self: &Arc<Self>,
+        identity: AgentTurnDiagnosticIdentity,
+        standalone_observer: Option<AgentDiagnosticObserver>,
+        tool_payload_capture: ToolPayloadCapturePolicy,
+    ) -> TurnDiagnosticContext {
+        TurnDiagnosticContext::new(self, identity, standalone_observer, tool_payload_capture)
+    }
+
+    pub fn install_diagnostic_context(
+        self: &Arc<Self>,
+        mut context: TurnDiagnosticContext,
+    ) -> Result<(), TurnDiagnosticContextAttachError> {
+        if !context.targets(self) {
+            return Err(TurnDiagnosticContextAttachError::WrongControl);
+        }
+        let mut state = lock(&self.state);
+        if state.diagnostic_context.is_some() {
+            return Err(TurnDiagnosticContextAttachError::AlreadyAttached);
+        }
+        if state.phase != AgentTurnControlPhase::Preparing {
+            return Err(TurnDiagnosticContextAttachError::TooLate);
+        }
+        if state.caller_admission.is_none() {
+            return Err(TurnDiagnosticContextAttachError::NotAdmitted);
+        }
+        let session_context = self.slot.diagnostic_context();
+        context.bind(self.slot.diagnostic_observer(), session_context.as_ref())?;
+        state.diagnostic_context = Some(context);
+        Ok(())
+    }
+
+    pub(crate) fn bind_diagnostic_metadata(
+        &self,
+        provider: AgentDiagnosticProvider,
+        snapshot: &AgentReadySnapshot,
+        operation_id: uuid::Uuid,
+        turn_index: u64,
+    ) {
+        let mut state = lock(&self.state);
+        let Some(context) = state.diagnostic_context.as_mut() else {
+            return;
+        };
+        context.bind_runtime_metadata(provider, snapshot, operation_id, turn_index);
+    }
+
+    pub fn diagnostic_context(&self) -> Option<TurnDiagnosticContext> {
+        lock(&self.state).diagnostic_context.clone()
     }
 
     pub fn install_admission(&self, admission: ActAdmissionLease) -> bool {
@@ -186,7 +259,19 @@ impl AgentTurnControl {
             return false;
         }
         state.phase = AgentTurnControlPhase::Submitted;
+        diagnostic_session::observe_turn_submitted(state.diagnostic_context.as_ref());
         true
+    }
+
+    fn observe_turn_terminal_locked(
+        state: &mut AgentTurnControlState,
+        observation: &TurnTerminalObservation<'_>,
+    ) {
+        if state.turn_terminal_observed {
+            return;
+        }
+        state.turn_terminal_observed = true;
+        diagnostic_session::observe_turn_terminal(state.diagnostic_context.as_ref(), observation);
     }
 
     pub(crate) fn mark_prompt_response_observed(&self) {
@@ -251,6 +336,10 @@ impl AgentTurnControl {
                 | AgentTurnControlPhase::Settled => false,
                 AgentTurnControlPhase::Preparing => {
                     state.phase = AgentTurnControlPhase::CancelledBeforeSubmission;
+                    Self::observe_turn_terminal_locked(
+                        &mut state,
+                        &TurnTerminalObservation::not_submitted(),
+                    );
                     caller_admission = state.caller_admission.take();
                     caller_response = state.caller_response.take();
                     caller_outcome = state.caller_outcome.take();
@@ -259,6 +348,10 @@ impl AgentTurnControl {
                 }
                 AgentTurnControlPhase::Armed => {
                     state.phase = AgentTurnControlPhase::CancelledBeforeSubmission;
+                    Self::observe_turn_terminal_locked(
+                        &mut state,
+                        &TurnTerminalObservation::not_submitted(),
+                    );
                     caller_admission = state.caller_admission.take();
                     caller_response = state.caller_response.take();
                     caller_outcome = state.caller_outcome.take();
@@ -430,6 +523,19 @@ impl AgentTurnControl {
             ) {
                 return (None, None);
             }
+            let retained_response = retain_prompt_response_for_diagnostics(
+                state.diagnostic_context.as_ref(),
+                &response,
+            );
+            let prompt_error_settlement = response.as_ref().err().map(|error| {
+                classify_prompt_error(
+                    error,
+                    remote_error,
+                    boundary_protocol_violation,
+                    adapter,
+                    authoritative_error_codes,
+                )
+            });
             let supervisor_owned = matches!(
                 state.phase,
                 AgentTurnControlPhase::SupervisorOwnedCancelled
@@ -460,14 +566,10 @@ impl AgentTurnControl {
                             None
                         }
                     }
-                    Err(error) => {
-                        match classify_prompt_error(
-                            &error,
-                            remote_error,
-                            boundary_protocol_violation,
-                            adapter,
-                            authoritative_error_codes,
-                        ) {
+                    Err(_) => {
+                        match prompt_error_settlement
+                            .expect("an error response has an error settlement")
+                        {
                             PromptErrorSettlement::AuthoritativeRequestFailure => None,
                             PromptErrorSettlement::AuthenticationLost => {
                                 Some(AgentSessionFailure::authentication_lost())
@@ -495,14 +597,10 @@ impl AgentTurnControl {
                         };
                         (outcome, failure)
                     }
-                    Err(error) => {
-                        match classify_prompt_error(
-                            &error,
-                            remote_error,
-                            boundary_protocol_violation,
-                            adapter,
-                            authoritative_error_codes,
-                        ) {
+                    Err(_) => {
+                        match prompt_error_settlement
+                            .expect("an error response has an error settlement")
+                        {
                             PromptErrorSettlement::AuthoritativeRequestFailure => {
                                 let outcome = outcome_from_authoritative_request_error(result);
                                 let failure = match &outcome {
@@ -573,6 +671,17 @@ impl AgentTurnControl {
                 state.phase = AgentTurnControlPhase::CallerOutcomeCommitted;
             } else {
                 state.phase = AgentTurnControlPhase::Settled;
+            }
+            if state.diagnostic_context.is_some() {
+                let terminal_observation =
+                    match (retained_response.as_ref(), prompt_error_settlement) {
+                        (Some(response), _) => TurnTerminalObservation::settled(response, adapter),
+                        (None, Some(PromptErrorSettlement::AuthoritativeRequestFailure)) => {
+                            TurnTerminalObservation::authoritative_without_response(adapter)
+                        }
+                        (None, _) => TurnTerminalObservation::unknown(Some(adapter)),
+                    };
+                Self::observe_turn_terminal_locked(&mut state, &terminal_observation);
             }
             (
                 Some((prepared_result, state.session_turn.take(), broken_failure)),
@@ -661,6 +770,12 @@ impl AgentTurnControl {
                     outcome_from_result_failure,
                 ));
                 state.phase = AgentTurnControlPhase::CallerOutcomeCommitted;
+                let terminal_observation = if submitted {
+                    TurnTerminalObservation::unknown(None)
+                } else {
+                    TurnTerminalObservation::not_submitted()
+                };
+                Self::observe_turn_terminal_locked(&mut state, &terminal_observation);
                 AgentTurnTerminalCleanup {
                     prepared_result,
                     session_turn: state.session_turn.take(),
@@ -676,6 +791,10 @@ impl AgentTurnControl {
                     .take()
                     .map(ArmedResultLease::prepare_settlement);
                 state.phase = AgentTurnControlPhase::Settled;
+                Self::observe_turn_terminal_locked(
+                    &mut state,
+                    &TurnTerminalObservation::unknown(None),
+                );
                 AgentTurnTerminalCleanup {
                     prepared_result,
                     session_turn: state.session_turn.take(),
@@ -700,6 +819,10 @@ impl AgentTurnControl {
                 } else {
                     AgentTurnControlPhase::Settled
                 };
+                Self::observe_turn_terminal_locked(
+                    &mut state,
+                    &TurnTerminalObservation::unknown(None),
+                );
                 AgentTurnTerminalCleanup {
                     prepared_result,
                     session_turn: state.session_turn.take(),
@@ -1049,6 +1172,17 @@ mod tests {
     use tokio::sync::oneshot::error::TryRecvError;
 
     use super::*;
+
+    fn diagnostic_identity(act_id: &str) -> AgentTurnDiagnosticIdentity {
+        AgentTurnDiagnosticIdentity::new(
+            crate::diagnostics::session::AgentSessionDiagnosticContext::new(
+                "actor-test",
+                "session-test",
+            ),
+            act_id,
+            format!("turn-{act_id}"),
+        )
+    }
 
     fn terminal_delivery_for_supervisor_failure(
         outcome: AgentTurnOutcome,
@@ -1488,5 +1622,224 @@ mod tests {
         control.fail_terminal(AgentSessionFailure::transport_lost());
 
         assert_eq!(lock(&control.state).phase, AgentTurnControlPhase::Settled);
+    }
+
+    #[test]
+    fn diagnostic_context_prefers_the_session_observer_and_preserves_sidecar_policy() {
+        struct Destination;
+
+        let session_observer = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        let standalone_observer = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        let slot = AgentSessionSlot::new_with_diagnostic_observer(Some(session_observer.clone()));
+        let control = AgentTurnControl::new(Arc::clone(&slot));
+        let admission = slot.try_claim_admission().expect("the turn is admitted");
+        assert!(control.install_admission(admission));
+        let policy = ToolPayloadCapturePolicy::new(true, false);
+        let context = control.new_diagnostic_context(
+            diagnostic_identity("act-session-observer"),
+            Some(standalone_observer.clone()),
+            policy,
+        );
+
+        assert_eq!(control.install_diagnostic_context(context), Ok(()));
+        let installed = control
+            .diagnostic_context()
+            .expect("the context is installed once");
+        assert_eq!(installed.act_id(), "act-session-observer");
+        assert_eq!(installed.tool_payload_capture(), policy);
+        assert!(
+            installed
+                .effective_observer()
+                .expect("an effective observer exists")
+                .same_destination(&session_observer)
+        );
+        assert!(
+            !installed
+                .effective_observer()
+                .expect("an effective observer exists")
+                .same_destination(&standalone_observer)
+        );
+    }
+
+    #[test]
+    fn diagnostic_context_binds_stable_runtime_turn_metadata_once() {
+        struct Destination;
+
+        let observer = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        let slot = AgentSessionSlot::new_with_diagnostic_observer(None);
+        let control = AgentTurnControl::new(Arc::clone(&slot));
+        let admission = slot.try_claim_admission().expect("the turn is admitted");
+        assert!(control.install_admission(admission));
+        let context = control.new_diagnostic_context(
+            diagnostic_identity("act-runtime-metadata"),
+            Some(observer),
+            ToolPayloadCapturePolicy::default(),
+        );
+        assert_eq!(control.install_diagnostic_context(context), Ok(()));
+
+        let operation_id = uuid::Uuid::from_u128(42);
+        let snapshot = AgentReadySnapshot {
+            pid: std::process::id(),
+            session_id: "provider-session-9".to_owned(),
+            agent_info: None,
+            agent_capabilities: agent_client_protocol::schema::v1::AgentCapabilities::default(),
+            generation: 9,
+            server_name: "test-result-route".to_owned(),
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            effective_model: "effective-model".to_owned(),
+            effective_effort: Some("medium".to_owned()),
+        };
+        control.bind_diagnostic_metadata(
+            AgentDiagnosticProvider::Claude,
+            &snapshot,
+            operation_id,
+            17,
+        );
+        control.bind_diagnostic_metadata(
+            AgentDiagnosticProvider::Claude,
+            &snapshot,
+            operation_id,
+            17,
+        );
+
+        let installed = control
+            .diagnostic_context()
+            .expect("the context remains installed");
+        let metadata = installed
+            .runtime_metadata()
+            .expect("runtime metadata is frozen before submission");
+        assert_eq!(metadata.identity().act_id(), "act-runtime-metadata");
+        assert_eq!(metadata.identity().turn_id(), "turn-act-runtime-metadata");
+        assert_eq!(metadata.provider(), AgentDiagnosticProvider::Claude);
+        assert_eq!(metadata.session_generation(), 9);
+        assert_eq!(metadata.provider_session_id(), "provider-session-9");
+        assert_eq!(metadata.effective_model(), "effective-model");
+        assert_eq!(metadata.effective_effort(), Some("medium"));
+        assert_eq!(metadata.operation_id(), operation_id);
+        assert_eq!(metadata.turn_index(), 17);
+    }
+
+    #[test]
+    fn diagnostic_context_rejects_a_different_native_session_identity() {
+        struct Destination;
+
+        let observer = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        let diagnostics =
+            crate::diagnostics::session::SessionDiagnostics::for_test(observer.clone());
+        let slot = AgentSessionSlot::new_with_diagnostics(
+            diagnostics,
+            Some(AgentDiagnosticProvider::Codex),
+        );
+        let control = AgentTurnControl::new(Arc::clone(&slot));
+        let admission = slot.try_claim_admission().expect("the turn is admitted");
+        assert!(control.install_admission(admission));
+        let context = control.new_diagnostic_context(
+            AgentTurnDiagnosticIdentity::new(
+                crate::diagnostics::session::AgentSessionDiagnosticContext::new(
+                    "actor-test",
+                    "another-session",
+                ),
+                "act-wrong-session",
+                "turn-wrong-session",
+            ),
+            Some(observer),
+            ToolPayloadCapturePolicy::default(),
+        );
+
+        assert_eq!(
+            control.install_diagnostic_context(context),
+            Err(TurnDiagnosticContextAttachError::SessionIdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn diagnostic_context_accepts_only_one_admitted_on_time_matching_destination() {
+        struct Destination;
+
+        let standalone = AgentDiagnosticObserver::from_destination(Arc::new(Destination));
+        let slot = AgentSessionSlot::new();
+        let control = AgentTurnControl::new(Arc::clone(&slot));
+        let before_admission = control.new_diagnostic_context(
+            diagnostic_identity("act-before-admission"),
+            Some(standalone.clone()),
+            ToolPayloadCapturePolicy::default(),
+        );
+        assert_eq!(
+            control.install_diagnostic_context(before_admission),
+            Err(TurnDiagnosticContextAttachError::NotAdmitted)
+        );
+
+        let admission = slot.try_claim_admission().expect("the turn is admitted");
+        assert!(control.install_admission(admission));
+        let context = control.new_diagnostic_context(
+            diagnostic_identity("act-standalone"),
+            Some(standalone.clone()),
+            ToolPayloadCapturePolicy::new(false, true),
+        );
+        assert_eq!(control.install_diagnostic_context(context), Ok(()));
+        assert!(
+            control
+                .diagnostic_context()
+                .and_then(|context| context.effective_observer().cloned())
+                .is_some_and(|observer| observer.same_destination(&standalone))
+        );
+        let duplicate = control.new_diagnostic_context(
+            diagnostic_identity("act-duplicate"),
+            Some(standalone.clone()),
+            ToolPayloadCapturePolicy::default(),
+        );
+        assert_eq!(
+            control.install_diagnostic_context(duplicate),
+            Err(TurnDiagnosticContextAttachError::AlreadyAttached)
+        );
+
+        let other_slot = AgentSessionSlot::new();
+        let other = AgentTurnControl::new(Arc::clone(&other_slot));
+        let other_admission = other_slot
+            .try_claim_admission()
+            .expect("the other turn is admitted");
+        assert!(other.install_admission(other_admission));
+        let wrong = control.new_diagnostic_context(
+            diagnostic_identity("act-wrong-control"),
+            Some(standalone.clone()),
+            ToolPayloadCapturePolicy::default(),
+        );
+        assert_eq!(
+            other.install_diagnostic_context(wrong),
+            Err(TurnDiagnosticContextAttachError::WrongControl)
+        );
+
+        let late_slot = AgentSessionSlot::new();
+        let late = AgentTurnControl::new(Arc::clone(&late_slot));
+        let late_admission = late_slot
+            .try_claim_admission()
+            .expect("the late turn is admitted");
+        assert!(late.install_admission(late_admission));
+        lock(&late.state).phase = AgentTurnControlPhase::Armed;
+        let late_context = late.new_diagnostic_context(
+            diagnostic_identity("act-late"),
+            Some(standalone),
+            ToolPayloadCapturePolicy::default(),
+        );
+        assert_eq!(
+            late.install_diagnostic_context(late_context),
+            Err(TurnDiagnosticContextAttachError::TooLate)
+        );
+
+        let unavailable_slot = AgentSessionSlot::new();
+        let unavailable = AgentTurnControl::new(Arc::clone(&unavailable_slot));
+        let unavailable_admission = unavailable_slot
+            .try_claim_admission()
+            .expect("the observer-less turn is admitted");
+        assert!(unavailable.install_admission(unavailable_admission));
+        let unavailable_context = unavailable.new_diagnostic_context(
+            diagnostic_identity("act-without-observer"),
+            None,
+            ToolPayloadCapturePolicy::default(),
+        );
+        assert_eq!(
+            unavailable.install_diagnostic_context(unavailable_context),
+            Err(TurnDiagnosticContextAttachError::ObserverUnavailable)
+        );
     }
 }

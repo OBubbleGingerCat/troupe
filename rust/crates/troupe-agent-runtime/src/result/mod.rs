@@ -23,6 +23,8 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::diagnostics::result as diagnostic_result;
+use crate::diagnostics::session::TurnDiagnosticContext;
 use crate::error::AgentStartupFailure;
 #[cfg(feature = "agent-test-support")]
 use crate::launch::TestOpeningGate;
@@ -102,6 +104,7 @@ struct ResultSlot {
     arm_generation: u64,
     operation_id: Uuid,
     turn_index: u64,
+    diagnostic_context: Option<TurnDiagnosticContext>,
     state: Mutex<ResultSlotState>,
     failure: CancellationToken,
 }
@@ -306,6 +309,7 @@ impl ResultRouteEpoch {
         turn_index: u64,
         schema: Arc<CompiledActSchema>,
         validation_bridge: Option<Arc<PythonSchemaValidationBridge>>,
+        diagnostic_context: Option<TurnDiagnosticContext>,
     ) -> Result<ArmedResultLease, ResultArmError> {
         let mut epoch = lock(&self.state);
         if epoch.revoked {
@@ -324,6 +328,7 @@ impl ResultRouteEpoch {
             arm_generation,
             operation_id,
             turn_index,
+            diagnostic_context,
             state: Mutex::new(ResultSlotState::Awaiting {
                 schema,
                 validation_bridge,
@@ -407,6 +412,20 @@ impl ResultRouteEpoch {
                 validation_bridge,
             )
         };
+        if matches!(
+            &state,
+            ResultSlotState::Awaiting {
+                invalid_calls: 0,
+                ..
+            }
+        ) {
+            diagnostic_result::observe_missing(
+                expected.diagnostic_context.as_ref(),
+                expected.session_generation,
+                expected.operation_id,
+                expected.turn_index,
+            );
+        }
         epoch.active = None;
         drop(epoch);
         PreparedResultSettlement {
@@ -593,6 +612,7 @@ impl ResultRoute {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn arm_result(
         self: &Arc<Self>,
         operation_id: Uuid,
@@ -600,8 +620,24 @@ impl ResultRoute {
         schema: Arc<CompiledActSchema>,
         validation_bridge: Option<Arc<PythonSchemaValidationBridge>>,
     ) -> Result<ArmedResultLease, ResultArmError> {
-        self.result_epoch
-            .arm(operation_id, turn_index, schema, validation_bridge)
+        self.arm_result_with_diagnostics(operation_id, turn_index, schema, validation_bridge, None)
+    }
+
+    pub(crate) fn arm_result_with_diagnostics(
+        self: &Arc<Self>,
+        operation_id: Uuid,
+        turn_index: u64,
+        schema: Arc<CompiledActSchema>,
+        validation_bridge: Option<Arc<PythonSchemaValidationBridge>>,
+        diagnostic_context: Option<TurnDiagnosticContext>,
+    ) -> Result<ArmedResultLease, ResultArmError> {
+        self.result_epoch.arm(
+            operation_id,
+            turn_index,
+            schema,
+            validation_bridge,
+            diagnostic_context,
+        )
     }
 
     pub(crate) fn acquire_result_request(&self) -> ResultRequestLease {
@@ -711,8 +747,16 @@ impl ResultRequestLease {
     }
 
     pub(crate) fn start_submission(&self, value: &Value) -> ResultSubmissionStart {
-        let schema = match self.with_current_state(|_, state| match state {
-            ResultSlotState::Awaiting { schema, .. } => Ok(Arc::clone(schema)),
+        let schema = match self.with_current_state(|slot, state| match state {
+            ResultSlotState::Awaiting { schema, .. } => {
+                diagnostic_result::observe_submitted(
+                    slot.diagnostic_context.as_ref(),
+                    slot.session_generation,
+                    slot.operation_id,
+                    slot.turn_index,
+                );
+                Ok(Arc::clone(schema))
+            }
             ResultSlotState::Accepted(_) => Err(ResultSubmission::AlreadySubmitted),
             ResultSlotState::Rejected { .. } => Err(ResultSubmission::ResultContractRejected),
             ResultSlotState::Settling { .. } | ResultSlotState::Disarmed => {
@@ -814,7 +858,7 @@ impl ResultRequestLease {
 
     fn publish_invalid(&self, issues: Vec<ValidationIssue>, truncated: bool) -> ResultSubmission {
         let mut bridge_to_close = None;
-        let outcome = self.with_current_state(|_, state| match state {
+        let outcome = self.with_current_state(|slot, state| match state {
             ResultSlotState::Awaiting {
                 validation_bridge,
                 invalid_calls,
@@ -828,6 +872,25 @@ impl ResultRequestLease {
                 let (issues, truncated) = bound_validation_issues(issues, truncated, count);
                 if count <= MAX_REPAIRABLE_INVALID_CALLS {
                     *last_invalid = Some((issues.clone(), truncated));
+                    let (observed_issues, observed_truncated) = last_invalid
+                        .as_ref()
+                        .expect("the invalid result metadata was just retained");
+                    diagnostic_result::observe_validation_rejected(
+                        slot.diagnostic_context.as_ref(),
+                        slot.session_generation,
+                        slot.operation_id,
+                        slot.turn_index,
+                        count,
+                        observed_issues,
+                        *observed_truncated,
+                    );
+                    diagnostic_result::observe_repair_requested(
+                        slot.diagnostic_context.as_ref(),
+                        slot.session_generation,
+                        slot.operation_id,
+                        slot.turn_index,
+                        count,
+                    );
                     ResultSubmission::Invalid {
                         issues,
                         truncated,
@@ -843,6 +906,21 @@ impl ResultRequestLease {
                         issues,
                         truncated,
                     };
+                    let ResultSlotState::Rejected {
+                        issues, truncated, ..
+                    } = state
+                    else {
+                        unreachable!("the rejected result state was just committed")
+                    };
+                    diagnostic_result::observe_validation_rejected(
+                        slot.diagnostic_context.as_ref(),
+                        slot.session_generation,
+                        slot.operation_id,
+                        slot.turn_index,
+                        count,
+                        issues,
+                        *truncated,
+                    );
                     ResultSubmission::Rejected {
                         invalid_calls: count,
                     }
@@ -871,7 +949,7 @@ impl ResultRequestLease {
         value: ValidatedActValue,
     ) -> ResultSubmission {
         let mut bridge_to_close = None;
-        let outcome = self.with_current_state(|_, state| match state {
+        let outcome = self.with_current_state(|slot, state| match state {
             ResultSlotState::Awaiting {
                 schema: current,
                 validation_bridge,
@@ -882,6 +960,12 @@ impl ResultRequestLease {
                     validation_bridge.begin_close();
                 }
                 *state = ResultSlotState::Accepted(value);
+                diagnostic_result::observe_accepted(
+                    slot.diagnostic_context.as_ref(),
+                    slot.session_generation,
+                    slot.operation_id,
+                    slot.turn_index,
+                );
                 ResultSubmission::Accepted
             }
             ResultSlotState::Awaiting { .. } => ResultSubmission::TurnUnavailable,
@@ -986,6 +1070,7 @@ impl ArmedResultLease {
             arm_generation,
             operation_id: Uuid::from_u128(1),
             turn_index: 1,
+            diagnostic_context: None,
             state: Mutex::new(state),
             failure: CancellationToken::new(),
         });
