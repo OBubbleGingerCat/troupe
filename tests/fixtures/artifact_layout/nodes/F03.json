@@ -1,7 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/run_diagnostic_node_gate.sh",
+    "tests/support/diagnostic_gate.py",
+    "tests/unit/test_diagnostic_worktree_gate.py"
+  ],
+  "modified": [
+    ".gitignore"
+  ],
   "removed": [],
   "generated": []
 }
