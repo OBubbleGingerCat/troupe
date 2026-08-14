@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-core/tests/scalar_wire.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-core/src/id.rs",
+    "rust/crates/troupe-diagnostics-core/src/scalar.rs",
+    "rust/crates/troupe-diagnostics-core/src/time.rs",
+    "rust/crates/troupe-diagnostics-core/src/wire.rs"
+  ],
   "removed": [],
   "generated": []
 }
