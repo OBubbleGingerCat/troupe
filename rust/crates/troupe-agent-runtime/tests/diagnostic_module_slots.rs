@@ -2,6 +2,19 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// Resolving these imports from this integration crate proves the public seams stay nameable.
+#[allow(unused_imports)]
+use troupe_agent_runtime::{
+    AgentDiagnosticCandidate as _, AgentDiagnosticDestination as _, AgentDiagnosticErrorCode as _,
+    AgentDiagnosticFailureOwner as _, AgentDiagnosticObservation as _,
+    AgentDiagnosticObservationKind as _, AgentDiagnosticObserverFailure as _,
+    AgentTurnDiagnosticSettlement as _,
+    diagnostics::{
+        context as _, cost as _, message as _, payload as _, plan as _, result as _, thinking as _,
+        tool as _, usage as _,
+    },
+};
+
 const MODULES: &[&str] = &[
     "context", "cost", "message", "observer", "payload", "plan", "result", "session", "thinking",
     "tool", "usage",
@@ -30,11 +43,20 @@ fn diagnostic_slots_and_parent_declarations_are_exact() {
         .collect::<BTreeSet<_>>();
     assert_eq!(actual, expected);
 
-    let declarations = MODULES
-        .iter()
-        .map(|module| format!("pub(crate) mod {module};"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let declarations = [
+        "pub mod context;",
+        "pub mod cost;",
+        "pub mod message;",
+        "pub(crate) mod observer;",
+        "pub mod payload;",
+        "pub mod plan;",
+        "pub mod result;",
+        "pub(crate) mod session;",
+        "pub mod thinking;",
+        "pub mod tool;",
+        "pub mod usage;",
+    ]
+    .join("\n");
     assert_eq!(
         source(&crate_root, "diagnostics/mod.rs"),
         format!("{declarations}\n")
@@ -42,15 +64,23 @@ fn diagnostic_slots_and_parent_declarations_are_exact() {
 
     let root = source(&crate_root, "lib.rs");
     for required in [
-        "mod diagnostics;",
+        "pub mod diagnostics;",
+        "AgentDiagnosticCandidate",
+        "AgentDiagnosticDestination",
+        "AgentDiagnosticErrorCode",
+        "AgentDiagnosticFailureOwner",
+        "AgentDiagnosticObservation",
+        "AgentDiagnosticObservationKind",
         "AgentDiagnosticProvider",
         "AgentDiagnosticObserver",
+        "AgentDiagnosticObserverFailure",
         "AgentDiagnosticObserverInstallError",
         "AgentSessionDiagnosticContext",
         "AgentSessionDiagnosticMetadata",
         "AgentTurnDiagnosticIdentity",
         "AgentTurnDiagnosticMetadata",
         "ToolPayloadCapturePolicy",
+        "AgentTurnDiagnosticSettlement",
         "TurnDiagnosticContext",
         "TurnDiagnosticContextAttachError",
     ] {

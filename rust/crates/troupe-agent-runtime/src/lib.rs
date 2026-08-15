@@ -11,7 +11,7 @@ pub(crate) fn initialize_python_for_test() -> std::sync::MutexGuard<'static, ()>
 }
 
 mod adapter;
-mod diagnostics;
+pub mod diagnostics;
 mod error;
 mod launch;
 mod profile;
@@ -21,7 +21,12 @@ mod session;
 
 #[cfg(feature = "agent-test-support")]
 pub use adapter::{permission_for_test, settlement_for_test, supervisor_response_for_test};
-pub use diagnostics::observer::{AgentDiagnosticObserver, AgentDiagnosticObserverInstallError};
+pub use diagnostics::observer::{
+    AgentDiagnosticCandidate, AgentDiagnosticDestination, AgentDiagnosticErrorCode,
+    AgentDiagnosticFailureOwner, AgentDiagnosticObservation, AgentDiagnosticObservationKind,
+    AgentDiagnosticObserver, AgentDiagnosticObserverFailure, AgentDiagnosticObserverInstallError,
+    AgentTurnDiagnosticSettlement,
+};
 pub use diagnostics::payload::ToolPayloadCapturePolicy;
 pub use diagnostics::session::{
     AgentDiagnosticProvider, AgentSessionDiagnosticContext, AgentSessionDiagnosticMetadata,
