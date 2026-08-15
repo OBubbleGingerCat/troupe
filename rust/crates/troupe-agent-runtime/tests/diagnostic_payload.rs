@@ -1,21 +1,26 @@
 use std::{fs, path::PathBuf};
 
 use agent_client_protocol::schema::v1::{
-    Plan, SessionUpdate, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
+    Annotations, ContentBlock, Plan, Role, SessionUpdate, Terminal, TextContent, ToolCall,
+    ToolCallContent, ToolCallLocation, ToolCallUpdate, ToolCallUpdateFields,
 };
 use serde_json::{Value, json};
 use troupe_agent_runtime::{
     AgentDiagnosticCandidate,
     diagnostics::payload::{
         ACT_TOOL_PAYLOAD_MAX_BYTES, AGENT_TOOL_PAYLOAD_CANDIDATE_KIND, AgentToolPayloadActBudget,
-        AgentToolPayloadCandidate, SinkOnlyToolPayload, TOOL_PAYLOAD_MAX_DEPTH,
+        AgentToolPayloadCandidate, CapturedToolPayloadForTest, TOOL_PAYLOAD_MAX_DEPTH,
         TOOL_PAYLOAD_MAX_NODES, TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES, ToolPayloadCapturePolicy,
-        ToolPayloadOmissionReason, ToolPayloadSource,
+        ToolPayloadOmissionReason, ToolPayloadSource, capture_tool_payload_for_test,
     },
 };
 
-fn capture(update: &SessionUpdate, input: bool, output: bool) -> Option<SinkOnlyToolPayload> {
-    SinkOnlyToolPayload::from_acp(update, ToolPayloadCapturePolicy::new(input, output))
+fn capture(
+    update: &SessionUpdate,
+    input: bool,
+    output: bool,
+) -> Option<CapturedToolPayloadForTest> {
+    capture_tool_payload_for_test(update, ToolPayloadCapturePolicy::new(input, output))
 }
 
 fn input_update(value: Value) -> SessionUpdate {
@@ -27,6 +32,20 @@ fn output_update(value: Value) -> SessionUpdate {
         "tool-output",
         ToolCallUpdateFields::new().raw_output(value),
     ))
+}
+
+fn typed_output_update(
+    content: Option<Vec<ToolCallContent>>,
+    locations: Option<Vec<ToolCallLocation>>,
+) -> SessionUpdate {
+    let mut fields = ToolCallUpdateFields::new();
+    if let Some(content) = content {
+        fields = fields.content(content);
+    }
+    if let Some(locations) = locations {
+        fields = fields.locations(locations);
+    }
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new("tool-typed-output", fields))
 }
 
 fn nested_array(depth: usize) -> Value {
@@ -271,6 +290,106 @@ fn typed_node_equal_is_accepted_and_one_over_is_atomically_omitted() {
 }
 
 #[test]
+fn typed_location_nodes_accept_total_limit_and_reject_one_collection_item_over() {
+    let locations_at_limit = (TOOL_PAYLOAD_MAX_NODES - 2) / 2;
+    assert_eq!(2 + locations_at_limit * 2, TOOL_PAYLOAD_MAX_NODES);
+
+    let exact = typed_output_update(
+        None,
+        Some(
+            (0..locations_at_limit)
+                .map(|_| ToolCallLocation::new(""))
+                .collect(),
+        ),
+    );
+    let output = capture(&exact, false, true).unwrap();
+    assert_eq!(
+        output.output().unwrap().omission_reason(),
+        Some(ToolPayloadOmissionReason::SnapshotByteLimit),
+        "an exact node budget must proceed to the independent byte limit"
+    );
+
+    let over = typed_output_update(
+        None,
+        Some(
+            (0..=locations_at_limit)
+                .map(|_| ToolCallLocation::new(""))
+                .collect(),
+        ),
+    );
+    let output = capture(&over, false, true).unwrap();
+    assert!(output.output().unwrap().raw_output().is_none());
+    assert!(output.output().unwrap().locations().is_empty());
+    assert_eq!(
+        output.output().unwrap().omission_reason(),
+        Some(ToolPayloadOmissionReason::NodeLimit)
+    );
+}
+
+#[test]
+fn typed_minimal_content_collection_is_rejected_at_the_total_node_bound() {
+    let content_below_limit = (TOOL_PAYLOAD_MAX_NODES - 2) / 3;
+    assert!(2 + content_below_limit * 3 <= TOOL_PAYLOAD_MAX_NODES);
+    assert!(2 + (content_below_limit + 1) * 3 > TOOL_PAYLOAD_MAX_NODES);
+
+    let below = typed_output_update(
+        Some(
+            (0..content_below_limit)
+                .map(|_| ToolCallContent::Terminal(Terminal::new("")))
+                .collect(),
+        ),
+        None,
+    );
+    let output = capture(&below, false, true).unwrap();
+    assert_eq!(
+        output.output().unwrap().omission_reason(),
+        Some(ToolPayloadOmissionReason::SnapshotByteLimit),
+        "node-admitted minimal content must proceed to the independent byte limit"
+    );
+
+    let over = typed_output_update(
+        Some(
+            (0..=content_below_limit)
+                .map(|_| ToolCallContent::Terminal(Terminal::new("")))
+                .collect(),
+        ),
+        None,
+    );
+    let output = capture(&over, false, true).unwrap();
+    assert!(output.output().unwrap().content().is_empty());
+    assert_eq!(
+        output.output().unwrap().omission_reason(),
+        Some(ToolPayloadOmissionReason::NodeLimit)
+    );
+}
+
+#[test]
+fn typed_annotation_collection_accepts_total_limit_and_rejects_one_node_over() {
+    let audience_at_limit = TOOL_PAYLOAD_MAX_NODES - 9;
+    let annotated = |audience_len| {
+        let content = ToolCallContent::from(ContentBlock::Text(
+            TextContent::new("")
+                .annotations(Annotations::new().audience(vec![Role::User; audience_len])),
+        ));
+        typed_output_update(Some(vec![content]), None)
+    };
+
+    let exact = capture(&annotated(audience_at_limit), false, true).unwrap();
+    assert_eq!(
+        exact.output().unwrap().omission_reason(),
+        Some(ToolPayloadOmissionReason::SnapshotByteLimit),
+        "an exact nested node budget must proceed to the independent byte limit"
+    );
+
+    let over = capture(&annotated(audience_at_limit + 1), false, true).unwrap();
+    assert!(over.output().unwrap().content().is_empty());
+    assert_eq!(
+        over.output().unwrap().omission_reason(),
+        Some(ToolPayloadOmissionReason::NodeLimit)
+    );
+}
+
+#[test]
 fn input_snapshot_equal_is_accepted_and_one_byte_over_has_no_partial_json() {
     let exact = capture(&exact_input_update(), true, false).unwrap();
     let input = exact.input().unwrap();
@@ -377,9 +496,10 @@ fn candidate_is_typed_sink_only_and_source_checks_precede_payload_selection() {
         + observe_source
             .find("if !policy.captures_payload()")
             .expect("capture policy guard");
-    let source_selection = source
-        .rfind("SinkOnlyToolPayload::from_acp(update, policy)")
-        .expect("ACP source selection");
+    let source_selection = context_guard
+        + observe_source
+            .find("capture_tool_payload(update, policy)")
+            .expect("ACP source selection");
     assert!(context_guard < policy_guard && policy_guard < source_selection);
 
     for required in [
@@ -388,6 +508,8 @@ fn candidate_is_typed_sink_only_and_source_checks_precede_payload_selection() {
         "AgentToolPayloadCandidate",
         "is_sink_only",
         "tool_content_json",
+        "capture_tool_payload(update, policy).map(CapturedToolPayloadForTest)",
+        "#[cfg(debug_assertions)]",
         "TOOL_PAYLOAD_MAX_DEPTH: usize = 32",
         "TOOL_PAYLOAD_MAX_NODES: usize = 65_536",
     ] {
@@ -402,6 +524,9 @@ fn candidate_is_typed_sink_only_and_source_checks_precede_payload_selection() {
         "troupe_diagnostics_perfetto",
         "DiagnosticEvent",
         "Serialize for SinkOnlyJsonValue",
+        "pub fn from_acp",
+        "Deref for CapturedToolPayloadForTest",
+        "into_inner",
         "redact_credential",
         "scan_credential",
     ] {

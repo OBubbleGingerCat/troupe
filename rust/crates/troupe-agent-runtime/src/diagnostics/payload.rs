@@ -259,33 +259,6 @@ pub struct SinkOnlyToolPayload {
 }
 
 impl SinkOnlyToolPayload {
-    pub fn from_acp(update: &SessionUpdate, policy: ToolPayloadCapturePolicy) -> Option<Self> {
-        if !policy.captures_payload() {
-            return None;
-        }
-
-        let fields = SelectedToolFields::from_update(update)?;
-        let input = policy
-            .capture_input()
-            .then(|| fields.raw_input.map(capture_input))
-            .flatten();
-        let output = policy
-            .capture_output()
-            .then(|| fields.output.map(capture_output))
-            .flatten();
-        if input.is_none() && output.is_none() {
-            return None;
-        }
-
-        Some(Self {
-            tool_call_id: Arc::clone(fields.tool_call_id),
-            source: fields.source,
-            input,
-            output,
-            act_budget_applied: false,
-        })
-    }
-
     pub fn tool_call_id(&self) -> &str {
         &self.tool_call_id
     }
@@ -328,6 +301,87 @@ impl SinkOnlyToolPayload {
         }
         self.act_budget_applied = true;
     }
+}
+
+fn capture_tool_payload(
+    update: &SessionUpdate,
+    policy: ToolPayloadCapturePolicy,
+) -> Option<SinkOnlyToolPayload> {
+    if !policy.captures_payload() {
+        return None;
+    }
+
+    let fields = SelectedToolFields::from_update(update)?;
+    let input = policy
+        .capture_input()
+        .then(|| fields.raw_input.map(capture_input))
+        .flatten();
+    let output = policy
+        .capture_output()
+        .then(|| fields.output.map(capture_output))
+        .flatten();
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+
+    Some(SinkOnlyToolPayload {
+        tool_call_id: Arc::clone(fields.tool_call_id),
+        source: fields.source,
+        input,
+        output,
+        act_budget_applied: false,
+    })
+}
+
+/// Debug-build-only view used by the focused integration gate to exercise the real ingress path.
+///
+/// The wrapper deliberately has no constructor, payload accessor, `Deref`, or inner-value escape.
+/// Release products therefore expose neither capture nor construction of sink-only payloads.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub struct CapturedToolPayloadForTest(SinkOnlyToolPayload);
+
+#[cfg(debug_assertions)]
+impl CapturedToolPayloadForTest {
+    pub fn tool_call_id(&self) -> &str {
+        self.0.tool_call_id()
+    }
+
+    pub const fn source(&self) -> ToolPayloadSource {
+        self.0.source()
+    }
+
+    pub const fn input(&self) -> Option<&SinkOnlyToolInput> {
+        self.0.input()
+    }
+
+    pub const fn output(&self) -> Option<&SinkOnlyToolOutput> {
+        self.0.output()
+    }
+
+    pub const fn act_budget_applied(&self) -> bool {
+        self.0.act_budget_applied()
+    }
+
+    pub fn apply_act_budget(&mut self, budget: &mut AgentToolPayloadActBudget) {
+        self.0.apply_act_budget(budget);
+    }
+}
+
+#[cfg(debug_assertions)]
+impl fmt::Debug for CapturedToolPayloadForTest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn capture_tool_payload_for_test(
+    update: &SessionUpdate,
+    policy: ToolPayloadCapturePolicy,
+) -> Option<CapturedToolPayloadForTest> {
+    capture_tool_payload(update, policy).map(CapturedToolPayloadForTest)
 }
 
 impl fmt::Debug for SinkOnlyToolPayload {
@@ -492,14 +546,14 @@ fn capture_input(value: &Value) -> SinkOnlyToolInput {
 }
 
 fn capture_output(selected: SelectedOutput<'_>) -> SinkOnlyToolOutput {
-    let (raw_output, raw_output_bytes) = match selected.raw_output {
-        Some(raw_output) => match checked_component_size(raw_output, 2, 1) {
-            Ok(bytes) => (Some(canonicalize_json(raw_output)), bytes),
+    let (raw_output, raw_output_resources) = match selected.raw_output {
+        Some(raw_output) => match checked_component_resources(raw_output, 2, 1) {
+            Ok(resources) => (Some(canonicalize_json(raw_output)), resources),
             Err(reason) => return SinkOnlyToolOutput::omitted(reason),
         },
-        None => (None, 0),
+        None => (None, CheckedResources { bytes: 0, nodes: 1 }),
     };
-    let mut retention = RetentionBudget::with_bytes(raw_output_bytes);
+    let mut retention = RetentionBudget::with_resources(raw_output_resources);
     let content = match selected.content {
         Some(content) => match normalize_content(content, &mut retention) {
             Ok(content) => content,
@@ -541,34 +595,42 @@ fn normalize_content(
     content: &[ToolCallContent],
     retention: &mut RetentionBudget,
 ) -> Result<Vec<Value>, ToolPayloadOmissionReason> {
-    content
-        .iter()
-        .map(|item| tool_content_json(item, retention))
-        .collect()
+    retention.node(2)?;
+    let mut normalized = Vec::new();
+    for item in content {
+        normalized.push(tool_content_json(item, retention)?);
+    }
+    Ok(normalized)
 }
 
 fn normalize_locations(
     locations: &[ToolCallLocation],
     retention: &mut RetentionBudget,
 ) -> Result<Vec<SinkOnlyToolLocation>, ToolPayloadOmissionReason> {
-    locations
-        .iter()
-        .map(|location| {
-            let Some(path) = location.path.to_str() else {
-                return Err(ToolPayloadOmissionReason::InvalidType);
-            };
-            Ok(SinkOnlyToolLocation {
-                path: Arc::from(retention.string(path)?),
-                line: location.line,
-            })
-        })
-        .collect()
+    retention.node(2)?;
+    let mut normalized = Vec::new();
+    for location in locations {
+        let Some(path) = location.path.to_str() else {
+            return Err(ToolPayloadOmissionReason::InvalidType);
+        };
+        retention.node(3)?;
+        let path = Arc::from(retention.string(path, 4)?);
+        if location.line.is_some() {
+            retention.node(4)?;
+        }
+        normalized.push(SinkOnlyToolLocation {
+            path,
+            line: location.line,
+        });
+    }
+    Ok(normalized)
 }
 
 fn tool_content_json(
     content: &ToolCallContent,
     retention: &mut RetentionBudget,
 ) -> Result<Value, ToolPayloadOmissionReason> {
+    retention.node(3)?;
     let mut value = Map::new();
     match content {
         ToolCallContent::Content(content) => {
@@ -576,7 +638,10 @@ fn tool_content_json(
                 "content".to_owned(),
                 content_block_json(&content.content, retention)?,
             );
-            value.insert("type".to_owned(), Value::String("content".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("content", 4)?),
+            );
         }
         ToolCallContent::Diff(diff) => {
             let Some(path) = diff.path.to_str() else {
@@ -584,23 +649,29 @@ fn tool_content_json(
             };
             value.insert(
                 "newText".to_owned(),
-                Value::String(retention.string(&diff.new_text)?),
+                Value::String(retention.string(&diff.new_text, 4)?),
             );
             if let Some(old_text) = diff.old_text.as_deref() {
                 value.insert(
                     "oldText".to_owned(),
-                    Value::String(retention.string(old_text)?),
+                    Value::String(retention.string(old_text, 4)?),
                 );
             }
-            value.insert("path".to_owned(), Value::String(retention.string(path)?));
-            value.insert("type".to_owned(), Value::String("diff".to_owned()));
+            value.insert("path".to_owned(), Value::String(retention.string(path, 4)?));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("diff", 4)?),
+            );
         }
         ToolCallContent::Terminal(terminal) => {
             value.insert(
                 "terminalId".to_owned(),
-                Value::String(retention.string(&terminal.terminal_id.0)?),
+                Value::String(retention.string(&terminal.terminal_id.0, 4)?),
             );
-            value.insert("type".to_owned(), Value::String("terminal".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("terminal", 4)?),
+            );
         }
         _ => return Err(ToolPayloadOmissionReason::InvalidType),
     }
@@ -611,42 +682,52 @@ fn content_block_json(
     content: &ContentBlock,
     retention: &mut RetentionBudget,
 ) -> Result<Value, ToolPayloadOmissionReason> {
+    retention.node(4)?;
     let mut value = Map::new();
     match content {
         ContentBlock::Text(content) => {
             insert_annotations(&mut value, content.annotations.as_ref(), retention)?;
             value.insert(
                 "text".to_owned(),
-                Value::String(retention.string(&content.text)?),
+                Value::String(retention.string(&content.text, 5)?),
             );
-            value.insert("type".to_owned(), Value::String("text".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("text", 5)?),
+            );
         }
         ContentBlock::Image(content) => {
             insert_annotations(&mut value, content.annotations.as_ref(), retention)?;
             value.insert(
                 "data".to_owned(),
-                Value::String(retention.string(&content.data)?),
+                Value::String(retention.string(&content.data, 5)?),
             );
             value.insert(
                 "mimeType".to_owned(),
-                Value::String(retention.string(&content.mime_type)?),
+                Value::String(retention.string(&content.mime_type, 5)?),
             );
             if let Some(uri) = content.uri.as_deref() {
-                value.insert("uri".to_owned(), Value::String(retention.string(uri)?));
+                value.insert("uri".to_owned(), Value::String(retention.string(uri, 5)?));
             }
-            value.insert("type".to_owned(), Value::String("image".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("image", 5)?),
+            );
         }
         ContentBlock::Audio(content) => {
             insert_annotations(&mut value, content.annotations.as_ref(), retention)?;
             value.insert(
                 "data".to_owned(),
-                Value::String(retention.string(&content.data)?),
+                Value::String(retention.string(&content.data, 5)?),
             );
             value.insert(
                 "mimeType".to_owned(),
-                Value::String(retention.string(&content.mime_type)?),
+                Value::String(retention.string(&content.mime_type, 5)?),
             );
-            value.insert("type".to_owned(), Value::String("audio".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("audio", 5)?),
+            );
         }
         ContentBlock::ResourceLink(content) => {
             insert_annotations(&mut value, content.annotations.as_ref(), retention)?;
@@ -655,26 +736,32 @@ fn content_block_json(
                 "description",
                 content.description.as_deref(),
                 retention,
+                5,
             )?;
             insert_optional_string(
                 &mut value,
                 "mimeType",
                 content.mime_type.as_deref(),
                 retention,
+                5,
             )?;
             value.insert(
                 "name".to_owned(),
-                Value::String(retention.string(&content.name)?),
+                Value::String(retention.string(&content.name, 5)?),
             );
             if let Some(size) = content.size {
+                retention.node(5)?;
                 value.insert("size".to_owned(), Value::Number(size.into()));
             }
-            insert_optional_string(&mut value, "title", content.title.as_deref(), retention)?;
+            insert_optional_string(&mut value, "title", content.title.as_deref(), retention, 5)?;
             value.insert(
                 "uri".to_owned(),
-                Value::String(retention.string(&content.uri)?),
+                Value::String(retention.string(&content.uri, 5)?),
             );
-            value.insert("type".to_owned(), Value::String("resource_link".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("resource_link", 5)?),
+            );
         }
         ContentBlock::Resource(content) => {
             insert_annotations(&mut value, content.annotations.as_ref(), retention)?;
@@ -682,7 +769,10 @@ fn content_block_json(
                 "resource".to_owned(),
                 embedded_resource_json(&content.resource, retention)?,
             );
-            value.insert("type".to_owned(), Value::String("resource".to_owned()));
+            value.insert(
+                "type".to_owned(),
+                Value::String(retention.literal("resource", 5)?),
+            );
         }
         _ => return Err(ToolPayloadOmissionReason::InvalidType),
     }
@@ -693,6 +783,7 @@ fn embedded_resource_json(
     resource: &EmbeddedResourceResource,
     retention: &mut RetentionBudget,
 ) -> Result<Value, ToolPayloadOmissionReason> {
+    retention.node(5)?;
     let mut value = Map::new();
     match resource {
         EmbeddedResourceResource::TextResourceContents(resource) => {
@@ -701,30 +792,32 @@ fn embedded_resource_json(
                 "mimeType",
                 resource.mime_type.as_deref(),
                 retention,
+                6,
             )?;
             value.insert(
                 "text".to_owned(),
-                Value::String(retention.string(&resource.text)?),
+                Value::String(retention.string(&resource.text, 6)?),
             );
             value.insert(
                 "uri".to_owned(),
-                Value::String(retention.string(&resource.uri)?),
+                Value::String(retention.string(&resource.uri, 6)?),
             );
         }
         EmbeddedResourceResource::BlobResourceContents(resource) => {
             value.insert(
                 "blob".to_owned(),
-                Value::String(retention.string(&resource.blob)?),
+                Value::String(retention.string(&resource.blob, 6)?),
             );
             insert_optional_string(
                 &mut value,
                 "mimeType",
                 resource.mime_type.as_deref(),
                 retention,
+                6,
             )?;
             value.insert(
                 "uri".to_owned(),
-                Value::String(retention.string(&resource.uri)?),
+                Value::String(retention.string(&resource.uri, 6)?),
             );
         }
         _ => return Err(ToolPayloadOmissionReason::InvalidType),
@@ -740,28 +833,33 @@ fn insert_annotations(
     let Some(annotations) = annotations else {
         return Ok(());
     };
+    retention.node(5)?;
     let mut value = Map::new();
     if let Some(audience) = annotations.audience.as_ref() {
-        let audience = audience
-            .iter()
-            .map(|role| match role {
-                Role::Assistant => Ok(Value::String("assistant".to_owned())),
-                Role::User => Ok(Value::String("user".to_owned())),
-                _ => Err(ToolPayloadOmissionReason::InvalidType),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        value.insert("audience".to_owned(), Value::Array(audience));
+        retention.node(6)?;
+        let mut normalized = Vec::new();
+        for role in audience {
+            let role = match role {
+                Role::Assistant => "assistant",
+                Role::User => "user",
+                _ => return Err(ToolPayloadOmissionReason::InvalidType),
+            };
+            normalized.push(Value::String(retention.literal(role, 7)?));
+        }
+        value.insert("audience".to_owned(), Value::Array(normalized));
     }
     insert_optional_string(
         &mut value,
         "lastModified",
         annotations.last_modified.as_deref(),
         retention,
+        6,
     )?;
     if let Some(priority) = annotations.priority {
         let Some(priority) = serde_json::Number::from_f64(priority) else {
             return Err(ToolPayloadOmissionReason::InvalidType);
         };
+        retention.node(6)?;
         value.insert("priority".to_owned(), Value::Number(priority));
     }
     target.insert("annotations".to_owned(), Value::Object(value));
@@ -773,9 +871,13 @@ fn insert_optional_string(
     key: &'static str,
     value: Option<&str>,
     retention: &mut RetentionBudget,
+    depth: usize,
 ) -> Result<(), ToolPayloadOmissionReason> {
     if let Some(value) = value {
-        target.insert(key.to_owned(), Value::String(retention.string(value)?));
+        target.insert(
+            key.to_owned(),
+            Value::String(retention.string(value, depth)?),
+        );
     }
     Ok(())
 }
@@ -806,20 +908,29 @@ fn canonicalize_json(value: &Value) -> Value {
 }
 
 fn checked_snapshot_size(value: &Value) -> Result<usize, ToolPayloadOmissionReason> {
-    checked_component_size(value, 1, 0)
+    checked_component_resources(value, 1, 0).map(|resources| resources.bytes)
 }
 
-fn checked_component_size(
+#[derive(Clone, Copy)]
+struct CheckedResources {
+    bytes: usize,
+    nodes: usize,
+}
+
+fn checked_component_resources(
     value: &Value,
     depth: usize,
     initial_nodes: usize,
-) -> Result<usize, ToolPayloadOmissionReason> {
+) -> Result<CheckedResources, ToolPayloadOmissionReason> {
     let mut nodes = initial_nodes;
     check_json_resources(value, depth, &mut nodes)?;
 
     let mut counter = CappedByteCounter::new(TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES);
     match serde_json::to_writer(&mut counter, value) {
-        Ok(()) => Ok(counter.bytes),
+        Ok(()) => Ok(CheckedResources {
+            bytes: counter.bytes,
+            nodes,
+        }),
         Err(_) if counter.exceeded => Err(ToolPayloadOmissionReason::SnapshotByteLimit),
         Err(_) => Err(ToolPayloadOmissionReason::InvalidType),
     }
@@ -827,14 +938,33 @@ fn checked_component_size(
 
 struct RetentionBudget {
     bytes: usize,
+    nodes: usize,
 }
 
 impl RetentionBudget {
-    const fn with_bytes(bytes: usize) -> Self {
-        Self { bytes }
+    const fn with_resources(resources: CheckedResources) -> Self {
+        Self {
+            bytes: resources.bytes,
+            nodes: resources.nodes,
+        }
     }
 
-    fn string(&mut self, value: &str) -> Result<String, ToolPayloadOmissionReason> {
+    fn node(&mut self, depth: usize) -> Result<(), ToolPayloadOmissionReason> {
+        if depth > TOOL_PAYLOAD_MAX_DEPTH {
+            return Err(ToolPayloadOmissionReason::DepthLimit);
+        }
+        let Some(nodes) = self.nodes.checked_add(1) else {
+            return Err(ToolPayloadOmissionReason::NodeLimit);
+        };
+        if nodes > TOOL_PAYLOAD_MAX_NODES {
+            return Err(ToolPayloadOmissionReason::NodeLimit);
+        }
+        self.nodes = nodes;
+        Ok(())
+    }
+
+    fn string(&mut self, value: &str, depth: usize) -> Result<String, ToolPayloadOmissionReason> {
+        self.node(depth)?;
         let Some(total) = self.bytes.checked_add(value.len()) else {
             return Err(ToolPayloadOmissionReason::SnapshotByteLimit);
         };
@@ -842,6 +972,15 @@ impl RetentionBudget {
             return Err(ToolPayloadOmissionReason::SnapshotByteLimit);
         }
         self.bytes = total;
+        Ok(value.to_owned())
+    }
+
+    fn literal(
+        &mut self,
+        value: &'static str,
+        depth: usize,
+    ) -> Result<String, ToolPayloadOmissionReason> {
+        self.node(depth)?;
         Ok(value.to_owned())
     }
 }
@@ -854,10 +993,13 @@ fn check_json_resources(
     if depth > TOOL_PAYLOAD_MAX_DEPTH {
         return Err(ToolPayloadOmissionReason::DepthLimit);
     }
-    *nodes += 1;
-    if *nodes > TOOL_PAYLOAD_MAX_NODES {
+    let Some(next_nodes) = nodes.checked_add(1) else {
+        return Err(ToolPayloadOmissionReason::NodeLimit);
+    };
+    if next_nodes > TOOL_PAYLOAD_MAX_NODES {
         return Err(ToolPayloadOmissionReason::NodeLimit);
     }
+    *nodes = next_nodes;
 
     match value {
         Value::Array(values) => {
@@ -926,7 +1068,7 @@ pub(crate) fn observe_update(context: &AgentDiagnosticUpdateContext<'_>, update:
     let Some(metadata) = turn.runtime_metadata().cloned() else {
         return;
     };
-    let Some(payload) = SinkOnlyToolPayload::from_acp(update, policy) else {
+    let Some(payload) = capture_tool_payload(update, policy) else {
         return;
     };
 
