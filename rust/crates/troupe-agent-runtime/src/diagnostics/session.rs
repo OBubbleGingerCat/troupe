@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,9 +7,12 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use agent_client_protocol::schema::v1::{SessionId, SessionUpdate};
 use uuid::Uuid;
 
-use super::observer::AgentDiagnosticObserver;
+use super::observer::{
+    AgentDiagnosticErrorCode, AgentDiagnosticObservation, AgentDiagnosticObserver,
+    AgentTurnDiagnosticSettlement,
+};
 use super::payload::ToolPayloadCapturePolicy;
-use super::usage::TurnTerminalObservation;
+use super::usage::{TurnTerminalObservation, TurnTerminalSettlement};
 use super::{context, cost, message, payload, plan, thinking, tool};
 use crate::profile::{AgentKind, ResolvedAgentProfile};
 use crate::session::AgentReadySnapshot;
@@ -131,7 +135,7 @@ impl AgentSessionDiagnosticMetadata {
     }
 
     #[cfg(test)]
-    fn for_test(context: AgentSessionDiagnosticContext) -> Self {
+    pub(crate) fn for_test(context: AgentSessionDiagnosticContext) -> Self {
         Self {
             context,
             provider: AgentDiagnosticProvider::Codex,
@@ -238,9 +242,15 @@ struct SessionDiagnosticLifecycle {
 
 #[derive(Default)]
 struct SessionDiagnosticLifecycleState {
+    opening: bool,
+    latest_opening_attempt: Option<u64>,
+    ready: bool,
+    broken: bool,
     closing: bool,
     cleanup_complete: bool,
     closed: bool,
+    dispatching: bool,
+    pending: VecDeque<AgentDiagnosticObservation>,
 }
 
 impl SessionDiagnosticLifecycle {
@@ -262,58 +272,175 @@ impl SessionDiagnosticLifecycle {
         Arc::clone(&lock(&self.metadata))
     }
 
-    fn observe_opening_attempt(&self, generation: u64) {
-        let mut metadata = lock(&self.metadata);
-        let mut next = (**metadata).clone();
-        next.generation = Some(generation);
-        next.provider_session_id = None;
-        next.effective_model = None;
-        next.effective_effort = None;
-        *metadata = Arc::new(next);
+    fn enqueue(
+        state: &mut SessionDiagnosticLifecycleState,
+        observation: AgentDiagnosticObservation,
+    ) -> bool {
+        state.pending.push_back(observation);
+        if state.dispatching {
+            false
+        } else {
+            state.dispatching = true;
+            true
+        }
     }
 
-    fn observe_ready(&self, snapshot: &AgentReadySnapshot) {
-        let mut metadata = lock(&self.metadata);
-        let mut next = (**metadata).clone();
-        next.generation = Some(snapshot.generation);
-        next.provider_session_id = Some(Arc::from(snapshot.session_id.as_str()));
-        next.effective_model = Some(Arc::from(snapshot.effective_model.as_str()));
-        next.effective_effort = snapshot.effective_effort.as_deref().map(Arc::<str>::from);
-        *metadata = Arc::new(next);
-    }
-
-    fn observe_closing(&self) {
-        let mut state = lock(&self.state);
-        if !state.closing {
-            state.closing = true;
-            let metadata = self.metadata();
-            let _ = (&self.observer, metadata);
+    fn drain_observations(&self) {
+        loop {
+            let observation = {
+                let mut state = lock(&self.state);
+                let Some(observation) = state.pending.pop_front() else {
+                    state.dispatching = false;
+                    return;
+                };
+                observation
+            };
             #[cfg(test)]
-            {
+            let closing = matches!(&observation, AgentDiagnosticObservation::SessionClosing(_));
+            #[cfg(test)]
+            let closed = matches!(&observation, AgentDiagnosticObservation::SessionClosed(_));
+            self.observer.observe(observation);
+            #[cfg(test)]
+            if closing {
                 self.closing_observations.fetch_add(1, Ordering::AcqRel);
                 lock(&self.observations).push("closing");
             }
+            #[cfg(test)]
+            if closed {
+                self.closed_observations.fetch_add(1, Ordering::AcqRel);
+                lock(&self.observations).push("closed");
+            }
         }
-        self.observe_closed_if_complete(&mut state);
+    }
+
+    fn observe_opening(&self) {
+        let should_drain = {
+            let mut state = lock(&self.state);
+            if state.opening {
+                return;
+            }
+            state.opening = true;
+            Self::enqueue(
+                &mut state,
+                AgentDiagnosticObservation::SessionOpening(self.metadata()),
+            )
+        };
+        if should_drain {
+            self.drain_observations();
+        }
+    }
+
+    fn observe_opening_attempt(&self, generation: u64) {
+        let should_drain = {
+            let mut state = lock(&self.state);
+            if state
+                .latest_opening_attempt
+                .is_some_and(|latest| generation <= latest)
+            {
+                return;
+            }
+            state.latest_opening_attempt = Some(generation);
+            let observation = {
+                let mut metadata = lock(&self.metadata);
+                let mut next = (**metadata).clone();
+                next.generation = Some(generation);
+                next.provider_session_id = None;
+                next.effective_model = None;
+                next.effective_effort = None;
+                *metadata = Arc::new(next);
+                AgentDiagnosticObservation::SessionOpeningAttempt(Arc::clone(&metadata))
+            };
+            Self::enqueue(&mut state, observation)
+        };
+        if should_drain {
+            self.drain_observations();
+        }
+    }
+
+    fn observe_ready(&self, snapshot: &AgentReadySnapshot) {
+        let should_drain = {
+            let mut state = lock(&self.state);
+            if state.ready {
+                return;
+            }
+            state.ready = true;
+            let observation = {
+                let mut metadata = lock(&self.metadata);
+                let mut next = (**metadata).clone();
+                next.generation = Some(snapshot.generation);
+                next.provider_session_id = Some(Arc::from(snapshot.session_id.as_str()));
+                next.effective_model = Some(Arc::from(snapshot.effective_model.as_str()));
+                next.effective_effort = snapshot.effective_effort.as_deref().map(Arc::<str>::from);
+                *metadata = Arc::new(next);
+                AgentDiagnosticObservation::SessionReady(Arc::clone(&metadata))
+            };
+            Self::enqueue(&mut state, observation)
+        };
+        if should_drain {
+            self.drain_observations();
+        }
+    }
+
+    fn observe_broken(&self, code: &'static str) {
+        let should_drain = {
+            let mut state = lock(&self.state);
+            if state.broken {
+                return;
+            }
+            state.broken = true;
+            Self::enqueue(
+                &mut state,
+                AgentDiagnosticObservation::SessionBroken {
+                    metadata: self.metadata(),
+                    error_code: AgentDiagnosticErrorCode::new(code),
+                },
+            )
+        };
+        if should_drain {
+            self.drain_observations();
+        }
+    }
+
+    fn observe_closing(&self) {
+        let should_drain = {
+            let mut state = lock(&self.state);
+            let mut should_drain = false;
+            if !state.closing {
+                state.closing = true;
+                should_drain |= Self::enqueue(
+                    &mut state,
+                    AgentDiagnosticObservation::SessionClosing(self.metadata()),
+                );
+            }
+            if state.cleanup_complete && !state.closed {
+                state.closed = true;
+                should_drain |= Self::enqueue(
+                    &mut state,
+                    AgentDiagnosticObservation::SessionClosed(self.metadata()),
+                );
+            }
+            should_drain
+        };
+        if should_drain {
+            self.drain_observations();
+        }
     }
 
     fn observe_cleanup_complete(&self) {
-        let mut state = lock(&self.state);
-        state.cleanup_complete = true;
-        self.observe_closed_if_complete(&mut state);
-    }
-
-    fn observe_closed_if_complete(&self, state: &mut SessionDiagnosticLifecycleState) {
-        if !state.closing || !state.cleanup_complete || state.closed {
-            return;
-        }
-        state.closed = true;
-        let metadata = self.metadata();
-        let _ = (&self.observer, metadata);
-        #[cfg(test)]
-        {
-            self.closed_observations.fetch_add(1, Ordering::AcqRel);
-            lock(&self.observations).push("closed");
+        let should_drain = {
+            let mut state = lock(&self.state);
+            state.cleanup_complete = true;
+            if !state.closing || state.closed {
+                return;
+            }
+            state.closed = true;
+            Self::enqueue(
+                &mut state,
+                AgentDiagnosticObservation::SessionClosed(self.metadata()),
+            )
+        };
+        if should_drain {
+            self.drain_observations();
         }
     }
 }
@@ -574,10 +701,10 @@ pub(crate) struct AgentDiagnosticUpdateContext<'a> {
 
 #[inline]
 pub(crate) fn observe_opening(diagnostics: &SessionDiagnostics) {
-    let (Some(_observer), Some(_metadata)) = (diagnostics.observer(), diagnostics.metadata())
-    else {
+    let Some(lifecycle) = diagnostics.lifecycle.as_ref() else {
         return;
     };
+    lifecycle.observe_opening();
 }
 
 #[inline]
@@ -586,7 +713,6 @@ pub(crate) fn observe_opening_attempt(diagnostics: &SessionDiagnostics, generati
         return;
     };
     lifecycle.observe_opening_attempt(generation);
-    let _ = (&lifecycle.observer, lifecycle.metadata());
 }
 
 #[inline]
@@ -595,15 +721,14 @@ pub(crate) fn observe_ready(diagnostics: &SessionDiagnostics, snapshot: &AgentRe
         return;
     };
     lifecycle.observe_ready(snapshot);
-    let _ = (&lifecycle.observer, lifecycle.metadata());
 }
 
 #[inline]
-pub(crate) fn observe_broken(diagnostics: &SessionDiagnostics, _code: &'static str) {
-    let (Some(_observer), Some(_metadata)) = (diagnostics.observer(), diagnostics.metadata())
-    else {
+pub(crate) fn observe_broken(diagnostics: &SessionDiagnostics, code: &'static str) {
+    let Some(lifecycle) = diagnostics.lifecycle.as_ref() else {
         return;
     };
+    lifecycle.observe_broken(code);
 }
 
 #[inline]
@@ -649,10 +774,18 @@ pub(crate) fn observe_update(
 
 #[inline]
 pub(crate) fn observe_turn_submitted(context: Option<&TurnDiagnosticContext>) {
-    let Some(_observer) = context.and_then(TurnDiagnosticContext::effective_observer) else {
+    let Some(context) = context else {
         return;
     };
-    let _metadata = context.and_then(TurnDiagnosticContext::runtime_metadata);
+    let (Some(observer), Some(metadata)) = (
+        context.effective_observer(),
+        context.runtime_metadata.as_ref(),
+    ) else {
+        return;
+    };
+    observer.observe(AgentDiagnosticObservation::TurnSubmitted(Arc::clone(
+        metadata,
+    )));
 }
 
 #[inline]
@@ -666,5 +799,381 @@ pub(crate) fn observe_turn_terminal(
     if context.effective_observer().is_none() {
         return;
     }
+    if let (Some(observer), Some(metadata)) = (
+        context.effective_observer(),
+        context.runtime_metadata.as_ref(),
+    ) {
+        let settlement = match observation.settlement {
+            TurnTerminalSettlement::NotSubmitted => AgentTurnDiagnosticSettlement::NotSubmitted,
+            TurnTerminalSettlement::Authoritative => AgentTurnDiagnosticSettlement::Authoritative,
+            TurnTerminalSettlement::Unknown => AgentTurnDiagnosticSettlement::Unknown,
+        };
+        observer.observe(AgentDiagnosticObservation::TurnTerminal {
+            metadata: Arc::clone(metadata),
+            settlement,
+        });
+    }
     super::usage::observe_turn_terminal(context, observation);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use agent_client_protocol::schema::v1::AgentCapabilities;
+
+    use super::*;
+    use crate::diagnostics::observer::{
+        AgentDiagnosticCandidate, AgentDiagnosticDestination, AgentDiagnosticFailureOwner,
+        AgentDiagnosticObservationKind, AgentDiagnosticObserverFailure,
+    };
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct TestCandidate(u8);
+
+    impl AgentDiagnosticCandidate for TestCandidate {
+        fn kind(&self) -> &'static str {
+            "test_candidate"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDestination {
+        observations: Mutex<Vec<AgentDiagnosticObservation>>,
+        fail_on: Mutex<Option<AgentDiagnosticObservationKind>>,
+        panic_on: Mutex<Option<AgentDiagnosticObservationKind>>,
+    }
+
+    impl RecordingDestination {
+        fn observations(&self) -> Vec<AgentDiagnosticObservation> {
+            lock(&self.observations).clone()
+        }
+
+        fn fail_once(&self, kind: AgentDiagnosticObservationKind) {
+            *lock(&self.fail_on) = Some(kind);
+        }
+
+        fn panic_once(&self, kind: AgentDiagnosticObservationKind) {
+            *lock(&self.panic_on) = Some(kind);
+        }
+    }
+
+    impl AgentDiagnosticDestination for RecordingDestination {
+        fn try_observe(
+            &self,
+            observation: AgentDiagnosticObservation,
+        ) -> Result<(), AgentDiagnosticErrorCode> {
+            let kind = observation.kind();
+            let should_panic = {
+                let mut panic_on = lock(&self.panic_on);
+                let matches = *panic_on == Some(kind);
+                if matches {
+                    *panic_on = None;
+                }
+                matches
+            };
+            if should_panic {
+                panic!("injected observer panic");
+            }
+            lock(&self.observations).push(observation);
+            let should_fail = {
+                let mut fail_on = lock(&self.fail_on);
+                let matches = *fail_on == Some(kind);
+                if matches {
+                    *fail_on = None;
+                }
+                matches
+            };
+            if should_fail {
+                Err(AgentDiagnosticErrorCode::new("destination_unavailable"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingFailureOwner {
+        failures: Mutex<Vec<AgentDiagnosticObserverFailure>>,
+        panic: AtomicBool,
+    }
+
+    impl RecordingFailureOwner {
+        fn failures(&self) -> Vec<AgentDiagnosticObserverFailure> {
+            lock(&self.failures).clone()
+        }
+    }
+
+    impl AgentDiagnosticFailureOwner for RecordingFailureOwner {
+        fn observer_failed(&self, failure: AgentDiagnosticObserverFailure) {
+            if self.panic.load(Ordering::Acquire) {
+                panic!("injected owner panic");
+            }
+            lock(&self.failures).push(failure);
+        }
+    }
+
+    fn recording_observer() -> (
+        AgentDiagnosticObserver,
+        Arc<RecordingDestination>,
+        Arc<RecordingFailureOwner>,
+    ) {
+        let destination = Arc::new(RecordingDestination::default());
+        let owner = Arc::new(RecordingFailureOwner::default());
+        let observer = AgentDiagnosticObserver::new(Arc::clone(&destination), Arc::clone(&owner));
+        (observer, destination, owner)
+    }
+
+    fn ready_snapshot(generation: u64) -> AgentReadySnapshot {
+        AgentReadySnapshot {
+            pid: 7,
+            session_id: "provider-session".to_owned(),
+            agent_info: None,
+            agent_capabilities: AgentCapabilities::default(),
+            generation,
+            server_name: "result-route".to_owned(),
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            effective_model: "effective-model".to_owned(),
+            effective_effort: Some("high".to_owned()),
+        }
+    }
+
+    #[test]
+    fn session_lifecycle_is_ordered_exactly_once_and_generation_accurate() {
+        let (observer, destination, owner) = recording_observer();
+        let diagnostics = SessionDiagnostics::for_test(observer);
+
+        observe_opening(&diagnostics);
+        observe_opening(&diagnostics);
+        observe_opening_attempt(&diagnostics, 7);
+        observe_opening_attempt(&diagnostics, 7);
+        observe_opening_attempt(&diagnostics, 6);
+        observe_ready(&diagnostics, &ready_snapshot(7));
+        observe_ready(&diagnostics, &ready_snapshot(7));
+        observe_broken(&diagnostics, "transport_lost");
+        observe_broken(&diagnostics, "different_late_failure");
+        observe_closed(&diagnostics);
+        observe_closing(&diagnostics);
+        observe_closing(&diagnostics);
+
+        let observations = destination.observations();
+        assert_eq!(
+            observations
+                .iter()
+                .map(AgentDiagnosticObservation::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                AgentDiagnosticObservationKind::SessionOpening,
+                AgentDiagnosticObservationKind::SessionOpeningAttempt,
+                AgentDiagnosticObservationKind::SessionReady,
+                AgentDiagnosticObservationKind::SessionBroken,
+                AgentDiagnosticObservationKind::SessionClosing,
+                AgentDiagnosticObservationKind::SessionClosed,
+            ]
+        );
+        assert_eq!(
+            observations[0].session_metadata().unwrap().generation(),
+            None
+        );
+        assert_eq!(
+            observations[1].session_metadata().unwrap().generation(),
+            Some(7)
+        );
+        let ready = observations[2].session_metadata().unwrap();
+        assert_eq!(ready.generation(), Some(7));
+        assert_eq!(ready.provider_session_id(), Some("provider-session"));
+        assert_eq!(ready.effective_model(), Some("effective-model"));
+        assert_eq!(ready.effective_effort(), Some("high"));
+        assert_eq!(
+            observations[3].error_code().unwrap().as_str(),
+            "transport_lost"
+        );
+        assert!(owner.failures().is_empty());
+    }
+
+    #[test]
+    fn destination_failure_and_panic_only_report_to_owner() {
+        let (observer, destination, owner) = recording_observer();
+        let diagnostics = SessionDiagnostics::for_test(observer);
+        destination.panic_once(AgentDiagnosticObservationKind::SessionOpening);
+        destination.fail_once(AgentDiagnosticObservationKind::SessionReady);
+
+        observe_opening(&diagnostics);
+        observe_opening_attempt(&diagnostics, 1);
+        observe_ready(&diagnostics, &ready_snapshot(1));
+        observe_closing(&diagnostics);
+        observe_closed(&diagnostics);
+
+        assert_eq!(
+            owner
+                .failures()
+                .into_iter()
+                .map(|failure| (failure.observation_kind(), failure.error_code()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    AgentDiagnosticObservationKind::SessionOpening,
+                    AgentDiagnosticErrorCode::new("observer_panicked"),
+                ),
+                (
+                    AgentDiagnosticObservationKind::SessionReady,
+                    AgentDiagnosticErrorCode::new("destination_unavailable"),
+                ),
+            ]
+        );
+        assert_eq!(
+            destination
+                .observations()
+                .iter()
+                .map(AgentDiagnosticObservation::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                AgentDiagnosticObservationKind::SessionOpeningAttempt,
+                AgentDiagnosticObservationKind::SessionReady,
+                AgentDiagnosticObservationKind::SessionClosing,
+                AgentDiagnosticObservationKind::SessionClosed,
+            ]
+        );
+    }
+
+    #[test]
+    fn owner_panic_and_absent_observer_do_not_escape_into_agent_state() {
+        let (observer, destination, owner) = recording_observer();
+        owner.panic.store(true, Ordering::Release);
+        destination.fail_once(AgentDiagnosticObservationKind::SessionOpening);
+        let diagnostics = SessionDiagnostics::for_test(observer);
+        observe_opening(&diagnostics);
+        observe_opening_attempt(&diagnostics, 1);
+
+        let disabled = SessionDiagnostics::new(None);
+        observe_opening(&disabled);
+        observe_opening_attempt(&disabled, 1);
+        observe_broken(&disabled, "transport_lost");
+        observe_closing(&disabled);
+        observe_closed(&disabled);
+
+        assert_eq!(
+            destination
+                .observations()
+                .iter()
+                .map(AgentDiagnosticObservation::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                AgentDiagnosticObservationKind::SessionOpening,
+                AgentDiagnosticObservationKind::SessionOpeningAttempt,
+            ]
+        );
+        assert!(disabled.metadata().is_none());
+    }
+
+    #[test]
+    fn turn_boundaries_share_immutable_metadata_without_raw_response() {
+        let (observer, destination, owner) = recording_observer();
+        let identity = AgentTurnDiagnosticIdentity::new(
+            AgentSessionDiagnosticContext::new("actor", "session"),
+            "act",
+            "turn",
+        );
+        let metadata = Arc::new(AgentTurnDiagnosticMetadata {
+            identity: identity.clone(),
+            provider: AgentDiagnosticProvider::Claude,
+            session_generation: 4,
+            provider_session_id: Arc::from("provider-session"),
+            effective_model: Arc::from("model"),
+            effective_effort: Some(Arc::from("medium")),
+            operation_id: Uuid::nil(),
+            turn_index: 2,
+        });
+        let context = TurnDiagnosticContext {
+            target: Weak::new(),
+            identity,
+            standalone_observer: None,
+            effective_observer: Some(observer),
+            tool_payload_capture: ToolPayloadCapturePolicy::new(true, false),
+            runtime_metadata: Some(Arc::clone(&metadata)),
+        };
+
+        observe_turn_submitted(Some(&context));
+        observe_turn_terminal(Some(&context), &TurnTerminalObservation::not_submitted());
+
+        let observations = destination.observations();
+        assert_eq!(
+            observations
+                .iter()
+                .map(AgentDiagnosticObservation::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                AgentDiagnosticObservationKind::TurnSubmitted,
+                AgentDiagnosticObservationKind::TurnTerminal,
+            ]
+        );
+        assert_eq!(observations[0].turn_metadata(), Some(metadata.as_ref()));
+        assert_eq!(observations[1].turn_metadata(), Some(metadata.as_ref()));
+        assert_eq!(
+            observations[1].turn_settlement(),
+            Some(AgentTurnDiagnosticSettlement::NotSubmitted)
+        );
+        assert!(observations[1].error_code().is_none());
+        assert!(owner.failures().is_empty());
+    }
+
+    #[test]
+    fn production_observer_wins_without_changing_sidecar_capture_policy() {
+        let (production, _, _) = recording_observer();
+        let (standalone, _, _) = recording_observer();
+        let identity = AgentTurnDiagnosticIdentity::new(
+            AgentSessionDiagnosticContext::new("actor", "session"),
+            "act",
+            "turn",
+        );
+        let mut context = TurnDiagnosticContext {
+            target: Weak::new(),
+            identity: identity.clone(),
+            standalone_observer: Some(standalone),
+            effective_observer: None,
+            tool_payload_capture: ToolPayloadCapturePolicy::new(true, false),
+            runtime_metadata: None,
+        };
+
+        context
+            .bind(Some(&production), Some(identity.session()))
+            .unwrap();
+
+        assert!(
+            context
+                .effective_observer()
+                .unwrap()
+                .same_destination(&production)
+        );
+        assert!(context.tool_payload_capture().capture_input());
+        assert!(!context.tool_payload_capture().capture_output());
+    }
+
+    #[test]
+    fn later_normalizers_can_submit_typed_candidates_without_changing_observer() {
+        let (observer, destination, owner) = recording_observer();
+
+        observer.observe(AgentDiagnosticObservation::Candidate(Arc::new(
+            TestCandidate(9),
+        )));
+
+        let observations = destination.observations();
+        assert_eq!(
+            observations[0].kind(),
+            AgentDiagnosticObservationKind::Candidate("test_candidate")
+        );
+        assert_eq!(
+            observations[0]
+                .candidate()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TestCandidate>(),
+            Some(&TestCandidate(9))
+        );
+        assert!(owner.failures().is_empty());
+    }
 }
