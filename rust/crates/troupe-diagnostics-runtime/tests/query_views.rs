@@ -35,7 +35,7 @@ use troupe_diagnostics_core::{
 use troupe_diagnostics_runtime::{
     archive::lease::ActiveArchiveLease,
     query::{
-        reader::DiagnosticReader,
+        reader::{DiagnosticReader, ReaderProfile},
         views::{
             CursorKey, ViewQueryEngine, ViewQueryErrorClass, ViewQueryErrorCode, ViewQueryRequest,
             Viewport,
@@ -840,4 +840,114 @@ fn relevant_gaps_and_resource_truncation_make_table_coverage_explicit() {
     assert_eq!(coverage.excluded().resource_truncated().get(), 1);
     assert_eq!(coverage.gap_count().get(), 1);
     assert!(response.metadata().truncated());
+}
+
+#[test]
+fn captured_time_uses_max_elapsed_across_the_frozen_prefix() {
+    let directory = TestRunDirectory::new("captured-time-max");
+    let lease = ActiveArchiveLease::acquire(directory.path()).unwrap();
+    let mut writer = TransactionalWriter::new(create_store(directory.path()), ()).unwrap();
+    let hub = diagnostic_hub();
+    let mut accepted = Vec::new();
+    for (elapsed, value) in [(100, 1), (5, 2)] {
+        admit(&hub, &mut accepted, move |identity| {
+            DiagnosticEvent::CounterSampled(CounterSampled::new(
+                header(identity, elapsed, run_scope()),
+                CounterKind::CueActive,
+                SchemaU64::new(value),
+            ))
+        });
+    }
+    commit(&mut writer, accepted);
+
+    let mut reader = DiagnosticReader::open_active(run_id(), lease.guard()).unwrap();
+    let captured = reader.capture().unwrap();
+    let record = ViewRecord::Table(
+        TableViewRecord::new(
+            "captured_time".to_owned(),
+            "Captured time".to_owned(),
+            TimeRangeMode::Run,
+            ScopeMode::Run,
+            TableQuery::new(
+                TableSource::Event {
+                    kind: DiagnosticEventKind::CounterSampled,
+                },
+                Vec::new(),
+                vec![TableColumn::Sequence, TableColumn::ElapsedNs],
+                10,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let response = engine()
+        .query(&captured, &record, &ViewQueryRequest::new())
+        .unwrap();
+    assert_eq!(
+        response
+            .metadata()
+            .binding()
+            .captured_elapsed_end_ns()
+            .get(),
+        101
+    );
+    assert_eq!(response.table().unwrap().rows().len(), 2);
+}
+
+#[test]
+fn captured_time_overflow_is_fail_closed_for_active_and_archive_readers() {
+    let directory = TestRunDirectory::new("captured-time-overflow");
+    let lease = ActiveArchiveLease::acquire(directory.path()).unwrap();
+    let mut writer = TransactionalWriter::new(create_store(directory.path()), ()).unwrap();
+    let hub = diagnostic_hub();
+    let mut accepted = Vec::new();
+    admit(&hub, &mut accepted, |identity| {
+        DiagnosticEvent::CounterSampled(CounterSampled::new(
+            header(identity, u64::MAX, run_scope()),
+            CounterKind::CueActive,
+            SchemaU64::new(1),
+        ))
+    });
+    commit(&mut writer, accepted);
+
+    let record = metric_record(
+        "captured_time_overflow",
+        MetricSource::CounterValue {
+            selector: CounterSelector::BuiltIn {
+                kind: CounterKind::CueActive,
+            },
+            selection: CounterSelection::LatestBeforeReduce,
+        },
+        Reducer::Latest,
+    );
+    let query_engine = engine();
+    let mut reader = DiagnosticReader::open_active(run_id(), lease.guard()).unwrap();
+    let captured = reader.capture().unwrap();
+    let active_error = query_engine
+        .query(&captured, &record, &ViewQueryRequest::new())
+        .unwrap_err();
+    assert_eq!(active_error.class(), ViewQueryErrorClass::CoreFatal);
+    assert_eq!(active_error.profile(), Some(ReaderProfile::Active));
+    assert_eq!(
+        active_error.code(),
+        ViewQueryErrorCode::CapturedTimeOverflow
+    );
+
+    drop(captured);
+    drop(reader);
+    drop(writer);
+    drop(lease);
+
+    let mut reader = DiagnosticReader::open_archive(directory.path(), run_id()).unwrap();
+    let captured = reader.capture().unwrap();
+    let archive_error = query_engine
+        .query(&captured, &record, &ViewQueryRequest::new())
+        .unwrap_err();
+    assert_eq!(archive_error.class(), ViewQueryErrorClass::ArchiveOperation);
+    assert_eq!(archive_error.profile(), Some(ReaderProfile::Archive));
+    assert_eq!(
+        archive_error.code(),
+        ViewQueryErrorCode::CapturedTimeOverflow
+    );
 }

@@ -187,9 +187,19 @@ impl ViewQueryEngine {
         for event in query_events(source, FiniteEventQuery::after(SchemaU64::new(0))) {
             events.push(event.map_err(ViewQueryError::event)?.event().clone());
         }
-        let captured_elapsed_end_ns = events.last().map_or(0, |event| {
-            event.header().elapsed_ns().get().saturating_add(1)
-        });
+        let captured_elapsed_end_ns = events
+            .iter()
+            .map(|event| event.header().elapsed_ns().get())
+            .max()
+            .map_or(Ok(0), |elapsed_ns| {
+                elapsed_ns.checked_add(1).ok_or_else(|| {
+                    ViewQueryError::system(
+                        source.profile(),
+                        ViewQueryErrorCode::CapturedTimeOverflow,
+                        "captured elapsed range end exceeds the u64 schema",
+                    )
+                })
+            })?;
         let binding = bind_query(
             source.captured_watermark(),
             captured_elapsed_end_ns,
@@ -967,6 +977,7 @@ pub enum ViewQueryErrorCode {
     EventRead,
     ProtocolInvariant,
     ExecutionContextLost,
+    CapturedTimeOverflow,
 }
 
 impl ViewQueryErrorCode {
@@ -981,6 +992,7 @@ impl ViewQueryErrorCode {
             Self::EventRead => "diagnostic_view.event_read",
             Self::ProtocolInvariant => "diagnostic_view.protocol_invariant",
             Self::ExecutionContextLost => "diagnostic_view.execution_context_lost",
+            Self::CapturedTimeOverflow => "diagnostic_view.captured_time_overflow",
         }
     }
 }
