@@ -1,6 +1,18 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "rust/Cargo.toml",
+      "-p",
+      "troupe-diagnostics-runtime",
+      "--test",
+      "registry_model"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
