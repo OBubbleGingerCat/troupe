@@ -1,7 +1,15 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/server_shell.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/server/error.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/identity.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/routes.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/runtime.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/service.rs"
+  ],
   "removed": [],
   "generated": []
 }
