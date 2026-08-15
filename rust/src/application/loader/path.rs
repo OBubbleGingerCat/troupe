@@ -82,17 +82,17 @@ pub(crate) fn resolve_production_package(
         .import("unicodedata")?
         .call_method1("normalize", ("NFKC", &basename))?;
     if !is_identifier || is_keyword || !normalized.eq(&basename)? {
-        return fail(py, &resolved, Reason::InvalidPackageName);
+        return fail(py, resolved, Reason::InvalidPackageName);
     }
     let root = prevalidated_root.package_candidate().to_owned();
 
     let init_path = resolved.call_method1("joinpath", ("__init__.py",))?;
     if !init_path.call_method0("is_file")?.is_truthy()? {
-        return fail(py, &resolved, Reason::MissingInit);
+        return fail(py, resolved, Reason::MissingInit);
     }
     let production_path = resolved.call_method1("joinpath", ("production.py",))?;
     if !production_path.call_method0("is_file")?.is_truthy()? {
-        return fail(py, &resolved, Reason::MissingProduction);
+        return fail(py, resolved, Reason::MissingProduction);
     }
 
     Ok(ResolvedProductionPath {
