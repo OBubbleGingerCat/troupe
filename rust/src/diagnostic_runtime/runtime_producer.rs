@@ -15,7 +15,8 @@ use troupe_diagnostics_core::{
 use crate::{
     diagnostic_runtime::load_producer::{DiagnosticProducerError, DiagnosticRunContext},
     orchestration::{
-        actor_registry::ProductionState, runtime::RuntimeCore, scene_context::RunBinding,
+        actor_registry::ProductionState, python_task::RuntimeTaskPhase, runtime::RuntimeCore,
+        scene_context::RunBinding,
     },
 };
 
@@ -42,6 +43,32 @@ pub(crate) enum RuntimeHook {
     ShutdownRequested,
     RunLifecycleReturned,
     RunFinished,
+}
+
+#[derive(Clone)]
+pub(crate) struct RuntimeLineageSnapshot {
+    runtime: Arc<RuntimeLifecycleProducer>,
+    context: DiagnosticRunContext,
+    scope: DiagnosticScope,
+    containing_span_id: SchemaU64,
+}
+
+impl RuntimeLineageSnapshot {
+    pub(crate) fn runtime(&self) -> &Arc<RuntimeLifecycleProducer> {
+        &self.runtime
+    }
+
+    pub(crate) fn context(&self) -> DiagnosticRunContext {
+        self.context.clone()
+    }
+
+    pub(crate) const fn scope(&self) -> &DiagnosticScope {
+        &self.scope
+    }
+
+    pub(crate) const fn containing_span_id(&self) -> SchemaU64 {
+        self.containing_span_id
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,6 +207,32 @@ impl RuntimeLifecycleProducer {
     pub(crate) fn latch_diagnostic_failure(&self, error: DiagnosticProducerError) {
         let mut state = lock(&self.state);
         latch_failure(&mut state, error.into());
+    }
+
+    fn lineage_snapshot(
+        self: &Arc<Self>,
+        phase: RuntimeTaskPhase,
+    ) -> Option<RuntimeLineageSnapshot> {
+        let state = lock(&self.state);
+        if state.producer_failure.is_some() || state.run_closed {
+            return None;
+        }
+        let containing_span_id = match phase {
+            RuntimeTaskPhase::Start => match state.start {
+                PhaseState::Open(span_id) => span_id,
+                PhaseState::NotEntered | PhaseState::Closed(_) => return None,
+            },
+            RuntimeTaskPhase::Stop => match state.stop {
+                PhaseState::Open(span_id) => span_id,
+                PhaseState::NotEntered | PhaseState::Closed(_) => return None,
+            },
+        };
+        Some(RuntimeLineageSnapshot {
+            runtime: Arc::clone(self),
+            context: self.context.clone(),
+            scope: empty_scope(),
+            containing_span_id,
+        })
     }
 
     fn observe(&self, hook: RuntimeHook, error: Option<&PyErr>) {
@@ -489,6 +542,13 @@ pub(crate) fn producer_for_binding(binding: &RunBinding) -> Option<Arc<RuntimeLi
         .and_then(Weak::upgrade)
 }
 
+pub(crate) fn lineage_snapshot(
+    binding: &RunBinding,
+    phase: RuntimeTaskPhase,
+) -> Option<RuntimeLineageSnapshot> {
+    producer_for_binding(binding)?.lineage_snapshot(phase)
+}
+
 fn producer_for_core(core: &RuntimeCore) -> Option<Arc<RuntimeLifecycleProducer>> {
     lock(registry()).by_core.get(&address(core)).cloned()
 }
@@ -744,10 +804,22 @@ mod tests {
 
             run_started(&core, &binding);
             observe_binding(&binding, RuntimeHook::ProductionStartEntered, None);
+            let start_lineage = lineage_snapshot(&binding, RuntimeTaskPhase::Start)
+                .expect("open start phase exposes lineage");
+            assert!(Arc::ptr_eq(start_lineage.runtime(), &producer));
+            assert_eq!(start_lineage.scope(), &empty_scope());
+            assert_eq!(start_lineage.containing_span_id(), SchemaU64::new(2));
             observe_binding(&binding, RuntimeHook::ProductionStartReturned, None);
+            assert!(lineage_snapshot(&binding, RuntimeTaskPhase::Start).is_none());
             core.request_shutdown();
             observe_binding(&binding, RuntimeHook::ProductionStopEntered, None);
+            let stop_lineage = lineage_snapshot(&binding, RuntimeTaskPhase::Stop)
+                .expect("open stop phase exposes lineage");
+            assert!(Arc::ptr_eq(stop_lineage.runtime(), &producer));
+            assert_eq!(stop_lineage.scope(), &empty_scope());
+            assert_eq!(stop_lineage.containing_span_id(), SchemaU64::new(5));
             observe_binding(&binding, RuntimeHook::ProductionStopReturned, None);
+            assert!(lineage_snapshot(&binding, RuntimeTaskPhase::Stop).is_none());
             observe_binding(&binding, RuntimeHook::RunLifecycleReturned, None);
             drop(permit);
 

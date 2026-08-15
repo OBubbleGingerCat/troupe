@@ -957,14 +957,22 @@ pub struct CustomSpanStarted {
 }
 
 impl CustomSpanStarted {
+    pub fn validate_fields(
+        name: &str,
+        attributes: &DiagnosticAttributes,
+    ) -> Result<(), EventValidationError> {
+        validate_custom_name(name)?;
+        validate_attributes(attributes)?;
+        Ok(())
+    }
+
     pub fn new(
         header: DiagnosticEventHeader,
         name: String,
         parent_span_id: Option<SchemaU64>,
         attributes: DiagnosticAttributes,
     ) -> Result<Self, EventValidationError> {
-        validate_custom_name(&name)?;
-        validate_attributes(&attributes)?;
+        Self::validate_fields(&name, &attributes)?;
         Ok(Self {
             header,
             name,
@@ -1063,6 +1071,15 @@ pub struct CustomInstantOccurred {
 }
 
 impl CustomInstantOccurred {
+    pub fn validate_fields(
+        name: &str,
+        attributes: &DiagnosticAttributes,
+    ) -> Result<(), EventValidationError> {
+        validate_custom_name(name)?;
+        validate_attributes(attributes)?;
+        Ok(())
+    }
+
     pub fn new(
         header: DiagnosticEventHeader,
         name: String,
@@ -1070,8 +1087,7 @@ impl CustomInstantOccurred {
         severity: Option<CustomSeverity>,
         attributes: DiagnosticAttributes,
     ) -> Result<Self, EventValidationError> {
-        validate_custom_name(&name)?;
-        validate_attributes(&attributes)?;
+        Self::validate_fields(&name, &attributes)?;
         Ok(Self {
             header,
             name,
@@ -1148,6 +1164,17 @@ pub struct CustomCounterSampled {
 }
 
 impl CustomCounterSampled {
+    pub fn validate_fields(
+        name: &str,
+        unit: Option<&str>,
+        dimensions: &DiagnosticDimensions,
+    ) -> Result<(), EventValidationError> {
+        validate_custom_name(name)?;
+        validate_unit(unit)?;
+        validate_dimensions(dimensions)?;
+        Ok(())
+    }
+
     pub fn new(
         header: DiagnosticEventHeader,
         name: String,
@@ -1155,9 +1182,7 @@ impl CustomCounterSampled {
         unit: Option<String>,
         dimensions: DiagnosticDimensions,
     ) -> Result<Self, EventValidationError> {
-        validate_custom_name(&name)?;
-        validate_unit(unit.as_deref())?;
-        validate_dimensions(&dimensions)?;
+        Self::validate_fields(&name, unit.as_deref(), &dimensions)?;
         Ok(Self {
             header,
             name,

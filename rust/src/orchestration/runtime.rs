@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 use crate::application::failure::lifecycle_result;
 use crate::diagnostic_runtime::runtime_producer::{self, RuntimeHook};
 use crate::orchestration::production::Production;
-use crate::orchestration::python_task::{apply_task_factory_action, await_hook, create_scene_task};
+use crate::orchestration::python_task::{
+    RuntimeTaskPhase, apply_task_factory_action, await_hook, create_scene_task,
+};
 use crate::orchestration::scene_context::{FACTORY_REPLACED_ERROR, RunBinding, TaskFactoryAction};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,7 +122,14 @@ pub(crate) async fn run_lifecycle(
 ) -> PyResult<()> {
     let mut failures = Vec::with_capacity(2);
     runtime_producer::observe_binding(&binding, RuntimeHook::ProductionStartEntered, None);
-    let start_result = await_hook(&locals, &production, "start").await;
+    let start_result = await_hook(
+        &locals,
+        &production,
+        Arc::clone(&binding),
+        RuntimeTaskPhase::Start,
+        "start",
+    )
+    .await;
     runtime_producer::observe_binding(
         &binding,
         RuntimeHook::ProductionStartReturned,
@@ -218,7 +227,14 @@ pub(crate) async fn run_lifecycle(
     }
 
     runtime_producer::observe_binding(&binding, RuntimeHook::ProductionStopEntered, None);
-    let stop_result = await_hook(&locals, &production, "stop").await;
+    let stop_result = await_hook(
+        &locals,
+        &production,
+        Arc::clone(&binding),
+        RuntimeTaskPhase::Stop,
+        "stop",
+    )
+    .await;
     runtime_producer::observe_binding(
         &binding,
         RuntimeHook::ProductionStopReturned,

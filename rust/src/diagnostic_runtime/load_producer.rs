@@ -7,15 +7,17 @@ use pyo3::{
 };
 use troupe_diagnostics_core::{
     detail::{
-        InstantDetail, ProductionConstructDetail, ProductionLoadDetail,
-        ProductionPathResolutionDetail, SpanStartDetail,
+        CustomNumber, DiagnosticAttributes, DiagnosticDimensions, InstantDetail,
+        ProductionConstructDetail, ProductionLoadDetail, ProductionPathResolutionDetail,
+        SpanStartDetail,
     },
     event::{
-        CausalLink, CounterSampled, DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope,
-        InstantOccurred, SpanFinished, SpanStarted,
+        CausalLink, CounterSampled, CustomCounterSampled, CustomInstantOccurred,
+        CustomSpanFinished, CustomSpanStarted, DiagnosticEvent, DiagnosticEventHeader,
+        DiagnosticScope, EventValidationError, InstantOccurred, SpanFinished, SpanStarted,
     },
     hub::{EventIdentity, HubAdmissionError, MandatoryDurableReserver, ProductionDiagnosticHub},
-    kinds::{CounterKind, SpanOutcome},
+    kinds::{CounterKind, CustomSeverity, SpanOutcome},
     scalar::SchemaU64,
     time::{ElapsedNs, RunClock, TimeError},
 };
@@ -69,6 +71,43 @@ trait DiagnosticEventAdmission: Send + Sync {
         counter_kind: CounterKind,
         value: SchemaU64,
         caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
+
+    fn admit_custom_start(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        name: String,
+        parent_span_id: Option<SchemaU64>,
+        attributes: DiagnosticAttributes,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
+
+    fn admit_custom_finish(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        span_id: SchemaU64,
+        outcome: SpanOutcome,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
+
+    fn admit_custom_instant(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        name: String,
+        containing_span_id: Option<SchemaU64>,
+        severity: Option<CustomSeverity>,
+        attributes: DiagnosticAttributes,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
+
+    fn admit_custom_counter(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        name: String,
+        value: CustomNumber,
+        unit: Option<String>,
+        dimensions: DiagnosticDimensions,
     ) -> Result<SchemaU64, DiagnosticProducerError>;
 }
 
@@ -188,6 +227,132 @@ where
                         counter_kind,
                         value,
                     ))
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
+    }
+
+    fn admit_custom_start(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        name: String,
+        parent_span_id: Option<SchemaU64>,
+        attributes: DiagnosticAttributes,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        Vec::new(),
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::CustomSpanStarted(
+                        CustomSpanStarted::new(header, name, parent_span_id, attributes)
+                            .expect("custom span fields were validated before admission"),
+                    )
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
+    }
+
+    fn admit_custom_finish(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        span_id: SchemaU64,
+        outcome: SpanOutcome,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        Vec::new(),
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::CustomSpanFinished(CustomSpanFinished::new(
+                        header, span_id, outcome,
+                    ))
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
+    }
+
+    fn admit_custom_instant(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        name: String,
+        containing_span_id: Option<SchemaU64>,
+        severity: Option<CustomSeverity>,
+        attributes: DiagnosticAttributes,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        Vec::new(),
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::CustomInstantOccurred(
+                        CustomInstantOccurred::new(
+                            header,
+                            name,
+                            containing_span_id,
+                            severity,
+                            attributes,
+                        )
+                        .expect("custom instant fields were validated before admission"),
+                    )
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
+    }
+
+    fn admit_custom_counter(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        name: String,
+        value: CustomNumber,
+        unit: Option<String>,
+        dimensions: DiagnosticDimensions,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        Vec::new(),
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::CustomCounterSampled(
+                        CustomCounterSampled::new(header, name, value, unit, dimensions)
+                            .expect("custom counter fields were validated before admission"),
+                    )
                 },
                 None,
             )
@@ -315,6 +480,83 @@ impl DiagnosticRunContext {
         self.admission
             .admit_counter(elapsed_ns, scope, counter_kind, value, caused_by)
     }
+
+    pub(crate) fn start_custom_span(
+        &self,
+        scope: DiagnosticScope,
+        name: String,
+        parent_span_id: Option<SchemaU64>,
+        attributes: DiagnosticAttributes,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        CustomSpanStarted::validate_fields(&name, &attributes)
+            .map_err(DiagnosticProducerError::event)?;
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission
+            .admit_custom_start(elapsed_ns, scope, name, parent_span_id, attributes)
+    }
+
+    pub(crate) fn finish_custom_span(
+        &self,
+        scope: DiagnosticScope,
+        span_id: SchemaU64,
+        outcome: SpanOutcome,
+    ) -> Result<(), DiagnosticProducerError> {
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission
+            .admit_custom_finish(elapsed_ns, scope, span_id, outcome)
+            .map(|_| ())
+    }
+
+    pub(crate) fn emit_custom_instant(
+        &self,
+        scope: DiagnosticScope,
+        name: String,
+        containing_span_id: Option<SchemaU64>,
+        severity: Option<CustomSeverity>,
+        attributes: DiagnosticAttributes,
+    ) -> Result<(), DiagnosticProducerError> {
+        CustomInstantOccurred::validate_fields(&name, &attributes)
+            .map_err(DiagnosticProducerError::event)?;
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission
+            .admit_custom_instant(
+                elapsed_ns,
+                scope,
+                name,
+                containing_span_id,
+                severity,
+                attributes,
+            )
+            .map(|_| ())
+    }
+
+    pub(crate) fn emit_custom_counter(
+        &self,
+        scope: DiagnosticScope,
+        name: String,
+        value: CustomNumber,
+        unit: Option<String>,
+        dimensions: DiagnosticDimensions,
+    ) -> Result<(), DiagnosticProducerError> {
+        CustomCounterSampled::validate_fields(&name, unit.as_deref(), &dimensions)
+            .map_err(DiagnosticProducerError::event)?;
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission
+            .admit_custom_counter(elapsed_ns, scope, name, value, unit, dimensions)
+            .map(|_| ())
+    }
 }
 
 #[derive(Clone)]
@@ -394,6 +636,10 @@ impl DiagnosticProducerError {
 
     fn clock(error: TimeError) -> Self {
         Self::new("diagnostic.elapsed-unavailable", error.to_string())
+    }
+
+    fn event(error: EventValidationError) -> Self {
+        Self::new("diagnostic.custom-event-invalid", error.to_string())
     }
 
     fn admission<E>(error: HubAdmissionError<E>) -> Self
@@ -736,14 +982,14 @@ mod tests {
         types::{PyDict, PyDictMethods, PyList, PyListMethods, PyString},
     };
     use troupe_diagnostics_core::{
-        detail::{EmptyDetail, SpanStartDetail},
+        detail::{CanonicalInteger, CustomNumber, EmptyDetail, SpanStartDetail},
         event::{CausalLink, DiagnosticEvent},
         hub::{
             AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
             DeliveryFailure, LiveEventNotifier, MandatoryDurableReserver, ProductionDiagnosticHub,
         },
         id::CanonicalUuid,
-        kinds::{CausalRelation, CounterKind, SpanOutcome},
+        kinds::{CausalRelation, CounterKind, CustomSeverity, SpanOutcome},
         time::RunClock,
     };
     use uuid::Uuid;
@@ -1303,5 +1549,82 @@ mod tests {
         );
         drop(outer);
         assert!(current_production_construction().is_none());
+    }
+
+    #[test]
+    fn shared_context_validates_and_admits_custom_events_through_the_same_hub() {
+        let (producer, log) = make_producer(Path::new("/tmp/diagnostic-custom-context"), None);
+        let context = producer.context();
+
+        let invalid = context
+            .start_custom_span(
+                empty_scope(),
+                "invalid".to_owned(),
+                None,
+                Default::default(),
+            )
+            .expect_err("invalid custom fields must fail before admission");
+        assert_eq!(invalid.code(), "diagnostic.custom-event-invalid");
+        assert!(log.events().is_empty());
+
+        let span_id = context
+            .start_custom_span(
+                empty_scope(),
+                "application.phase".to_owned(),
+                None,
+                Default::default(),
+            )
+            .expect("admit custom span start");
+        context
+            .emit_custom_instant(
+                empty_scope(),
+                "application.notice".to_owned(),
+                Some(span_id),
+                Some(CustomSeverity::Info),
+                Default::default(),
+            )
+            .expect("admit custom instant");
+        context
+            .emit_custom_counter(
+                empty_scope(),
+                "application.items".to_owned(),
+                CustomNumber::Integer(CanonicalInteger::parse("3").expect("canonical integer")),
+                Some("items".to_owned()),
+                Default::default(),
+            )
+            .expect("admit custom counter");
+        context
+            .finish_custom_span(empty_scope(), span_id, SpanOutcome::Completed)
+            .expect("admit custom span finish");
+
+        let events = log.events();
+        assert_eq!(events.len(), 4);
+        assert_eq!(span_id, SchemaU64::new(1));
+        let DiagnosticEvent::CustomSpanStarted(start) = events[0].event() else {
+            panic!("expected custom span start")
+        };
+        assert_eq!(start.name(), "application.phase");
+        assert_eq!(start.parent_span_id(), None);
+        assert!(start.header().caused_by().is_empty());
+        let DiagnosticEvent::CustomInstantOccurred(instant) = events[1].event() else {
+            panic!("expected custom instant")
+        };
+        assert_eq!(instant.name(), "application.notice");
+        assert_eq!(instant.containing_span_id(), Some(span_id));
+        assert_eq!(instant.severity(), Some(CustomSeverity::Info));
+        let DiagnosticEvent::CustomCounterSampled(counter) = events[2].event() else {
+            panic!("expected custom counter")
+        };
+        assert_eq!(counter.name(), "application.items");
+        assert_eq!(counter.unit(), Some("items"));
+        let DiagnosticEvent::CustomSpanFinished(finish) = events[3].event() else {
+            panic!("expected custom span finish")
+        };
+        assert_eq!(finish.span_id(), span_id);
+        assert_eq!(finish.outcome(), SpanOutcome::Completed);
+        assert!(events.windows(2).all(|pair| {
+            pair[0].event().header().elapsed_ns().get()
+                <= pair[1].event().header().elapsed_ns().get()
+        }));
     }
 }

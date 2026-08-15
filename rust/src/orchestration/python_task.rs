@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use pyo3::class::gc::{PyTraverseError, PyVisit};
@@ -27,6 +27,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 enum TaskLineageKind {
     Scene(Weak<SceneScope>),
     Cued(Weak<CuedScope>),
+    Runtime {
+        binding: Weak<RunBinding>,
+        phase: RuntimeTaskPhase,
+        active: Arc<AtomicBool>,
+    },
     #[cfg(test)]
     Test(usize),
 }
@@ -34,6 +39,22 @@ enum TaskLineageKind {
 #[derive(Clone)]
 pub(crate) struct TaskLineage {
     kind: TaskLineageKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeTaskPhase {
+    Start,
+    Stop,
+}
+
+pub(crate) struct RuntimeTaskLineageGuard {
+    active: Arc<AtomicBool>,
+}
+
+impl Drop for RuntimeTaskLineageGuard {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
 }
 
 impl TaskLineage {
@@ -49,10 +70,28 @@ impl TaskLineage {
         }
     }
 
+    pub(crate) fn from_runtime(
+        binding: &Arc<RunBinding>,
+        phase: RuntimeTaskPhase,
+    ) -> (Self, RuntimeTaskLineageGuard) {
+        let active = Arc::new(AtomicBool::new(true));
+        (
+            Self {
+                kind: TaskLineageKind::Runtime {
+                    binding: Arc::downgrade(binding),
+                    phase,
+                    active: Arc::clone(&active),
+                },
+            },
+            RuntimeTaskLineageGuard { active },
+        )
+    }
+
     pub(crate) fn scene(&self) -> Option<Arc<SceneScope>> {
         match &self.kind {
             TaskLineageKind::Scene(scene) => scene.upgrade(),
             TaskLineageKind::Cued(cued) => cued.upgrade().map(|cued| cued.scene()),
+            TaskLineageKind::Runtime { .. } => None,
             #[cfg(test)]
             TaskLineageKind::Test(_) => None,
         }
@@ -65,10 +104,26 @@ impl TaskLineage {
         }
     }
 
+    pub(crate) fn runtime(&self) -> Option<(Arc<RunBinding>, RuntimeTaskPhase)> {
+        match &self.kind {
+            TaskLineageKind::Runtime {
+                binding,
+                phase,
+                active,
+            } if active.load(Ordering::Acquire) => {
+                binding.upgrade().map(|binding| (binding, *phase))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         match &self.kind {
             TaskLineageKind::Scene(scene) => scene.upgrade().is_some_and(|scene| scene.is_open()),
             TaskLineageKind::Cued(cued) => cued.upgrade().is_some_and(|cued| cued.is_active()),
+            TaskLineageKind::Runtime {
+                binding, active, ..
+            } => active.load(Ordering::Acquire) && binding.strong_count() > 0,
             #[cfg(test)]
             TaskLineageKind::Test(_) => true,
         }
@@ -407,6 +462,8 @@ impl TaskFactoryWrapper {
 #[pyclass]
 struct HookCallback {
     production: Option<Py<PyAny>>,
+    binding: Option<Arc<RunBinding>>,
+    lineage: Option<TaskLineage>,
     hook: &'static str,
     sender: Option<oneshot::Sender<PyResult<Py<PyAny>>>>,
 }
@@ -573,11 +630,15 @@ pub(crate) fn create_registered_scope_task(
 impl HookCallback {
     fn new(
         production: Py<PyAny>,
+        binding: Arc<RunBinding>,
+        lineage: TaskLineage,
         hook: &'static str,
         sender: oneshot::Sender<PyResult<Py<PyAny>>>,
     ) -> Self {
         Self {
             production: Some(production),
+            binding: Some(binding),
+            lineage: Some(lineage),
             hook,
             sender: Some(sender),
         }
@@ -593,7 +654,30 @@ impl HookCallback {
                 .take()
                 .ok_or_else(|| PyRuntimeError::new_err("Python hook callback is cleared"))?;
             let awaitable = production.bind(py).getattr(self.hook)?.call0()?;
-            Ok(awaitable.unbind())
+            let binding = self
+                .binding
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("Python hook binding is cleared"))?;
+            let lineage = self
+                .lineage
+                .take()
+                .ok_or_else(|| PyRuntimeError::new_err("Python hook lineage is cleared"))?;
+            let task = match py
+                .import("asyncio")
+                .and_then(|asyncio| asyncio.getattr("ensure_future"))
+                .and_then(|ensure_future| ensure_future.call1((&awaitable,)))
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    let _ = awaitable.call_method0("close");
+                    return Err(error);
+                }
+            };
+            if let Err(error) = binding.register_task(&task, lineage) {
+                let _ = task.call_method0("cancel");
+                return Err(error);
+            }
+            Ok(task.unbind())
         })();
         let _ = sender.send(result);
         Ok(())
@@ -680,11 +764,16 @@ impl HookCallback {
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(binding) = &self.binding {
+            binding.traverse(&visit)?;
+        }
         visit.call(&self.production)
     }
 
     fn __clear__(&mut self) {
         self.production = None;
+        self.binding = None;
+        self.lineage = None;
         self.sender = None;
     }
 }
@@ -692,13 +781,15 @@ impl HookCallback {
 async fn dispatch_hook(
     locals: &TaskLocals,
     production: &Py<PyAny>,
+    binding: Arc<RunBinding>,
+    lineage: TaskLineage,
     hook: &'static str,
 ) -> PyResult<Py<PyAny>> {
     let receiver = Python::attach(|py| {
         let (sender, receiver) = oneshot::channel();
         let callback = Py::new(
             py,
-            HookCallback::new(production.clone_ref(py), hook, sender),
+            HookCallback::new(production.clone_ref(py), binding, lineage, hook, sender),
         )?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("context", locals.context(py))?;
@@ -719,9 +810,12 @@ async fn dispatch_hook(
 pub(crate) async fn await_hook(
     locals: &TaskLocals,
     production: &Py<PyAny>,
+    binding: Arc<RunBinding>,
+    phase: RuntimeTaskPhase,
     hook: &'static str,
 ) -> PyResult<()> {
-    let awaitable = dispatch_hook(locals, production, hook).await?;
+    let (lineage, _guard) = TaskLineage::from_runtime(&binding, phase);
+    let awaitable = dispatch_hook(locals, production, binding, lineage, hook).await?;
     let future = Python::attach(|py| {
         pyo3_async_runtimes::into_future_with_locals(locals, awaitable.into_bound(py))
     })?;
@@ -870,9 +964,9 @@ mod tests {
     };
 
     use super::{
-        HookCallback, ProvisionalPermitStack, SceneTaskCallback, TaskCancelCallback,
-        TaskFactoryActionCallback, TaskFactoryWrapper, TaskLineage, TaskLineageRegistry,
-        create_registered_scope_task,
+        HookCallback, ProvisionalPermitStack, RuntimeTaskPhase, SceneTaskCallback,
+        TaskCancelCallback, TaskFactoryActionCallback, TaskFactoryWrapper, TaskLineage,
+        TaskLineageRegistry, create_registered_scope_task,
     };
 
     struct AttributeRestore {
@@ -896,7 +990,12 @@ mod tests {
         expected: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let (sender, mut receiver) = oneshot::channel();
-        let callback = Py::new(py, HookCallback::new(production, hook, sender))?;
+        let binding = Arc::new(RunBinding::new_for_test(py)?);
+        let (lineage, _guard) = TaskLineage::from_runtime(&binding, RuntimeTaskPhase::Start);
+        let callback = Py::new(
+            py,
+            HookCallback::new(production, binding, lineage, hook, sender),
+        )?;
 
         let returned = callback.bind(py).call0()?;
         assert!(returned.is_none());
@@ -1144,6 +1243,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lineage_is_exactly_bounded_by_its_hook_guard() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        Python::attach(|py| {
+            let binding = Arc::new(RunBinding::new_for_test(py)?);
+            let (lineage, guard) = TaskLineage::from_runtime(&binding, RuntimeTaskPhase::Start);
+
+            assert!(lineage.is_active());
+            assert!(lineage.scene().is_none());
+            assert!(lineage.cued().is_none());
+            let (resolved, phase) = lineage.runtime().expect("active runtime lineage");
+            assert!(Arc::ptr_eq(&resolved, &binding));
+            assert_eq!(phase, RuntimeTaskPhase::Start);
+
+            drop(guard);
+            assert!(!lineage.is_active());
+            assert!(lineage.runtime().is_none());
+            Ok::<_, PyErr>(())
+        })
+        .expect("runtime lineage authority must expire with its hook");
+    }
+
+    #[test]
     fn task_factory_wrapper_does_not_own_the_run_binding() {
         let _python_test_guard = crate::initialize_python_for_test();
         Python::attach(|py| {
@@ -1176,9 +1297,18 @@ mod tests {
             let hook_marker_ref = PyWeakrefReference::new(&hook_marker)?.unbind();
             hook_owner.append(&hook_marker)?;
             let (hook_sender, hook_receiver) = oneshot::channel();
+            let hook_binding = Arc::new(RunBinding::new_for_test(py)?);
+            let (hook_lineage, _hook_guard) =
+                TaskLineage::from_runtime(&hook_binding, RuntimeTaskPhase::Start);
             let hook_callback = Py::new(
                 py,
-                HookCallback::new(hook_owner.clone().unbind().into_any(), "start", hook_sender),
+                HookCallback::new(
+                    hook_owner.clone().unbind().into_any(),
+                    hook_binding,
+                    hook_lineage,
+                    "start",
+                    hook_sender,
+                ),
             )?;
             hook_owner.append(hook_callback.bind(py))?;
             drop((hook_receiver, hook_callback, hook_marker, hook_owner));

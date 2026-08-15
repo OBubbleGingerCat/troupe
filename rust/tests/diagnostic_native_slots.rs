@@ -458,7 +458,8 @@ fn hooks_bracket_real_transitions_and_overridden_lifecycle_calls() {
         "Production start",
         &[
             "RuntimeHook::ProductionStartEntered",
-            "await_hook(&locals, &production, \"start\").await",
+            "await_hook(",
+            "RuntimeTaskPhase::Start",
             "RuntimeHook::ProductionStartReturned",
         ],
     );
@@ -476,7 +477,8 @@ fn hooks_bracket_real_transitions_and_overridden_lifecycle_calls() {
         "Production stop",
         &[
             "RuntimeHook::ProductionStopEntered",
-            "await_hook(&locals, &production, \"stop\").await",
+            "await_hook(",
+            "RuntimeTaskPhase::Stop",
             "RuntimeHook::ProductionStopReturned",
         ],
     );
