@@ -184,6 +184,44 @@ EXPECTED_FILES: Final = (
     "span-finished.json",
     "span-started.json",
 )
+EXPECTED_VIEW_FILES: Final = (
+    "compatible.json",
+    "corrupt.json",
+    "invalid-descriptor.json",
+    "metric.json",
+    "newer.json",
+    "table.json",
+    "timeline.json",
+    "timeseries.json",
+)
+VIEW_FIXTURE_FORMATS: Final = {
+    "compatible.json": "compatible",
+    "corrupt.json": "archived_record",
+    "invalid-descriptor.json": "invalid_descriptors",
+    "metric.json": "renderer_fixture",
+    "newer.json": "archived_record",
+    "table.json": "renderer_fixture",
+    "timeline.json": "renderer_fixture",
+    "timeseries.json": "renderer_fixture",
+}
+VIEW_RENDERERS: Final = frozenset({"timeline", "metric", "table", "time_series"})
+VIEW_TIME_RANGES: Final = frozenset({"viewport", "run"})
+VIEW_SCOPES: Final = frozenset({"selection", "run"})
+VIEW_REDUCERS: Final = frozenset({"count", "sum", "min", "max", "mean", "latest"})
+TOKEN_METRICS: Final = frozenset(
+    {
+        "provider_total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "thought_tokens",
+        "cached_read_tokens",
+        "cached_write_tokens",
+    }
+)
+MAX_PAGE_ROWS: Final = 500
+MAX_TIME_SERIES_POINTS: Final = 1024
+MAX_TIME_SERIES_SERIES: Final = 64
+VIEW_ID: Final = re.compile(r"[a-z][a-z0-9_]*\Z")
 HEX_SHA256: Final = re.compile(r"[0-9a-f]{64}\Z")
 NONNEGATIVE_INTEGER: Final = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 CANONICAL_INTEGER: Final = re.compile(r"(?:0|-?[1-9][0-9]*)\Z")
@@ -210,6 +248,15 @@ class VerificationSummary:
     span_kinds: frozenset[str]
     instant_kinds: frozenset[str]
     counter_kinds: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ViewVerificationSummary:
+    fixture_count: int
+    renderers: frozenset[str]
+    invalid_case_count: int
+    max_table_rows: int
+    max_time_series_points: int
 
 
 def _fail(code: str, path: str, detail: str) -> None:
@@ -1057,23 +1104,747 @@ def canonical_event_bytes(root: Path, *, reverse: bool) -> dict[str, bytes]:
     return result
 
 
+def _load_view_manifest(root: Path) -> list[dict[str, Any]]:
+    manifest = _object(_canonical_json(root / "manifest.json"), "view_manifest")
+    _closed(manifest, frozenset({"schema_version", "fixtures"}), "view_manifest")
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        _fail("schema_version", "view_manifest.schema_version", "expected integer 1")
+    entries = _array(manifest["fixtures"], "view_manifest.fixtures")
+    files: list[str] = []
+    for index, raw in enumerate(entries):
+        path = f"view_manifest.fixtures[{index}]"
+        entry = _object(raw, path)
+        _closed(entry, frozenset({"file", "format", "sha256"}), path)
+        name = _string(entry["file"], f"{path}.file")
+        if Path(name).name != name or name == "manifest.json":
+            _fail("manifest", f"{path}.file", "fixture name is not canonical")
+        expected_format = VIEW_FIXTURE_FORMATS.get(name)
+        if expected_format is None or entry["format"] != expected_format:
+            _fail("manifest", f"{path}.format", f"expected {expected_format}")
+        digest = _string(entry["sha256"], f"{path}.sha256")
+        if HEX_SHA256.fullmatch(digest) is None:
+            _fail("sha256", f"{path}.sha256", "digest is not lowercase SHA-256")
+        fixture_path = root / name
+        try:
+            actual = hashlib.sha256(fixture_path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise FixtureValidationError("manifest", str(fixture_path), str(error)) from error
+        if actual != digest:
+            _fail("sha256", str(fixture_path), f"expected {digest}, got {actual}")
+        files.append(name)
+    if tuple(files) != EXPECTED_VIEW_FILES:
+        _fail("manifest", "view_manifest.fixtures", "fixture membership or order is not exact")
+    return entries
+
+
+def _view_id(value: Any, path: str) -> str:
+    text = _string(value, path)
+    if len(text.encode("utf-8")) > 64 or VIEW_ID.fullmatch(text) is None:
+        _fail("view_id", path, "expected ^[a-z][a-z0-9_]*$ with at most 64 bytes")
+    return text
+
+
+def _plain_title(value: Any, path: str) -> str:
+    text = _string(value, path)
+    if not text or len(text.encode("utf-8")) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in text):
+        _fail("title", path, "plain-text title is out of bounds")
+    lower = text.lower()
+    if (
+        any(marker in text for marker in ("<", ">", "`"))
+        or any(
+            marker in lower
+            for marker in ("javascript:", "data:text/html", "http://", "https://", "url(", "@import")
+        )
+    ):
+        _fail("title", path, "title contains executable markup or an external URL")
+    return text
+
+
+def _selector(value: Any, path: str, builtins: frozenset[str]) -> str:
+    selector = _object(value, path)
+    kind = _enum(selector.get("selector"), frozenset({"built_in", "custom"}), f"{path}.selector")
+    if kind == "built_in":
+        _closed(selector, frozenset({"selector", "kind"}), path)
+        _enum(selector["kind"], builtins, f"{path}.kind")
+    else:
+        _closed(selector, frozenset({"selector", "name"}), path)
+        _custom_name(selector["name"], f"{path}.name")
+    return kind
+
+
+def _group_dimension(value: Any, path: str) -> None:
+    dimension = _object(value, path)
+    kind = _enum(
+        dimension.get("dimension"),
+        frozenset(
+            {
+                "scene", "actor", "cue", "act", "event_name", "custom_name",
+                "attribute", "custom_dimension",
+            }
+        ),
+        f"{path}.dimension",
+    )
+    if kind in {"attribute", "custom_dimension"}:
+        _closed(dimension, frozenset({"dimension", "key"}), path)
+        _custom_key(dimension["key"], f"{path}.key")
+    else:
+        _closed(dimension, frozenset({"dimension"}), path)
+
+
+def _query_filter(value: Any, path: str) -> None:
+    item = _object(value, path)
+    kind = _enum(
+        item.get("filter"),
+        frozenset({"severity", "outcome", "attribute_equals", "attribute_exists"}),
+        f"{path}.filter",
+    )
+    if kind == "severity":
+        _closed(item, frozenset({"filter", "value"}), path)
+        _enum(item["value"], frozenset({"debug", "info", "warning", "error"}), f"{path}.value")
+    elif kind == "outcome":
+        _closed(item, frozenset({"filter", "value"}), path)
+        _enum(item["value"], SPAN_OUTCOMES, f"{path}.value")
+    elif kind == "attribute_equals":
+        _closed(item, frozenset({"filter", "key", "value"}), path)
+        _custom_key(item["key"], f"{path}.key")
+        _tagged_scalar(item["value"], f"{path}.value", attribute=False)
+    else:
+        _closed(item, frozenset({"filter", "key"}), path)
+        _custom_key(item["key"], f"{path}.key")
+
+
+def _query_filters(value: Any, path: str) -> None:
+    filters = _array(value, path)
+    if len(filters) > 32:
+        _fail("filters", path, "more than 32 exact filters")
+    for index, item in enumerate(filters):
+        _query_filter(item, f"{path}[{index}]")
+
+
+def _timeline_source(value: Any, path: str) -> str:
+    source = _object(value, path)
+    kind = _enum(source.get("source"), frozenset({"span", "instant"}), f"{path}.source")
+    _closed(source, frozenset({"source", "selector"}), path)
+    _selector(
+        source["selector"], f"{path}.selector", SPAN_KINDS if kind == "span" else INSTANT_KINDS,
+    )
+    return kind
+
+
+def _metric_source(value: Any, path: str) -> str:
+    source = _object(value, path)
+    kind = _enum(
+        source.get("source"),
+        frozenset({"counter_value", "instant_count", "completed_span_duration", "act_token"}),
+        f"{path}.source",
+    )
+    if kind == "counter_value":
+        _closed(source, frozenset({"source", "selector", "selection"}), path)
+        _selector(source["selector"], f"{path}.selector", COUNTER_KINDS)
+        if source["selection"] != "latest_before_reduce":
+            _fail("counter_selection", f"{path}.selection", "counter must select latest before reduce")
+    elif kind == "instant_count":
+        _closed(source, frozenset({"source", "selector"}), path)
+        _selector(source["selector"], f"{path}.selector", INSTANT_KINDS)
+    elif kind == "completed_span_duration":
+        _closed(source, frozenset({"source", "selector"}), path)
+        _selector(source["selector"], f"{path}.selector", SPAN_KINDS)
+    else:
+        _closed(source, frozenset({"source", "metric"}), path)
+        _enum(source["metric"], TOKEN_METRICS, f"{path}.metric")
+    return kind
+
+
+def _table_source(value: Any, path: str) -> str:
+    source = _object(value, path)
+    kind = _enum(
+        source.get("source"),
+        frozenset({"event", "span", "instant", "counter", "act_token_usage"}),
+        f"{path}.source",
+    )
+    if kind == "event":
+        _closed(source, frozenset({"source", "kind"}), path)
+        _enum(source["kind"], EVENT_KINDS, f"{path}.kind")
+    elif kind == "act_token_usage":
+        _closed(source, frozenset({"source"}), path)
+    else:
+        _closed(source, frozenset({"source", "selector"}), path)
+        allowed = {"span": SPAN_KINDS, "instant": INSTANT_KINDS, "counter": COUNTER_KINDS}[kind]
+        _selector(source["selector"], f"{path}.selector", allowed)
+    return kind
+
+
+def _table_column(value: Any, path: str) -> None:
+    column = _object(value, path)
+    kind = _enum(
+        column.get("column"),
+        frozenset(
+            {
+                "sequence", "elapsed_ns", "event_kind", "span_kind", "instant_kind",
+                "counter_kind", "scene_id", "actor_id", "cue_id", "act_id", "custom_name",
+                "outcome", "severity", "attribute", "token", "value",
+            }
+        ),
+        f"{path}.column",
+    )
+    if kind == "attribute":
+        _closed(column, frozenset({"column", "key"}), path)
+        _custom_key(column["key"], f"{path}.key")
+    elif kind == "token":
+        _closed(column, frozenset({"column", "metric"}), path)
+        _enum(column["metric"], TOKEN_METRICS, f"{path}.metric")
+    else:
+        _closed(column, frozenset({"column"}), path)
+
+
+def validate_view_record(value: Any, path: str = "view") -> dict[str, Any]:
+    record = _object(value, path)
+    _closed(
+        record,
+        frozenset({"renderer", "view_schema_version", "id", "title", "time_range", "scope", "query"}),
+        path,
+    )
+    renderer = _enum(record["renderer"], VIEW_RENDERERS, f"{path}.renderer")
+    if type(record["view_schema_version"]) is not int or record["view_schema_version"] != 1:
+        _fail("view_schema_version", f"{path}.view_schema_version", "expected integer 1")
+    _view_id(record["id"], f"{path}.id")
+    _plain_title(record["title"], f"{path}.title")
+    _enum(record["time_range"], VIEW_TIME_RANGES, f"{path}.time_range")
+    _enum(record["scope"], VIEW_SCOPES, f"{path}.scope")
+    query = _object(record["query"], f"{path}.query")
+    if renderer == "timeline":
+        _closed(query, frozenset({"source", "filters", "group_by"}), f"{path}.query")
+        _timeline_source(query["source"], f"{path}.query.source")
+        _query_filters(query["filters"], f"{path}.query.filters")
+        if query["group_by"] is not None:
+            _group_dimension(query["group_by"], f"{path}.query.group_by")
+    elif renderer in {"metric", "time_series"}:
+        _closed(query, frozenset({"source", "filters", "group_by", "reducer"}), f"{path}.query")
+        source = _metric_source(query["source"], f"{path}.query.source")
+        reducer = _enum(query["reducer"], VIEW_REDUCERS, f"{path}.query.reducer")
+        if source == "instant_count" and reducer != "count":
+            _fail("reducer", f"{path}.query.reducer", "instant count only supports count")
+        _query_filters(query["filters"], f"{path}.query.filters")
+        if query["group_by"] is not None:
+            _group_dimension(query["group_by"], f"{path}.query.group_by")
+    else:
+        _closed(query, frozenset({"source", "filters", "columns", "page_size"}), f"{path}.query")
+        _table_source(query["source"], f"{path}.query.source")
+        _query_filters(query["filters"], f"{path}.query.filters")
+        columns = _array(query["columns"], f"{path}.query.columns")
+        if not columns or len(columns) > 32:
+            _fail("columns", f"{path}.query.columns", "column count is out of bounds")
+        for index, column in enumerate(columns):
+            _table_column(column, f"{path}.query.columns[{index}]")
+        page_size = query["page_size"]
+        if type(page_size) is not int or not 1 <= page_size <= MAX_PAGE_ROWS:
+            _fail("page_size", f"{path}.query.page_size", "page size is out of bounds")
+    _validate_query_compatibility(renderer, query, f"{path}.query")
+    return record
+
+
+def _validate_query_compatibility(renderer: str, query: dict[str, Any], path: str) -> None:
+    source = query["source"]
+    source_kind = source["source"]
+    selector_kind = source.get("selector", {}).get("selector")
+    outcome = source_kind in {"span", "completed_span_duration"}
+    severity = source_kind in {"instant", "instant_count"} and selector_kind == "custom"
+    scalar_fields = selector_kind == "custom" and source_kind in {
+        "span", "instant", "counter", "counter_value", "completed_span_duration", "instant_count",
+    }
+    custom_name = selector_kind == "custom"
+    custom_dimensions = selector_kind == "custom" and source_kind in {"counter", "counter_value"}
+    if renderer == "table" and source_kind == "event":
+        event_kind = source["kind"]
+        outcome = event_kind in {"span_finished", "custom_span_finished"}
+        severity = event_kind == "custom_instant_occurred"
+        scalar_fields = event_kind in {
+            "custom_span_started", "custom_instant_occurred", "custom_counter_sampled",
+        }
+        custom_name = event_kind.startswith("custom_")
+        custom_dimensions = event_kind == "custom_counter_sampled"
+    for index, item in enumerate(query["filters"]):
+        supported = {
+            "outcome": outcome,
+            "severity": severity,
+            "attribute_equals": scalar_fields,
+            "attribute_exists": scalar_fields,
+        }[item["filter"]]
+        if not supported:
+            _fail("filter", f"{path}.filters[{index}]", "filter is incompatible with source")
+    group = query.get("group_by")
+    if group is not None:
+        group_kind = group["dimension"]
+        supported = (
+            group_kind in {"scene", "actor", "cue", "act", "event_name"}
+            or (group_kind == "custom_name" and custom_name)
+            or (group_kind == "attribute" and scalar_fields)
+            or (group_kind == "custom_dimension" and custom_dimensions)
+        )
+        if not supported:
+            _fail("group", f"{path}.group_by", "group dimension is incompatible with source")
+
+
+def _capabilities(value: Any, path: str) -> None:
+    capabilities = _object(value, path)
+    expected = {
+        "event_schema_version": 1,
+        "view_schema_version": 1,
+        "api_schema_version": 1,
+        "max_page_rows": 500,
+        "max_time_series_points": 1024,
+        "max_time_series_series": 64,
+        "bucket_origin": "run",
+        "interval_semantics": "left_closed_right_open",
+        "counter_selection": "latest_before_reduce",
+        "exact_mean_components": True,
+    }
+    _closed(capabilities, frozenset(expected), path)
+    if capabilities != expected:
+        _fail("capabilities", path, "operational capability values drifted")
+
+
+def _binding(value: Any, path: str, record: dict[str, Any]) -> tuple[int, int]:
+    binding = _object(value, path)
+    _closed(
+        binding,
+        frozenset(
+            {
+                "captured_watermark", "captured_elapsed_end_ns", "time_range", "range_start_ns",
+                "range_end_ns", "scope", "selected_scope",
+            }
+        ),
+        path,
+    )
+    _u64(binding["captured_watermark"], f"{path}.captured_watermark")
+    captured_end = _u64(binding["captured_elapsed_end_ns"], f"{path}.captured_elapsed_end_ns")
+    mode = _enum(binding["time_range"], VIEW_TIME_RANGES, f"{path}.time_range")
+    start = _u64(binding["range_start_ns"], f"{path}.range_start_ns")
+    end = _u64(binding["range_end_ns"], f"{path}.range_end_ns")
+    scope = _enum(binding["scope"], VIEW_SCOPES, f"{path}.scope")
+    if start > end or end > captured_end:
+        _fail("binding", path, "range lies outside captured data")
+    if mode == "run" and (start != 0 or end != captured_end):
+        _fail("binding", path, "run range is not [0, captured_end)")
+    if mode != record["time_range"] or scope != record["scope"]:
+        _fail("binding", path, "response binding does not match descriptor")
+    if binding["selected_scope"] is not None:
+        _scope(binding["selected_scope"], f"{path}.selected_scope")
+    if scope == "run" and binding["selected_scope"] is not None:
+        _fail("binding", f"{path}.selected_scope", "run scope cannot contain selection")
+    return start, end
+
+
+def _coverage(value: Any, path: str) -> dict[str, Any]:
+    item = _object(value, path)
+    _closed(
+        item,
+        frozenset({"status", "matched_count", "contributing_count", "excluded_count", "excluded", "gap_count"}),
+        path,
+    )
+    status = _enum(item["status"], frozenset({"complete", "partial", "unavailable"}), f"{path}.status")
+    matched = _u64(item["matched_count"], f"{path}.matched_count")
+    contributing = _u64(item["contributing_count"], f"{path}.contributing_count")
+    excluded_count = _u64(item["excluded_count"], f"{path}.excluded_count")
+    gaps = _u64(item["gap_count"], f"{path}.gap_count")
+    reasons = _object(item["excluded"], f"{path}.excluded")
+    _closed(
+        reasons,
+        frozenset({"open_spans", "missing_values", "non_numeric_values", "unavailable_values", "resource_truncated"}),
+        f"{path}.excluded",
+    )
+    reason_total = sum(_u64(number, f"{path}.excluded.{name}") for name, number in reasons.items())
+    if (
+        contributing > matched
+        or excluded_count > matched
+        or contributing + excluded_count > matched
+        or reason_total != excluded_count
+    ):
+        _fail("coverage", path, "matched, contributing, or excluded counts are inconsistent")
+    complete = excluded_count == 0 and gaps == 0
+    if (status == "complete" and not complete) or (status == "partial" and complete):
+        _fail("coverage", path, "status does not match exclusions and gaps")
+    if status == "unavailable" and contributing != 0:
+        _fail("coverage", path, "unavailable coverage has contributing values")
+    return item
+
+
+def _pagination(value: Any, path: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    page = _object(value, path)
+    _closed(page, frozenset({"page_size", "next_cursor"}), path)
+    if type(page["page_size"]) is not int or not 1 <= page["page_size"] <= MAX_PAGE_ROWS:
+        _fail("page_size", f"{path}.page_size", "page size is out of bounds")
+    if page["next_cursor"] is not None:
+        cursor = _string(page["next_cursor"], f"{path}.next_cursor")
+        if not cursor or len(cursor) > 512 or not cursor.isascii():
+            _fail("cursor", f"{path}.next_cursor", "opaque cursor is out of bounds")
+    return page
+
+
+def _exact_number(value: Any, path: str) -> None:
+    number = _object(value, path)
+    _closed(number, frozenset({"type", "value"}), path)
+    kind = _enum(number["type"], frozenset({"integer", "decimal"}), f"{path}.type")
+    (_canonical_integer if kind == "integer" else _decimal)(number["value"], f"{path}.value")
+
+
+def _aggregate(value: Any, path: str) -> str:
+    aggregate = _object(value, path)
+    kind = _enum(aggregate.get("aggregate"), frozenset({"exact", "mean"}), f"{path}.aggregate")
+    if kind == "exact":
+        _closed(aggregate, frozenset({"aggregate", "value"}), path)
+        _exact_number(aggregate["value"], f"{path}.value")
+    else:
+        _closed(aggregate, frozenset({"aggregate", "numerator", "contributing_count"}), path)
+        _exact_number(aggregate["numerator"], f"{path}.numerator")
+        _token_integer(aggregate["contributing_count"], f"{path}.contributing_count")
+    return kind
+
+
+def _group_key(value: Any, path: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    group = _object(value, path)
+    _closed(group, frozenset({"dimension", "value"}), path)
+    _group_dimension(group["dimension"], f"{path}.dimension")
+    _tagged_scalar(group["value"], f"{path}.value", attribute=False)
+    return group
+
+
+def _response_common(response: dict[str, Any], path: str, record: dict[str, Any]) -> tuple[int, int, dict[str, Any] | None]:
+    if type(response["api_schema_version"]) is not int or response["api_schema_version"] != 1:
+        _fail("api_schema_version", f"{path}.api_schema_version", "expected integer 1")
+    if type(response["view_schema_version"]) is not int or response["view_schema_version"] != 1:
+        _fail("view_schema_version", f"{path}.view_schema_version", "expected integer 1")
+    _uuid(response["run_id"], f"{path}.run_id")
+    view_id = _view_id(response["view_id"], f"{path}.view_id")
+    if view_id != record["id"]:
+        _fail("view_id", f"{path}.view_id", "result does not identify its descriptor")
+    start, end = _binding(response["binding"], f"{path}.binding", record)
+    result_coverage = _coverage(response["coverage"], f"{path}.coverage")
+    pagination = _pagination(response["pagination"], f"{path}.pagination")
+    truncated = _boolean(response["truncated"], f"{path}.truncated")
+    resource_truncated = int(result_coverage["excluded"]["resource_truncated"]) > 0
+    if truncated != resource_truncated:
+        _fail("truncation", path, "truncation state and coverage disagree")
+    if response["incompatible"] is not None:
+        state = _object(response["incompatible"], f"{path}.incompatible")
+        _closed(
+            state,
+            frozenset({"reason", "supported_view_schema_version", "record_view_schema_version"}),
+            f"{path}.incompatible",
+        )
+        _enum(state["reason"], frozenset({"newer_view_schema", "corrupt_record"}), f"{path}.incompatible.reason")
+        if state["supported_view_schema_version"] != 1:
+            _fail("view_schema_version", f"{path}.incompatible", "wrong supported version")
+    _capabilities(response["capabilities"], f"{path}.capabilities")
+    return start, end, pagination
+
+
+def validate_view_response(value: Any, record: dict[str, Any], path: str = "response") -> tuple[int, int]:
+    response = _object(value, path)
+    renderer = _enum(response.get("renderer"), VIEW_RENDERERS, f"{path}.renderer")
+    if renderer != record["renderer"]:
+        _fail("renderer", f"{path}.renderer", "response renderer differs from descriptor")
+    common = {
+        "renderer", "api_schema_version", "view_schema_version", "run_id", "view_id", "binding",
+        "coverage", "pagination", "truncated", "incompatible", "capabilities",
+    }
+    data_fields = {
+        "timeline": {"rows"},
+        "metric": {"series"},
+        "table": {"columns", "rows"},
+        "time_series": {"bucket_width_ns", "series"},
+    }[renderer]
+    _closed(response, frozenset(common | data_fields), path)
+    start, end, pagination = _response_common(response, path, record)
+    if renderer in {"timeline", "table"}:
+        if pagination is None:
+            _fail("pagination", f"{path}.pagination", "row renderer requires pagination state")
+    elif pagination is not None:
+        _fail("pagination", f"{path}.pagination", "aggregate renderer cannot be paginated")
+
+    if renderer == "timeline":
+        rows = _array(response["rows"], f"{path}.rows")
+        if len(rows) > pagination["page_size"]:
+            _fail("page_size", f"{path}.rows", "timeline result exceeds page size")
+        for index, raw in enumerate(rows):
+            row_path = f"{path}.rows[{index}]"
+            row = _object(raw, row_path)
+            _closed(row, frozenset({"sequence", "item_type", "name", "start_ns", "end_ns", "scope", "outcome"}), row_path)
+            _u64(row["sequence"], f"{row_path}.sequence")
+            item_type = _enum(row["item_type"], frozenset({"span", "instant"}), f"{row_path}.item_type")
+            _string(row["name"], f"{row_path}.name")
+            row_start = _u64(row["start_ns"], f"{row_path}.start_ns")
+            row_end = _optional(row["end_ns"], _u64, f"{row_path}.end_ns")
+            _scope(row["scope"], f"{row_path}.scope")
+            outcome = _optional(row["outcome"], lambda item, item_path: _enum(item, SPAN_OUTCOMES, item_path), f"{row_path}.outcome")
+            if item_type == "instant" and (row_end is not None or outcome is not None):
+                _fail("timeline", row_path, "instant contains span-only fields")
+            if row_end is not None and row_end < row_start:
+                _fail("timeline", row_path, "span ends before it starts")
+        return len(rows), 0
+
+    if renderer == "metric":
+        series = _array(response["series"], f"{path}.series")
+        for index, raw in enumerate(series):
+            series_path = f"{path}.series[{index}]"
+            item = _object(raw, series_path)
+            _closed(item, frozenset({"group", "value", "coverage"}), series_path)
+            group = _group_key(item["group"], f"{series_path}.group")
+            expected_group = record["query"]["group_by"]
+            if (None if group is None else group["dimension"]) != expected_group:
+                _fail("group", f"{series_path}.group", "group key differs from descriptor")
+            item_coverage = _coverage(item["coverage"], f"{series_path}.coverage")
+            if item["value"] is None:
+                if int(item_coverage["contributing_count"]) != 0:
+                    _fail("coverage", series_path, "empty metric has contributing values")
+            else:
+                aggregate_kind = _aggregate(item["value"], f"{series_path}.value")
+                expected_kind = "mean" if record["query"]["reducer"] == "mean" else "exact"
+                if aggregate_kind != expected_kind:
+                    _fail("reducer", f"{series_path}.value", "aggregate shape differs from reducer")
+                if aggregate_kind == "mean" and int(item["value"]["contributing_count"]) != int(item_coverage["contributing_count"]):
+                    _fail("coverage", series_path, "mean count differs from contributing coverage")
+        return 0, 0
+
+    if renderer == "table":
+        columns = _array(response["columns"], f"{path}.columns")
+        if columns != record["query"]["columns"]:
+            _fail("columns", f"{path}.columns", "response columns differ from descriptor")
+        for index, column in enumerate(columns):
+            _table_column(column, f"{path}.columns[{index}]")
+        rows = _array(response["rows"], f"{path}.rows")
+        if len(rows) > pagination["page_size"] or len(rows) > MAX_PAGE_ROWS:
+            _fail("page_size", f"{path}.rows", "table result exceeds page size")
+        for index, raw in enumerate(rows):
+            row_path = f"{path}.rows[{index}]"
+            row = _object(raw, row_path)
+            _closed(row, frozenset({"sequence", "cells"}), row_path)
+            _u64(row["sequence"], f"{row_path}.sequence")
+            cells = _array(row["cells"], f"{row_path}.cells")
+            if len(cells) != len(columns):
+                _fail("columns", f"{row_path}.cells", "cell count differs from columns")
+            for cell_index, cell in enumerate(cells):
+                if cell is not None:
+                    _tagged_scalar(cell, f"{row_path}.cells[{cell_index}]", attribute=False)
+        return len(rows), 0
+
+    width = _u64(response["bucket_width_ns"], f"{path}.bucket_width_ns")
+    duration = end - start
+    expected_width = max(1, (duration + 1022) // 1023) if duration else 1
+    if width != expected_width:
+        _fail("bucket_width", f"{path}.bucket_width_ns", f"expected {expected_width}")
+    expected_buckets: list[tuple[int, int, bool]] = []
+    if start != end:
+        bucket_start = start // width * width
+        while bucket_start < end:
+            bucket_end = bucket_start + width
+            expected_buckets.append((bucket_start, bucket_end, bucket_start < start or bucket_end > end))
+            bucket_start = bucket_end
+    if len(expected_buckets) > MAX_TIME_SERIES_POINTS:
+        _fail("point_cap", path, "more than 1024 origin-aligned buckets")
+    series = _array(response["series"], f"{path}.series")
+    if not series or len(series) > MAX_TIME_SERIES_SERIES:
+        _fail("series_cap", f"{path}.series", "series count is outside 1..=64")
+    max_points = 0
+    for series_index, raw in enumerate(series):
+        series_path = f"{path}.series[{series_index}]"
+        item = _object(raw, series_path)
+        _closed(item, frozenset({"group", "points"}), series_path)
+        group = _group_key(item["group"], f"{series_path}.group")
+        expected_group = record["query"]["group_by"]
+        if (None if group is None else group["dimension"]) != expected_group:
+            _fail("group", f"{series_path}.group", "group key differs from descriptor")
+        points = _array(item["points"], f"{series_path}.points")
+        max_points = max(max_points, len(points))
+        if len(points) != len(expected_buckets):
+            _fail("buckets", f"{series_path}.points", "empty or intersecting bucket is missing")
+        for point_index, (raw_point, expected) in enumerate(zip(points, expected_buckets, strict=True)):
+            point_path = f"{series_path}.points[{point_index}]"
+            point = _object(raw_point, point_path)
+            _closed(
+                point,
+                frozenset({"bucket_start_ns", "bucket_end_ns", "partial", "value", "coverage"}),
+                point_path,
+            )
+            actual = (
+                _u64(point["bucket_start_ns"], f"{point_path}.bucket_start_ns"),
+                _u64(point["bucket_end_ns"], f"{point_path}.bucket_end_ns"),
+                _boolean(point["partial"], f"{point_path}.partial"),
+            )
+            if actual != expected:
+                _fail("buckets", point_path, f"expected origin-aligned bucket {expected}")
+            point_coverage = _coverage(point["coverage"], f"{point_path}.coverage")
+            if point["value"] is None:
+                if int(point_coverage["contributing_count"]) != 0:
+                    _fail("coverage", point_path, "empty bucket has contributing values")
+            else:
+                aggregate_kind = _aggregate(point["value"], f"{point_path}.value")
+                expected_kind = "mean" if record["query"]["reducer"] == "mean" else "exact"
+                if aggregate_kind != expected_kind:
+                    _fail("reducer", f"{point_path}.value", "aggregate shape differs from reducer")
+                if aggregate_kind == "mean" and int(point["value"]["contributing_count"]) != int(point_coverage["contributing_count"]):
+                    _fail("coverage", point_path, "mean count differs from contributing coverage")
+    return 0, max_points
+
+
+def verify_view_fixtures(root: Path) -> ViewVerificationSummary:
+    root = root.resolve()
+    entries = _load_view_manifest(root)
+    renderers: set[str] = set()
+    invalid_count = 0
+    max_table_rows = 0
+    max_time_series_points = 0
+    renderer_payloads: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        name = entry["file"]
+        value = _canonical_json(root / name)
+        if entry["format"] == "renderer_fixture":
+            fixture = _object(value, name)
+            _closed(fixture, frozenset({"descriptor", "response"}), name)
+            record = validate_view_record(fixture["descriptor"], f"{name}.descriptor")
+            renderer = record["renderer"]
+            rows, points = validate_view_response(fixture["response"], record, f"{name}.response")
+            renderers.add(renderer)
+            renderer_payloads[renderer] = fixture
+            max_table_rows = max(max_table_rows, rows if renderer == "table" else 0)
+            max_time_series_points = max(max_time_series_points, points)
+        elif entry["format"] == "compatible":
+            fixture = _object(value, name)
+            _closed(fixture, frozenset({"capabilities", "records"}), name)
+            _capabilities(fixture["capabilities"], f"{name}.capabilities")
+            records = _array(fixture["records"], f"{name}.records")
+            compatible_renderers = {
+                validate_view_record(record, f"{name}.records[{index}]")["renderer"]
+                for index, record in enumerate(records)
+            }
+            if compatible_renderers != VIEW_RENDERERS or len(records) != 4:
+                _fail("coverage", f"{name}.records", "compatible record set is not the four-renderer union")
+        elif entry["format"] == "invalid_descriptors":
+            fixture = _object(value, name)
+            _closed(fixture, frozenset({"cases"}), name)
+            cases = _array(fixture["cases"], f"{name}.cases")
+            expected_names = (
+                "sql", "regex", "join", "nested_path", "callable", "custom_renderer",
+                "executable_markup", "incompatible_reducer", "page_size_over_limit",
+            )
+            if tuple(case.get("name") for case in cases if isinstance(case, dict)) != expected_names:
+                _fail("coverage", f"{name}.cases", "forbidden descriptor coverage drifted")
+            for index, raw in enumerate(cases):
+                case_path = f"{name}.cases[{index}]"
+                case = _object(raw, case_path)
+                _closed(case, frozenset({"name", "record"}), case_path)
+                try:
+                    validate_view_record(case["record"], f"{case_path}.record")
+                except FixtureValidationError:
+                    pass
+                else:
+                    _fail("invalid_descriptor", case_path, "forbidden descriptor decoded")
+                invalid_count += 1
+        else:
+            fixture = _object(value, name)
+            _closed(fixture, frozenset({"record", "expected_reason"}), name)
+            reason = _enum(
+                fixture["expected_reason"],
+                frozenset({"newer_view_schema", "corrupt_record"}),
+                f"{name}.expected_reason",
+            )
+            record = _object(fixture["record"], f"{name}.record")
+            version = record.get("view_schema_version")
+            if reason == "newer_view_schema":
+                if type(version) is not int or version <= 1:
+                    _fail("view_schema_version", f"{name}.record", "newer fixture is not newer")
+                if record.get("event_schema_version") != 1 or record.get("api_schema_version") != 1:
+                    _fail("version_independence", f"{name}.record", "event/API versions changed with view")
+            else:
+                if version != 1:
+                    _fail("view_schema_version", f"{name}.record", "corrupt fixture is not current schema")
+                try:
+                    validate_view_record(record, f"{name}.record")
+                except FixtureValidationError:
+                    pass
+                else:
+                    _fail("corrupt_record", f"{name}.record", "corrupt record decoded")
+
+    if renderers != VIEW_RENDERERS:
+        _fail("coverage", "view renderers", "four-renderer fixture coverage is incomplete")
+    if max_table_rows != MAX_PAGE_ROWS or max_time_series_points != MAX_TIME_SERIES_POINTS:
+        _fail("coverage", "view limits", "500-row or 1024-point boundary is absent")
+    if renderer_payloads["timeline"]["response"]["rows"]:
+        _fail("coverage", "timeline empty", "empty row result is absent")
+    metric_series = renderer_payloads["metric"]["response"]["series"]
+    if not any(
+        series["coverage"]["status"] == "partial"
+        and series["value"] is not None
+        and series["value"]["aggregate"] == "mean"
+        for series in metric_series
+    ):
+        _fail("coverage", "metric", "partial exact-mean result is absent")
+    points = renderer_payloads["time_series"]["response"]["series"][0]["points"]
+    if not points[0]["partial"] or not points[-1]["partial"] or not any(point["value"] is None for point in points):
+        _fail("coverage", "time series", "partial boundaries or explicit empty buckets are absent")
+    source = renderer_payloads["time_series"]["descriptor"]["query"]["source"]
+    if source.get("selection") != "latest_before_reduce":
+        _fail("coverage", "counter", "latest-before-reduce counter source is absent")
+    return ViewVerificationSummary(
+        fixture_count=len(entries),
+        renderers=frozenset(renderers),
+        invalid_case_count=invalid_count,
+        max_table_rows=max_table_rows,
+        max_time_series_points=max_time_series_points,
+    )
+
+
+def canonical_view_bytes(root: Path, *, reverse: bool) -> dict[str, bytes]:
+    root = root.resolve()
+    entries = _load_view_manifest(root)
+    verify_view_fixtures(root)
+    if reverse:
+        entries.reverse()
+    return {
+        entry["file"]: json.dumps(
+            _canonical_json(root / entry["file"]), ensure_ascii=False, separators=(",", ":")
+        ).encode()
+        for entry in entries
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify canonical diagnostic protocol fixtures")
     parser.add_argument(
+        "--views",
+        action="store_true",
+        help="verify the closed view/query protocol fixtures instead of event fixtures",
+    )
+    parser.add_argument(
         "--fixtures",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "tests/fixtures/diagnostics/events",
+        default=None,
     )
     arguments = parser.parse_args(argv)
+    root = arguments.fixtures or (
+        Path(__file__).resolve().parents[1]
+        / "tests/fixtures/diagnostics"
+        / ("views" if arguments.views else "events")
+    )
     try:
-        summary = verify_event_fixtures(arguments.fixtures)
+        summary = verify_view_fixtures(root) if arguments.views else verify_event_fixtures(root)
     except FixtureValidationError as error:
         print(f"fixture verification failed: {error}", file=sys.stderr)
         return 1
-    print(
-        f"verified {summary.fixture_count} fixture files "
-        f"({summary.valid_event_count} events, {summary.malformed_case_count} malformed cases)"
-    )
+    if isinstance(summary, ViewVerificationSummary):
+        print(
+            f"verified {summary.fixture_count} view fixture files "
+            f"({len(summary.renderers)} renderers, {summary.invalid_case_count} invalid descriptors)"
+        )
+    else:
+        print(
+            f"verified {summary.fixture_count} fixture files "
+            f"({summary.valid_event_count} events, {summary.malformed_case_count} malformed cases)"
+        )
     return 0
 
 

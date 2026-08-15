@@ -15,6 +15,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 VERIFIER_PATH = ROOT / "scripts" / "verify_diagnostic_fixtures.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "diagnostics" / "events"
+VIEW_FIXTURES = ROOT / "tests" / "fixtures" / "diagnostics" / "views"
 
 
 def load_verifier():
@@ -45,6 +46,27 @@ def test_reverse_loading_preserves_each_checked_in_event_byte_string() -> None:
 
     forward = verifier.canonical_event_bytes(FIXTURES, reverse=False)
     reverse = verifier.canonical_event_bytes(FIXTURES, reverse=True)
+
+    assert forward == reverse
+
+
+def test_checked_in_view_fixtures_pass_independent_verification() -> None:
+    verifier = load_verifier()
+
+    summary = verifier.verify_view_fixtures(VIEW_FIXTURES)
+
+    assert summary.fixture_count == 8
+    assert summary.renderers == {"timeline", "metric", "table", "time_series"}
+    assert summary.invalid_case_count == 9
+    assert summary.max_table_rows == 500
+    assert summary.max_time_series_points == 1024
+
+
+def test_reverse_loading_preserves_each_checked_in_view_byte_string() -> None:
+    verifier = load_verifier()
+
+    forward = verifier.canonical_view_bytes(VIEW_FIXTURES, reverse=False)
+    reverse = verifier.canonical_view_bytes(VIEW_FIXTURES, reverse=True)
 
     assert forward == reverse
 
@@ -100,6 +122,29 @@ def test_manifest_sha_detects_fixture_tampering(tmp_path: Path) -> None:
 
     with pytest.raises(verifier.FixtureValidationError, match="sha256"):
         verifier.verify_event_fixtures(copied)
+
+
+def test_view_manifest_sha_and_closed_descriptor_validation_detect_drift(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    copied = tmp_path / "views"
+    shutil.copytree(VIEW_FIXTURES, copied)
+    path = copied / "timeline.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["descriptor"]["query"]["sql"] = "select * from events"
+    path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    with pytest.raises(verifier.FixtureValidationError, match="sha256"):
+        verifier.verify_view_fixtures(copied)
+
+    manifest = json.loads((copied / "manifest.json").read_text(encoding="utf-8"))
+    for entry in manifest["fixtures"]:
+        if entry["file"] == path.name:
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (copied / "manifest.json").write_text(
+        json.dumps(manifest, separators=(",", ":")) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(verifier.FixtureValidationError, match="fields"):
+        verifier.verify_view_fixtures(copied)
 
 
 def test_verifier_uses_only_the_python_standard_library() -> None:

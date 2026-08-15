@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "python",
+      "scripts/verify_diagnostic_fixtures.py",
+      "--views"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
