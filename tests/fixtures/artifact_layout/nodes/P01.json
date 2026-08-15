@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_python_sink_values.rs",
+    "tests/fixtures/diagnostics/sink-capture-matrix.json"
+  ],
+  "modified": [
+    "rust/src/diagnostic_python/sink.rs"
+  ],
   "removed": [],
   "generated": []
 }
