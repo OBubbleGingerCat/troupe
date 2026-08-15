@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "carrier": "acp.prompt_response.usage",
+  "acp": {
+    "crate": "agent-client-protocol",
+    "version": "2.0.0",
+    "features": ["unstable_end_turn_token_usage"]
+  },
+  "adapters": [
+    {
+      "provider": "codex",
+      "runner": "npx",
+      "package": "@agentclientprotocol/codex-acp",
+      "version": "1.1.9",
+      "qualified": true,
+      "evidence": ["single_request", "tool_loop"]
+    },
+    {
+      "provider": "claude",
+      "runner": "npx",
+      "package": "@agentclientprotocol/claude-agent-acp",
+      "version": "0.64.2",
+      "qualified": true,
+      "evidence": ["single_request", "multi_request"]
+    },
+    {
+      "provider": "kimi",
+      "runner": "command",
+      "package": "kimi",
+      "version": "0.31.1",
+      "qualified": false,
+      "evidence": []
+    }
+  ]
+}

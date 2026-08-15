@@ -1,0 +1,48 @@
+{
+  "adapterProfile": "claude-agent-acp@0.64.2",
+  "turns": [
+    {
+      "shape": "single_request",
+      "modelRequestUsage": [
+        {
+          "totalTokens": 0,
+          "inputTokens": 0,
+          "outputTokens": 0
+        }
+      ],
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 0,
+          "inputTokens": 0,
+          "outputTokens": 0
+        }
+      }
+    },
+    {
+      "shape": "multi_request",
+      "modelRequestUsage": [
+        {
+          "totalTokens": 19,
+          "inputTokens": 14,
+          "outputTokens": 5
+        },
+        {
+          "totalTokens": 23,
+          "inputTokens": 16,
+          "outputTokens": 7
+        }
+      ],
+      "promptResponse": {
+        "stopReason": "max_turn_requests",
+        "usage": {
+          "totalTokens": 42,
+          "inputTokens": 30,
+          "outputTokens": 12,
+          "thoughtTokens": 4,
+          "cachedWriteTokens": 2
+        }
+      }
+    }
+  ]
+}

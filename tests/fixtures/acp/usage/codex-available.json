@@ -1,0 +1,57 @@
+{
+  "adapterProfile": "codex-acp@1.1.9",
+  "turns": [
+    {
+      "shape": "single_request",
+      "modelRequestUsage": [
+        {
+          "totalTokens": 17,
+          "inputTokens": 11,
+          "outputTokens": 6
+        }
+      ],
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 17,
+          "inputTokens": 11,
+          "outputTokens": 6,
+          "thoughtTokens": 2,
+          "cachedReadTokens": 0,
+          "cachedWriteTokens": 3
+        }
+      }
+    },
+    {
+      "shape": "tool_loop",
+      "modelRequestUsage": [
+        {
+          "totalTokens": 12,
+          "inputTokens": 8,
+          "outputTokens": 4
+        },
+        {
+          "totalTokens": 15,
+          "inputTokens": 9,
+          "outputTokens": 6
+        },
+        {
+          "totalTokens": 8,
+          "inputTokens": 5,
+          "outputTokens": 3
+        }
+      ],
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 35,
+          "inputTokens": 22,
+          "outputTokens": 13,
+          "thoughtTokens": 3,
+          "cachedReadTokens": 5,
+          "cachedWriteTokens": 0
+        }
+      }
+    }
+  ]
+}

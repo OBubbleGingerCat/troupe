@@ -1,0 +1,89 @@
+{
+  "qualifiedProvider": "codex",
+  "cases": [
+    {
+      "name": "usage_absent",
+      "promptResponse": {
+        "stopReason": "end_turn"
+      },
+      "expectedAvailability": "unavailable",
+      "expectedReason": "usage_not_reported"
+    },
+    {
+      "name": "usage_null",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": null
+      },
+      "expectedAvailability": "unavailable",
+      "expectedReason": "usage_not_reported"
+    },
+    {
+      "name": "missing_required_total",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 1,
+          "outputTokens": 1
+        }
+      },
+      "expectedAvailability": "unavailable",
+      "expectedReason": "usage_not_reported"
+    },
+    {
+      "name": "negative_required_total",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": -1,
+          "inputTokens": 1,
+          "outputTokens": 1
+        }
+      },
+      "expectedAvailability": "unavailable",
+      "expectedReason": "usage_not_reported"
+    },
+    {
+      "name": "boolean_required_input",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 2,
+          "inputTokens": true,
+          "outputTokens": 1
+        }
+      },
+      "expectedAvailability": "unavailable",
+      "expectedReason": "usage_not_reported"
+    },
+    {
+      "name": "overflow_required_output",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 2,
+          "inputTokens": 1,
+          "outputTokens": 18446744073709551616
+        }
+      },
+      "expectedAvailability": "unavailable",
+      "expectedReason": "usage_not_reported"
+    },
+    {
+      "name": "invalid_optional_is_unknown",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 2,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "thoughtTokens": "unknown",
+          "cachedReadTokens": false,
+          "cachedWriteTokens": 0
+        }
+      },
+      "expectedAvailability": "available",
+      "expectedReason": null
+    }
+  ]
+}
