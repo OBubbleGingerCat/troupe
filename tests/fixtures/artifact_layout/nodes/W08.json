@@ -1,6 +1,16 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/state/lru.ts",
+    "frontend/diagnostics/src/state/model.ts",
+    "frontend/diagnostics/src/state/queries.ts",
+    "frontend/diagnostics/src/state/reducer.ts",
+    "frontend/diagnostics/src/state/selection.ts",
+    "frontend/diagnostics/src/state/windows.ts",
+    "frontend/diagnostics/tests/unit/state-property.test.ts",
+    "frontend/diagnostics/tests/unit/state-reducer.test.ts",
+    "frontend/diagnostics/tests/unit/state-windows.test.ts"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
