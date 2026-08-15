@@ -133,6 +133,40 @@ def test_workspace_environment_is_fully_owned_and_ignores_shared_caches(
         gate.cleanup_owned_workspace(workspace)
 
 
+def test_managed_python_runtime_binds_home_and_precedes_inherited_loader_paths(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    managed = tmp_path / "managed-python"
+    managed_python = managed / "bin/python3.10"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.write_bytes(b"python")
+    (managed / "lib").mkdir()
+    (workspace.venv / "bin").mkdir(parents=True)
+    (workspace.venv / "bin/python").symlink_to(managed_python)
+    environment = {"LD_LIBRARY_PATH": "/caller/lib"}
+    try:
+        gate.bind_managed_python_runtime(workspace, environment)
+        assert environment["LD_LIBRARY_PATH"] == f"{managed / 'lib'}{os.pathsep}/caller/lib"
+        assert environment["PYTHONHOME"] == str(managed)
+    finally:
+        gate.cleanup_owned_workspace(workspace)
+
+
+def test_managed_python_runtime_library_must_exist(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    managed_python = tmp_path / "managed-python/bin/python3.10"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.write_bytes(b"python")
+    (workspace.venv / "bin").mkdir(parents=True)
+    (workspace.venv / "bin/python").symlink_to(managed_python)
+    try:
+        with pytest.raises(gate.GateError, match="managed Python library directory"):
+            gate.bind_managed_python_runtime(workspace, {})
+    finally:
+        gate.cleanup_owned_workspace(workspace)
+
+
 def test_two_repository_copies_never_share_a_writable_gate_path(tmp_path: Path) -> None:
     repositories = [tmp_path / "copy-a", tmp_path / "copy-b"]
     for repository in repositories:

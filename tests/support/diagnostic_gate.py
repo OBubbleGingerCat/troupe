@@ -290,6 +290,25 @@ def gate_environment(
     return environment
 
 
+def bind_managed_python_runtime(
+    workspace: OwnedWorkspace,
+    environment: dict[str, str],
+) -> None:
+    python = workspace.venv / "bin/python"
+    try:
+        resolved_python = python.resolve(strict=True)
+    except OSError as error:
+        raise GateError("fresh venv Python is unavailable") from error
+    prefix = resolved_python.parent.parent
+    library = prefix / "lib"
+    _regular_directory(library, context="managed Python library directory")
+    environment["PYTHONHOME"] = str(prefix)
+    inherited = environment.get("LD_LIBRARY_PATH")
+    environment["LD_LIBRARY_PATH"] = (
+        f"{library}{os.pathsep}{inherited}" if inherited else str(library)
+    )
+
+
 def validated_features(manifest: Path, features: Sequence[str]) -> str:
     if not features:
         raise GateError("native gate descriptor must select at least one maturin feature")
@@ -798,6 +817,7 @@ def _bootstrap_run(repository: Path, node_id: str, caller: Mapping[str, str]) ->
             cwd=repository,
             env=environment,
         )
+        bind_managed_python_runtime(workspace, environment)
         environment["PATH"] = f"{workspace.venv / 'bin'}{os.pathsep}{environment.get('PATH', '')}"
         support = Path(__file__).resolve(strict=True)
         identities = (
