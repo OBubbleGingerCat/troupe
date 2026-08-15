@@ -1,7 +1,18 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-perfetto/tests/projection.rs",
+    "tests/fixtures/perfetto/projection/canonical-events.json",
+    "tests/fixtures/perfetto/projection/expected-packets.json",
+    "tests/fixtures/perfetto/projection/expected-trace.pb",
+    "tests/fixtures/perfetto/projection/manifest.json"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-perfetto/src/collect.rs",
+    "rust/crates/troupe-diagnostics-perfetto/src/identity.rs",
+    "rust/crates/troupe-diagnostics-perfetto/src/project.rs",
+    "rust/crates/troupe-diagnostics-perfetto/src/tracks.rs"
+  ],
   "removed": [],
   "generated": []
 }
