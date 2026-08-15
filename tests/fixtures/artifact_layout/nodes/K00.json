@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_sink_queue.rs"
+  ],
+  "modified": [
+    "rust/src/diagnostic_sink/budget.rs",
+    "rust/src/diagnostic_sink/queue.rs"
+  ],
   "removed": [],
   "generated": []
 }
