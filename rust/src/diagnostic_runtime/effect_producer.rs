@@ -4,7 +4,7 @@ use pyo3::types::PyString;
 use pyo3::{Bound, Py, PyErr};
 use troupe_diagnostics_core::scalar::SchemaU64;
 
-use crate::diagnostic_runtime::cue_producer::CueTerminalOutcome;
+use crate::diagnostic_runtime::cue_producer::{CueCallerOutcome, CueTerminalOutcome};
 use crate::orchestration::effect::{Effect, EffectConstruction};
 use crate::orchestration::scene_context::CuedScope;
 
@@ -61,11 +61,11 @@ pub(crate) fn cue_terminal(
 }
 
 #[inline]
-pub(crate) fn caller_finished(cued: &Arc<CuedScope>) {
+pub(crate) fn caller_finished(cued: &Arc<CuedScope>, outcome: CueCallerOutcome) {
     #[cfg(not(test))]
-    active::caller_finished(cued);
+    active::caller_finished(cued, outcome);
     #[cfg(test)]
-    let _ = cued;
+    let _ = (cued, outcome);
 }
 
 #[cfg(not(test))]
@@ -88,7 +88,7 @@ mod active {
         scalar::SchemaU64,
     };
 
-    use super::{CueTerminalOutcome, EffectHook};
+    use super::{CueCallerOutcome, CueTerminalOutcome, EffectHook};
     use crate::diagnostic_runtime::{
         cue_producer,
         load_producer::{DiagnosticProducerError, DiagnosticRunContext},
@@ -115,7 +115,7 @@ mod active {
         construction_finished: bool,
         returned_sequence: Option<SchemaU64>,
         owner_terminal: Option<CueTerminalOutcome>,
-        caller_finished: bool,
+        caller_outcome: Option<CueCallerOutcome>,
         cleared: bool,
         finish_attempted: bool,
         producer_failed: bool,
@@ -322,19 +322,15 @@ mod active {
                             ),
                         );
                     };
-                    if state.caller_finished {
-                        self.consume_and_finish(&mut state)
-                    } else if state.cleared {
-                        self.finish(
-                            &mut state,
-                            EffectTerminal::cancelled(
-                                CONSUMER_ABANDONED,
-                                returned_sequence,
-                                CausalRelation::Handoff,
-                            ),
-                        )
-                    } else {
-                        false
+                    match state.caller_outcome {
+                        Some(CueCallerOutcome::Consumed) => self.consume_and_finish(&mut state),
+                        Some(CueCallerOutcome::Abandoned) => {
+                            self.abandon_and_finish(&mut state, returned_sequence)
+                        }
+                        None if state.cleared => {
+                            self.abandon_and_finish(&mut state, returned_sequence)
+                        }
+                        None => false,
                     }
                 }
                 CueTerminalOutcome::Cancelled => self.finish(
@@ -360,19 +356,24 @@ mod active {
             }
         }
 
-        fn caller_finished(&self) -> bool {
+        fn caller_finished(&self, outcome: CueCallerOutcome) -> bool {
             let mut state = lock(&self.state);
             if state.producer_failed || state.finish_attempted {
                 return true;
             }
-            if state.caller_finished {
+            if state.caller_outcome.is_some() {
                 return false;
             }
-            state.caller_finished = true;
+            state.caller_outcome = Some(outcome);
             if state.owner_terminal == Some(CueTerminalOutcome::Completed)
-                && state.returned_sequence.is_some()
+                && let Some(returned_sequence) = state.returned_sequence
             {
-                self.consume_and_finish(&mut state)
+                match outcome {
+                    CueCallerOutcome::Consumed => self.consume_and_finish(&mut state),
+                    CueCallerOutcome::Abandoned => {
+                        self.abandon_and_finish(&mut state, returned_sequence)
+                    }
+                }
             } else {
                 false
             }
@@ -390,17 +391,25 @@ mod active {
             if state.owner_terminal == Some(CueTerminalOutcome::Completed)
                 && let Some(returned_sequence) = state.returned_sequence
             {
-                self.finish(
-                    &mut state,
-                    EffectTerminal::cancelled(
-                        CONSUMER_ABANDONED,
-                        returned_sequence,
-                        CausalRelation::Handoff,
-                    ),
-                )
+                self.abandon_and_finish(&mut state, returned_sequence)
             } else {
                 false
             }
+        }
+
+        fn abandon_and_finish(
+            &self,
+            state: &mut EffectLifecycleState,
+            returned_sequence: SchemaU64,
+        ) -> bool {
+            self.finish(
+                state,
+                EffectTerminal::cancelled(
+                    CONSUMER_ABANDONED,
+                    returned_sequence,
+                    CausalRelation::Handoff,
+                ),
+            )
         }
 
         fn consume_and_finish(&self, state: &mut EffectLifecycleState) -> bool {
@@ -557,10 +566,10 @@ mod active {
         }
     }
 
-    pub(super) fn caller_finished(cued: &Arc<CuedScope>) {
+    pub(super) fn caller_finished(cued: &Arc<CuedScope>, outcome: CueCallerOutcome) {
         let owner_key = owner_key(cued);
         for producer in producers_for_owner(owner_key) {
-            let should_remove = producer.caller_finished();
+            let should_remove = producer.caller_finished(outcome);
             remove_if_terminal(producer.identity_key, &producer, should_remove);
         }
     }

@@ -11,6 +11,7 @@ PRODUCER = ROOT / "rust/src/diagnostic_runtime/effect_producer.rs"
 EFFECT = ROOT / "rust/src/orchestration/effect.rs"
 MAILBOX = ROOT / "rust/src/orchestration/mailbox.rs"
 CUE_PRODUCER = ROOT / "rust/src/diagnostic_runtime/cue_producer.rs"
+CUE_FUTURE = ROOT / "rust/src/orchestration/cue_future.rs"
 
 
 def _between(source: str, start: str, end: str) -> str:
@@ -85,7 +86,7 @@ def test_return_consumption_and_cancellation_links_are_backward_only() -> None:
     source = PRODUCER.read_text(encoding="utf-8")
     returned = _between(source, "fn returned(&self)", "fn owner_terminal(")
     consumed = _between(source, "fn consume_and_finish(", "fn finish(")
-    owner_terminal = _between(source, "fn owner_terminal(", "fn caller_finished(&self)")
+    owner_terminal = _between(source, "fn owner_terminal(", "fn caller_finished(&self")
 
     assert "created_sequence" in returned
     assert "CausalRelation::Return" in returned
@@ -132,21 +133,50 @@ def test_all_provable_non_success_outcomes_are_stable_and_payload_free() -> None
     assert "__dict__" not in active
 
 
-def test_success_waits_for_scene_consumption_and_clear_proves_abandonment() -> None:
+def test_success_requires_consumption_while_abandonment_never_emits_consumed() -> None:
     source = PRODUCER.read_text(encoding="utf-8")
-    owner_terminal = _between(source, "fn owner_terminal(", "fn caller_finished(&self)")
-    caller_finished = _between(source, "fn caller_finished(&self)", "fn cleared(&self)")
+    owner_terminal = _between(source, "fn owner_terminal(", "fn caller_finished(&self")
+    caller_finished = _between(source, "fn caller_finished(&self", "fn cleared(&self)")
     cleared = _between(source, "fn cleared(&self)", "fn consume_and_finish(")
+    abandoned = _between(source, "fn abandon_and_finish(", "fn consume_and_finish(")
 
     assert "state.returned_sequence" in owner_terminal
-    assert "if state.caller_finished" in owner_terminal
+    assert "Some(CueCallerOutcome::Consumed)" in owner_terminal
+    assert "Some(CueCallerOutcome::Abandoned)" in owner_terminal
     assert "self.consume_and_finish(&mut state)" in owner_terminal
+    assert "state.caller_outcome = Some(outcome)" in caller_finished
     assert "state.owner_terminal == Some(CueTerminalOutcome::Completed)" in caller_finished
-    assert "state.returned_sequence.is_some()" in caller_finished
+    assert "CueCallerOutcome::Consumed => self.consume_and_finish" in caller_finished
+    assert "CueCallerOutcome::Abandoned" in caller_finished
+    assert "self.abandon_and_finish" in caller_finished
     assert "CONSUMER_ABANDONED" in cleared
     assert "state.cleared = true" in cleared
     assert "state.owner_terminal == Some(CueTerminalOutcome::Completed)" in cleared
     assert "NOT_RETURNED" not in cleared
+    assert "CONSUMER_ABANDONED" in abandoned
+    assert "EffectTerminal::cancelled" in abandoned
+    assert "InstantDetail::EffectConsumed" not in abandoned
+
+
+def test_cue_call_reports_typed_consumption_or_abandonment_at_every_exit() -> None:
+    source = CUE_FUTURE.read_text(encoding="utf-8")
+    finish = _between(source, "fn finish(&mut self", "fn source_for_lineage(")
+    finish_from_operation = _between(
+        source,
+        "fn finish_from_operation(",
+        "fn replace_shield_and_wait(",
+    )
+    close = _between(source, "fn close(&mut self)", "fn __await__")
+    clear = _between(source, "fn __clear__(&mut self)", "}\n}")
+
+    assert "CueHook::CallerFinished(outcome)" in finish
+    assert "result.is_ok()" in finish_from_operation
+    assert "CueCallerOutcome::Consumed" in finish_from_operation
+    assert "CueCallerOutcome::Abandoned" in finish_from_operation
+    assert "self.finish(outcome)" in finish_from_operation
+    for exit_path in (close, clear):
+        assert "operation.request_cancel()" in exit_path
+        assert "self.finish(CueCallerOutcome::Abandoned)" in exit_path
 
 
 def test_terminal_callbacks_only_use_registered_effect_state() -> None:
@@ -190,7 +220,7 @@ def test_native_hooks_preserve_constructor_return_and_caller_ordering() -> None:
     assert cue_terminal.index("effect_producer::cue_terminal") < cue_terminal.index(
         "finish_span_with_causes"
     )
-    caller = _between(cue, "CueHook::CallerFinished =>", "}\n        }\n    }")
+    caller = _between(cue, "CueHook::CallerFinished(outcome) =>", "}\n        }\n    }")
     assert caller.index("effect_producer::caller_finished") < caller.index(
         "producer.caller_finished()"
     )

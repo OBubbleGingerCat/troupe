@@ -364,6 +364,7 @@ fn hook_slots_freeze_typed_identity_scope_outcome_and_error_inputs() {
         "&RunBinding",
         "&SceneScope",
         "CueMailboxHook",
+        "CueCallerOutcome",
         "CueTerminalOutcome",
         "CueLineageSnapshot",
         "fn lineage_snapshot(cued: &Arc<CuedScope>)",
@@ -382,6 +383,7 @@ fn hook_slots_freeze_typed_identity_scope_outcome_and_error_inputs() {
         "Option<&Py<PyString>>",
         "&Arc<CuedScope>",
         "CueTerminalOutcome",
+        "CueCallerOutcome",
         "SchemaU64",
         "Returned",
     ] {

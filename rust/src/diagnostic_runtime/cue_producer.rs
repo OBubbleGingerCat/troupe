@@ -20,7 +20,13 @@ pub(crate) enum CueHook {
     Admitted,
     Dispatched,
     CancelRequested,
-    CallerFinished,
+    CallerFinished(CueCallerOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CueCallerOutcome {
+    Consumed,
+    Abandoned,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,7 +135,10 @@ mod active {
         scalar::SchemaU64,
     };
 
-    use super::{CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation, CueTerminalOutcome};
+    use super::{
+        CueCallerOutcome, CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation,
+        CueTerminalOutcome,
+    };
     use crate::diagnostic_runtime::{
         actor_producer, effect_producer,
         load_producer::{DiagnosticProducerError, DiagnosticRunContext},
@@ -554,8 +563,8 @@ mod active {
             CueHook::CancelRequested => {
                 with_producer(operation, |producer| producer.cancel_requested());
             }
-            CueHook::CallerFinished => {
-                effect_producer::caller_finished(operation.diagnostic_cued());
+            CueHook::CallerFinished(outcome) => {
+                effect_producer::caller_finished(operation.diagnostic_cued(), outcome);
                 if let Some(producer) = producer(operation) {
                     producer.caller_finished();
                 }
