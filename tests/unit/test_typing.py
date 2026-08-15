@@ -9,7 +9,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-NEGATIVE = ROOT / "tests" / "typing" / "negative.py"
+NEGATIVES = (
+    ROOT / "tests" / "typing" / "negative.py",
+    ROOT / "tests" / "typing" / "diagnostics_public_invalid.py",
+)
 
 
 def _run(cache_dir: Path, module: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -37,6 +40,7 @@ def test_runtime_stub_and_typed_consumers(tmp_path: Path) -> None:
         "--strict",
         "--show-error-codes",
         "tests/typing/positive.py",
+        "tests/typing/diagnostics_public.py",
         "examples/hello_actor/production.py",
         "examples/repeating_scenes/production.py",
         "examples/actor_pipeline/production.py",
@@ -50,25 +54,28 @@ def test_runtime_stub_and_typed_consumers(tmp_path: Path) -> None:
         "mypy",
         "--strict",
         "--show-error-codes",
-        "tests/typing/negative.py",
+        *(path.relative_to(ROOT).as_posix() for path in NEGATIVES),
     )
     assert negative.returncode != 0
     diagnostics = Counter(
-        (int(match.group("line")), match.group("code"))
+        (match.group("path"), int(match.group("line")), match.group("code"))
         for line in negative.stdout.splitlines()
         if (
             match := re.match(
-                r"^tests/typing/negative\.py:(?P<line>\d+): error: .*"
+                r"^(?P<path>tests/typing/(?:negative|diagnostics_public_invalid)\.py):"
+                r"(?P<line>\d+): error: .*"
                 r"\[(?P<code>[a-z-]+)\]$",
                 line,
             )
         )
     )
     expected = Counter()
-    for line_number, line in enumerate(
-        NEGATIVE.read_text(encoding="utf-8").splitlines(),
-        start=1,
-    ):
-        if marker := re.search(r"# E: (?P<code>[a-z-]+)$", line):
-            expected[(line_number, marker.group("code"))] += 1
+    for source in NEGATIVES:
+        relative = source.relative_to(ROOT).as_posix()
+        for line_number, line in enumerate(
+            source.read_text(encoding="utf-8").splitlines(),
+            start=1,
+        ):
+            if marker := re.search(r"# E: (?P<code>[a-z-]+)$", line):
+                expected[(relative, line_number, marker.group("code"))] += 1
     assert diagnostics == expected, negative.stdout + negative.stderr

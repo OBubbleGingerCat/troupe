@@ -8,6 +8,7 @@ from typing import Any, Literal, NoReturn, TypeVar, final, overload
 from typing_extensions import disjoint_base
 
 from . import act_schema as act_schema
+from . import diagnostics as diagnostics
 
 _EffectT = TypeVar("_EffectT", bound="Effect")
 _JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
@@ -143,4 +144,5 @@ __all__ = [
     "EffectContextError",
     "Production",
     "act_schema",
+    "diagnostics",
 ]
