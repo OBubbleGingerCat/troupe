@@ -553,7 +553,7 @@ pub(crate) fn observe_binding(binding: &RunBinding, hook: RuntimeHook, error: Op
 }
 
 impl RuntimeLifecycleProducer {
-    fn latch_state_failure(&self, code: &'static str) {
+    pub(crate) fn latch_state_failure(&self, code: &'static str) {
         let mut state = lock(&self.state);
         latch_failure(&mut state, RuntimeProducerError::state(code));
     }
