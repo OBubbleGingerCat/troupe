@@ -1,8 +1,21 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "node",
+      "frontend/diagnostics/scripts/maintain.mjs",
+      "--npm-cache",
+      "${TROUPE_NPM_CACHE:?}",
+      "--typecheck",
+      "--unit",
+      "tests/unit/protocol-events.test.ts,tests/unit/protocol-views.test.ts,tests/unit/protocol-controls.test.ts",
+      "--audit-fixtures"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm"
+  ],
   "exclusive_resources": []
 }
