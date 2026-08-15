@@ -1,7 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/registry_model.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/registry/codec.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/registry/model.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/registry/process_identity.rs"
+  ],
   "removed": [],
   "generated": []
 }
