@@ -39,41 +39,54 @@ async def _finish_failed(bridge, sink_id):
 
 async def _drive_sink(bridge, sink_id):
     while True:
-        dispatch = bridge._next_dispatch(sink_id)
-        if dispatch is None:
-            if bridge._sink_stopped(sink_id) or bridge._stopping():
-                return
-            await asyncio.sleep(_POLL_SECONDS)
-            continue
-
-        callback, event, sequence = dispatch
         try:
+            dispatch = bridge._next_dispatch(sink_id)
+            if dispatch is None:
+                if bridge._sink_stopped(sink_id) or bridge._stopping():
+                    return
+                await asyncio.sleep(_POLL_SECONDS)
+                continue
+
+            callback, event, sequence = dispatch
             result = callback(event)
             if inspect.isawaitable(result):
                 result = await result
+            if result is not None:
+                bridge._record_invalid_return(sink_id, sequence)
+                await _finish_failed(bridge, sink_id)
+                return
+
+            if await _finish_success(bridge, sink_id, sequence) == _STOP:
+                return
+        except asyncio.CancelledError as error:
+            if bridge._runtime_cancel_requested(sink_id):
+                await _finish_failed(bridge, sink_id)
+                return
+            bridge._record_raised(sink_id, sequence, error)
+            await _finish_failed(bridge, sink_id)
+            return
         except BaseException as error:
             bridge._record_raised(sink_id, sequence, error)
             await _finish_failed(bridge, sink_id)
             return
 
-        if result is not None:
-            bridge._record_invalid_return(sink_id, sequence)
-            await _finish_failed(bridge, sink_id)
-            return
-
-        if await _finish_success(bridge, sink_id, sequence) == _STOP:
-            return
-
 
 async def _dispatcher_main(bridge):
     tasks = {}
+    cancel_requested = False
     while True:
-        new_sinks, stopping = bridge._poll_commands()
+        new_sinks, stopping, cancel_now = bridge._poll_commands()
         for sink_id in new_sinks:
             tasks[sink_id] = contextvars.Context().run(
                 asyncio.create_task,
                 _drive_sink(bridge, sink_id),
             )
+        if cancel_now and not cancel_requested:
+            cancel_requested = True
+            for sink_id, task in tasks.items():
+                if not task.done():
+                    bridge._request_runtime_cancel(sink_id)
+                    task.cancel()
         if stopping and all(task.done() for task in tasks.values()):
             return
         await asyncio.sleep(_POLL_SECONDS)

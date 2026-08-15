@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use pyo3::{Py, PyAny, Python};
 
@@ -91,6 +92,18 @@ impl DiagnosticThread {
         }
         self.commands
             .send(DispatcherCommand::StopWhenIdle)
+            .map_err(|_| DiagnosticThreadControlError::Exited)
+    }
+
+    pub(crate) fn request_stop_at(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), DiagnosticThreadControlError> {
+        if self.stopping.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        self.commands
+            .send(DispatcherCommand::StopAt(deadline))
             .map_err(|_| DiagnosticThreadControlError::Exited)
     }
 

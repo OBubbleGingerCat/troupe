@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, OnceLock};
 use std::thread::ThreadId;
+use std::time::Instant;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyModule};
@@ -144,6 +145,8 @@ impl SinkDispatcher {
                 queue: SinkQueue::new(runtime_budget),
                 callback_failure: OnceLock::new(),
                 unexpected_failure: OnceLock::new(),
+                delivery_settling: AtomicBool::new(false),
+                runtime_cancel_requested: AtomicBool::new(false),
                 delivered_events: AtomicUsize::new(0),
                 first_delivered_sequence: AtomicU64::new(0),
                 last_delivered_sequence: AtomicU64::new(0),
@@ -186,6 +189,21 @@ impl SinkDispatcher {
         self.inner.unexpected_failure.get().cloned()
     }
 
+    pub(crate) fn delivery_settling(&self) -> bool {
+        self.inner.delivery_settling.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn runtime_cancel_requested(&self) -> bool {
+        self.inner.runtime_cancel_requested.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_delivery_settling_for_test(&self, settling: bool) {
+        self.inner
+            .delivery_settling
+            .store(settling, Ordering::Release);
+    }
+
     pub(crate) fn delivery_progress(&self) -> DeliveryProgress {
         let delivered_events = self.inner.delivered_events.load(Ordering::Acquire);
         let first = self.inner.first_delivered_sequence.load(Ordering::Acquire);
@@ -221,6 +239,8 @@ pub(crate) struct SinkDispatchState {
     queue: SinkQueue<DispatchEvent>,
     callback_failure: OnceLock<CallbackFailure>,
     unexpected_failure: OnceLock<UnexpectedDispatcherFailure>,
+    delivery_settling: AtomicBool,
+    runtime_cancel_requested: AtomicBool,
     delivered_events: AtomicUsize,
     first_delivered_sequence: AtomicU64,
     last_delivered_sequence: AtomicU64,
@@ -255,6 +275,18 @@ impl SinkDispatchState {
         self.delivered_events.fetch_add(1, Ordering::AcqRel);
     }
 
+    fn begin_delivery_settlement(&self) -> DeliverySettlement<'_> {
+        let already_settling = self.delivery_settling.swap(true, Ordering::AcqRel);
+        debug_assert!(!already_settling, "one sink settles one callback at a time");
+        DeliverySettlement {
+            settling: &self.delivery_settling,
+        }
+    }
+
+    fn request_runtime_cancel(&self) {
+        self.runtime_cancel_requested.store(true, Ordering::Release);
+    }
+
     fn record_enqueue_sequence(&self, sequence: u64) {
         if self
             .last_enqueued_sequence
@@ -271,10 +303,21 @@ impl SinkDispatchState {
     }
 }
 
+struct DeliverySettlement<'a> {
+    settling: &'a AtomicBool,
+}
+
+impl Drop for DeliverySettlement<'_> {
+    fn drop(&mut self) {
+        self.settling.store(false, Ordering::Release);
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum DispatcherCommand {
     Register(Arc<SinkDispatchState>),
     StopWhenIdle,
+    StopAt(Instant),
 }
 
 #[pyclass(unsendable)]
@@ -284,6 +327,7 @@ struct DispatcherBridge {
     sinks: HashMap<u64, Arc<SinkDispatchState>>,
     active: HashMap<u64, (CallbackTicket, u64)>,
     stopping: bool,
+    cancel_at: Option<Instant>,
 }
 
 impl DispatcherBridge {
@@ -297,6 +341,7 @@ impl DispatcherBridge {
             sinks: HashMap::new(),
             active: HashMap::new(),
             stopping: false,
+            cancel_at: None,
         }
     }
 
@@ -343,7 +388,7 @@ impl DispatcherBridge {
         }));
     }
 
-    fn _poll_commands(&mut self) -> (Vec<u64>, bool) {
+    fn _poll_commands(&mut self) -> (Vec<u64>, bool, bool) {
         let mut registered = Vec::new();
         loop {
             match self.commands.try_recv() {
@@ -368,6 +413,13 @@ impl DispatcherBridge {
                     registered.push(sink_id);
                 }
                 Ok(DispatcherCommand::StopWhenIdle) => self.stopping = true,
+                Ok(DispatcherCommand::StopAt(deadline)) => {
+                    self.stopping = true;
+                    self.cancel_at = Some(
+                        self.cancel_at
+                            .map_or(deadline, |current| current.min(deadline)),
+                    );
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.stopping = true;
@@ -375,7 +427,10 @@ impl DispatcherBridge {
                 }
             }
         }
-        (registered, self.stopping)
+        let cancel_now = self
+            .cancel_at
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        (registered, self.stopping, cancel_now)
     }
 
     fn _next_dispatch(&mut self, py: Python<'_>, sink_id: u64) -> PyResult<Option<PythonDispatch>> {
@@ -421,6 +476,18 @@ impl DispatcherBridge {
         Ok(())
     }
 
+    fn _request_runtime_cancel(&mut self, sink_id: u64) -> PyResult<()> {
+        self.sink(sink_id)?.request_runtime_cancel();
+        Ok(())
+    }
+
+    fn _runtime_cancel_requested(&self, sink_id: u64) -> PyResult<bool> {
+        Ok(self
+            .sink(sink_id)?
+            .runtime_cancel_requested
+            .load(Ordering::Acquire))
+    }
+
     fn _complete_success(&mut self, sink_id: u64, sequence: u64) -> u8 {
         if self
             .active
@@ -435,12 +502,15 @@ impl DispatcherBridge {
             }
             return COMPLETE_STOP;
         }
-        let status = self.complete_active(sink_id);
-        if status == COMPLETE_DONE {
+        let sink = Arc::clone(
             self.sinks
                 .get(&sink_id)
-                .expect("completed callback sink must remain registered")
-                .record_delivery(sequence);
+                .expect("active callback sink must remain registered"),
+        );
+        let _settlement = sink.begin_delivery_settlement();
+        let status = self.complete_active(sink_id);
+        if status == COMPLETE_DONE {
+            sink.record_delivery(sequence);
         }
         status
     }
