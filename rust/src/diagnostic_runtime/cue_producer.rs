@@ -135,10 +135,7 @@ mod active {
         scalar::SchemaU64,
     };
 
-    use super::{
-        CueCallerOutcome, CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation,
-        CueTerminalOutcome,
-    };
+    use super::{CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation, CueTerminalOutcome};
     use crate::diagnostic_runtime::{
         actor_producer, effect_producer,
         load_producer::{DiagnosticProducerError, DiagnosticRunContext},
