@@ -1,6 +1,33 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "scripts/run_diagnostic_node_gate.sh",
+      "P04"
+    ],
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_public_api.py",
+      "tests/unit/test_typing.py",
+      "tests/unit/test_artifact_layout.py"
+    ],
+    [
+      "python",
+      "-m",
+      "mypy",
+      "--strict",
+      "--show-error-codes",
+      "tests/typing/diagnostics_public.py"
+    ],
+    [
+      "python",
+      "-m",
+      "mypy.stubtest",
+      "troupe",
+      "--concise"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],

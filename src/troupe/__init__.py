@@ -17,6 +17,7 @@ from ._runtime import AgentTurnError as AgentTurnError
 from ._runtime import act_schema as act_schema
 from ._runtime import Cue as Cue
 from ._runtime import CueContextError as CueContextError
+from ._runtime import diagnostics as diagnostics
 from ._runtime import Effect as Effect
 from ._runtime import EffectContextError as EffectContextError
 from ._runtime import Production as Production
@@ -64,4 +65,5 @@ __all__ = [
     "EffectContextError",
     "Production",
     "act_schema",
+    "diagnostics",
 ]
