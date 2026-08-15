@@ -1,7 +1,23 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-perfetto/schema/PROVENANCE.md",
+    "rust/crates/troupe-diagnostics-perfetto/schema/SHA256SUMS",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/LICENSE",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/common/builtin_clock.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/trace.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/trace_packet.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/debug_annotation.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/track_descriptor.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/track_event.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/used-fields.json",
+    "rust/crates/troupe-diagnostics-perfetto/tests/encoder.rs",
+    "scripts/audit_perfetto_schema.py",
+    "tests/unit/test_perfetto_schema_audit.py"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-perfetto/src/schema.rs"
+  ],
   "removed": [],
   "generated": []
 }
