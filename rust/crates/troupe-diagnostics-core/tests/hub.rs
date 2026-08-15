@@ -103,6 +103,7 @@ struct FakeReserver {
 #[derive(Default)]
 struct FakeReserverState {
     fail_next: bool,
+    fatal_requests: usize,
     requests: Vec<AdmissionSize>,
     committed: Vec<AcceptedDiagnosticEvent>,
     released_without_commit: usize,
@@ -110,6 +111,7 @@ struct FakeReserverState {
 
 #[derive(Clone)]
 struct FakeReserverSnapshot {
+    fatal_requests: usize,
     requests: Vec<AdmissionSize>,
     committed: Vec<AcceptedDiagnosticEvent>,
     released_without_commit: usize,
@@ -123,6 +125,7 @@ impl FakeReserver {
     fn snapshot(&self) -> FakeReserverSnapshot {
         let state = self.state.lock().unwrap();
         FakeReserverSnapshot {
+            fatal_requests: state.fatal_requests,
             requests: state.requests.clone(),
             committed: state.committed.clone(),
             released_without_commit: state.released_without_commit,
@@ -141,6 +144,11 @@ impl FakeReserver {
             state: Arc::clone(&self.state),
             committed: false,
         })
+    }
+
+    fn try_reserve_fatal(&self, size: AdmissionSize) -> Result<FakeReservation, FakeReserveError> {
+        self.state.lock().unwrap().fatal_requests += 1;
+        self.try_reserve(size)
     }
 }
 
@@ -173,6 +181,10 @@ impl AdmissionReserver for FakeDurableReserver {
 
     fn try_reserve(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
         self.0.try_reserve(size)
+    }
+
+    fn try_reserve_fatal(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
+        self.0.try_reserve_fatal(size)
     }
 }
 
@@ -287,6 +299,26 @@ fn production_admission_reserves_exact_bytes_and_fans_out_one_immutable_fact() {
         live[0].canonical_bytes()
     );
     assert_eq!(live[0].canonical_bytes(), subscriber[0].canonical_bytes());
+}
+
+#[test]
+fn production_fatal_admission_uses_a_distinct_reservation_path_and_dense_sequence() {
+    let reserver = FakeReserver::default();
+    let hub = ProductionDiagnosticHub::production(
+        run_id(),
+        FakeDurableReserver(reserver.clone()),
+        Box::new(RecordingLiveNotifier::default()),
+    );
+
+    let first = hub.admit(counter_candidate(1), None).unwrap();
+    let fatal = hub.admit_fatal(counter_candidate(2), None).unwrap();
+
+    assert_eq!(first.accepted().identity().sequence().get(), 1);
+    assert_eq!(fatal.accepted().identity().sequence().get(), 2);
+    let snapshot = reserver.snapshot();
+    assert_eq!(snapshot.fatal_requests, 1);
+    assert_eq!(snapshot.requests.len(), 2);
+    assert!(snapshot.committed[1].same_fact(fatal.accepted()));
 }
 
 #[test]
