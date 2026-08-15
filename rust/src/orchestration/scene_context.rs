@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::agent::AgentTurnControl;
+use crate::diagnostic_runtime::cue_producer::{self, CueHook};
 use crate::diagnostic_runtime::scene_drain_producer::{self, SceneDrainHook, SceneDriverExit};
 use crate::diagnostic_runtime::scene_producer::{self, SceneHook};
 use crate::orchestration::DiagnosticAdmissionSlot;
@@ -538,6 +539,7 @@ impl PreparedAdmission {
             (old, operations_to_cancel)
         };
         drop(old);
+        cue_producer::observe(&operation, CueHook::Admitted);
         if let Some(operations) = operations_to_cancel {
             if !operations.is_empty() {
                 scene_drain_producer::observe(&self.scope, SceneDrainHook::CancellationStarted);

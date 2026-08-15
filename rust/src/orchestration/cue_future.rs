@@ -172,7 +172,6 @@ impl CueCall {
             CueOperation::new_runtime(&scene, &target, &binding, cued, cue, signal.clone_ref(py));
         let waiter = Self::fresh_waiter(py, &signal)?;
         prepared.commit(operation.clone())?;
-        cue_producer::observe(&operation, CueHook::Admitted);
         Ok((signal, waiter, operation))
     }
 
