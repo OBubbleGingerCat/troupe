@@ -11,6 +11,7 @@
   ],
   "env": {},
   "maturin_features": [
+    "agent-test-support",
     "diagnostics-test-support"
   ],
   "cache_requirements": [],
