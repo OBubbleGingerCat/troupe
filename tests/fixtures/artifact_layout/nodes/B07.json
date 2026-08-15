@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/fixtures/diagnostics/custom-runtime-matrix.json",
+    "tests/integration/test_diagnostic_custom_runtime.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_runtime/custom_binding.rs"
+  ],
   "removed": [],
   "generated": []
 }
