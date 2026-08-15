@@ -362,14 +362,6 @@ DiagnosticDimensions: _TypeAlias = tuple[tuple[str, bool | int | _Decimal | str]
 
 @_dataclass(frozen=True, kw_only=True)
 class _EventBase:
-    __slots__ = (
-        "schema_version",
-        "run_id",
-        "sequence",
-        "elapsed_ns",
-        "scope",
-        "caused_by",
-    )
     schema_version: _Literal[1]
     run_id: _UUID
     sequence: int
@@ -381,7 +373,6 @@ class _EventBase:
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class SpanStarted(_EventBase):
-    __slots__ = ("span_kind", "detail", "parent_span_id")
     kind: _ClassVar[_Literal["span_started"]]
     span_kind: _SpanKind
     detail: SpanStartDetail
@@ -391,7 +382,6 @@ class SpanStarted(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class SpanFinished(_EventBase):
-    __slots__ = ("span_id", "outcome", "error_code")
     kind: _ClassVar[_Literal["span_finished"]]
     span_id: int
     outcome: _SpanOutcome
@@ -401,7 +391,6 @@ class SpanFinished(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class InstantOccurred(_EventBase):
-    __slots__ = ("instant_kind", "detail", "containing_span_id")
     kind: _ClassVar[_Literal["instant_occurred"]]
     instant_kind: _InstantKind
     detail: InstantDetail
@@ -411,7 +400,6 @@ class InstantOccurred(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class CounterSampled(_EventBase):
-    __slots__ = ("counter_kind", "value")
     kind: _ClassVar[_Literal["counter_sampled"]]
     counter_kind: _CounterKind
     value: int
@@ -420,7 +408,6 @@ class CounterSampled(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class AgentMessageDelta(_EventBase):
-    __slots__ = ("message_id", "source_message_id", "text_delta")
     kind: _ClassVar[_Literal["agent_message_delta"]]
     message_id: str
     source_message_id: str | None
@@ -430,7 +417,6 @@ class AgentMessageDelta(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class AgentMessageCompleted(_EventBase):
-    __slots__ = ("message_id", "utf8_bytes", "unicode_scalar_count", "truncated")
     kind: _ClassVar[_Literal["agent_message_completed"]]
     message_id: str
     utf8_bytes: int
@@ -441,7 +427,6 @@ class AgentMessageCompleted(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class AgentPlanSnapshot(_EventBase):
-    __slots__ = ("entries", "truncated")
     kind: _ClassVar[_Literal["agent_plan_snapshot"]]
     entries: tuple[PlanEntry, ...]
     truncated: bool
@@ -450,14 +435,6 @@ class AgentPlanSnapshot(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class ContextUsageSampled(_EventBase):
-    __slots__ = (
-        "context_used_tokens",
-        "context_window_tokens",
-        "cumulative_cost_amount",
-        "cumulative_cost_currency",
-        "sample_origin",
-        "observed_elapsed_ns",
-    )
     kind: _ClassVar[_Literal["context_usage_sampled"]]
     context_used_tokens: int | None
     context_window_tokens: int | None
@@ -470,17 +447,6 @@ class ContextUsageSampled(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class ActTokenUsageFinalized(_EventBase):
-    __slots__ = (
-        "availability",
-        "source",
-        "unavailable_reason",
-        "provider_total_tokens",
-        "input_tokens",
-        "output_tokens",
-        "thought_tokens",
-        "cached_read_tokens",
-        "cached_write_tokens",
-    )
     kind: _ClassVar[_Literal["act_token_usage_finalized"]]
     availability: _UsageAvailability
     source: _UsageSource | None
@@ -496,15 +462,6 @@ class ActTokenUsageFinalized(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class ObservationGap(_EventBase):
-    __slots__ = (
-        "producer",
-        "component",
-        "reason",
-        "dropped_count",
-        "affected_elapsed",
-        "affected_kind",
-        "affected_scope",
-    )
     kind: _ClassVar[_Literal["observation_gap"]]
     producer: str
     component: str | None
@@ -518,7 +475,6 @@ class ObservationGap(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class CustomSpanStarted(_EventBase):
-    __slots__ = ("name", "parent_span_id", "attributes")
     kind: _ClassVar[_Literal["custom_span_started"]]
     name: str
     parent_span_id: int | None
@@ -528,7 +484,6 @@ class CustomSpanStarted(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class CustomSpanFinished(_EventBase):
-    __slots__ = ("span_id", "outcome")
     kind: _ClassVar[_Literal["custom_span_finished"]]
     span_id: int
     outcome: _SpanOutcome
@@ -537,7 +492,6 @@ class CustomSpanFinished(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class CustomInstantOccurred(_EventBase):
-    __slots__ = ("name", "containing_span_id", "severity", "attributes")
     kind: _ClassVar[_Literal["custom_instant_occurred"]]
     name: str
     containing_span_id: int | None
@@ -548,7 +502,6 @@ class CustomInstantOccurred(_EventBase):
 @_final
 @_dataclass(frozen=True, kw_only=True)
 class CustomCounterSampled(_EventBase):
-    __slots__ = ("name", "value", "unit", "dimensions")
     kind: _ClassVar[_Literal["custom_counter_sampled"]]
     name: str
     value: int | _Decimal
