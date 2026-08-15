@@ -1,0 +1,106 @@
+{
+  "schema": "troupe.diagnostics.sink-capture-matrix",
+  "capture_fields": [
+    "agent_messages",
+    "plans",
+    "tool_calls",
+    "result_validation",
+    "usage",
+    "custom_events",
+    "tool_inputs",
+    "tool_outputs"
+  ],
+  "dependencies": [
+    {
+      "capture": "tool_inputs",
+      "requires": "tool_calls",
+      "controls_delivery": false,
+      "payload_field": "captured_input"
+    },
+    {
+      "capture": "tool_outputs",
+      "requires": "tool_calls",
+      "controls_delivery": false,
+      "payload_field": "captured_output"
+    }
+  ],
+  "scope_policy": {
+    "delivered_events": "current_act_only",
+    "observation_gap": "current_act_impact_only",
+    "sink_targeted_component_failure": "always_excluded"
+  },
+  "variant_rules": [
+    {"kind": "span_started", "capture": "by_span_kind"},
+    {"kind": "span_finished", "capture": "by_span_kind"},
+    {"kind": "instant_occurred", "capture": "by_instant_kind"},
+    {"kind": "counter_sampled", "capture": "by_counter_kind"},
+    {"kind": "agent_message_delta", "capture": "agent_messages"},
+    {"kind": "agent_message_completed", "capture": "agent_messages"},
+    {"kind": "agent_plan_snapshot", "capture": "plans"},
+    {"kind": "context_usage_sampled", "capture": "usage"},
+    {"kind": "act_token_usage_finalized", "capture": "usage"},
+    {"kind": "observation_gap", "capture": "always"},
+    {"kind": "custom_span_started", "capture": "custom_events"},
+    {"kind": "custom_span_finished", "capture": "custom_events"},
+    {"kind": "custom_instant_occurred", "capture": "custom_events"},
+    {"kind": "custom_counter_sampled", "capture": "custom_events"}
+  ],
+  "span_kind_rules": [
+    {"kind": "run.lifecycle", "capture": "excluded"},
+    {"kind": "production.path_resolution", "capture": "excluded"},
+    {"kind": "production.load", "capture": "excluded"},
+    {"kind": "production.construct", "capture": "excluded"},
+    {"kind": "production.start", "capture": "excluded"},
+    {"kind": "production.stop", "capture": "excluded"},
+    {"kind": "production.shutdown", "capture": "excluded"},
+    {"kind": "scene.lifecycle", "capture": "excluded"},
+    {"kind": "scene.drain", "capture": "excluded"},
+    {"kind": "scene.cleanup", "capture": "excluded"},
+    {"kind": "actor.handle_lifetime", "capture": "excluded"},
+    {"kind": "cue.mailbox_wait", "capture": "excluded"},
+    {"kind": "cue.execution", "capture": "excluded"},
+    {"kind": "effect.lifecycle", "capture": "excluded"},
+    {"kind": "agent.session.opening", "capture": "excluded"},
+    {"kind": "agent.session.lifecycle", "capture": "excluded"},
+    {"kind": "agent.session.closing", "capture": "excluded"},
+    {"kind": "act.lifecycle", "capture": "always"},
+    {"kind": "act.caller", "capture": "always"},
+    {"kind": "agent.turn", "capture": "always"},
+    {"kind": "agent.thinking", "capture": "agent_messages"},
+    {"kind": "tool.call", "capture": "tool_calls"}
+  ],
+  "instant_kind_rules": [
+    {"kind": "actor.cast", "capture": "excluded"},
+    {"kind": "cue.admitted", "capture": "excluded"},
+    {"kind": "cue.enqueued", "capture": "excluded"},
+    {"kind": "cue.dispatched", "capture": "excluded"},
+    {"kind": "cue.cancel_requested", "capture": "excluded"},
+    {"kind": "effect.created", "capture": "excluded"},
+    {"kind": "effect.returned", "capture": "excluded"},
+    {"kind": "effect.consumed", "capture": "excluded"},
+    {"kind": "agent.session.ready", "capture": "excluded"},
+    {"kind": "agent.session.broken", "capture": "excluded"},
+    {"kind": "act.admitted", "capture": "always"},
+    {"kind": "act.waiting_ready", "capture": "always"},
+    {"kind": "act.prompt_submitted", "capture": "always"},
+    {"kind": "act.cancel_requested", "capture": "always"},
+    {"kind": "act.supervisor_handoff", "capture": "always"},
+    {"kind": "agent.turn.activity", "capture": "always"},
+    {"kind": "agent.turn.terminal", "capture": "always"},
+    {"kind": "agent.turn.settled", "capture": "always"},
+    {"kind": "tool.updated", "capture": "tool_calls"},
+    {"kind": "result.submitted", "capture": "result_validation"},
+    {"kind": "result.rejected", "capture": "result_validation"},
+    {"kind": "result.repair_requested", "capture": "result_validation"},
+    {"kind": "result.accepted", "capture": "result_validation"},
+    {"kind": "result.missing", "capture": "result_validation"},
+    {"kind": "diagnostic.component_failed", "capture": "excluded"}
+  ],
+  "counter_kind_rules": [
+    {"kind": "actor.mailbox_depth", "capture": "excluded"},
+    {"kind": "cue.active", "capture": "excluded"},
+    {"kind": "agent.turn.active", "capture": "always"},
+    {"kind": "result.validation_rejections", "capture": "result_validation"},
+    {"kind": "diagnostic.dropped_events", "capture": "always"}
+  ]
+}
