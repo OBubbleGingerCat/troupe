@@ -1,7 +1,11 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/projector_spans.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/store/projector/spans.rs"
+  ],
   "removed": [],
   "generated": []
 }
