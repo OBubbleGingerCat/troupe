@@ -136,7 +136,7 @@ impl ProjectedTruncation {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SnapshotProjector {
     references: ReferenceValidator,
     model: SnapshotReadModel,
