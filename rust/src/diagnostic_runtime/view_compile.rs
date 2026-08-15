@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(records.records.len(), accepted);
 
         let error = records
-            .try_push(&[b'x'], accepted)
+            .try_push(b"x", accepted)
             .expect_err("cumulative overflow must be rejected before retention");
         assert_eq!(error.kind(), ViewStartupErrorKind::UserConfiguration);
         assert_eq!(error.code(), "diagnostic_views.total_bytes_exceeded");
