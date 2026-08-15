@@ -221,16 +221,17 @@ impl Actor {
             .ok_or_else(|| PyRuntimeError::new_err("Actor is no longer attached"))
     }
 
-    #[pyo3(signature = (*, script, output_schema))]
+    #[pyo3(signature = (*, script, output_schema, diagnostic_sink=None))]
     fn act(
         &self,
         py: Python<'_>,
         script: &Bound<'_, PyAny>,
         output_schema: &Bound<'_, PyAny>,
+        diagnostic_sink: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<ActCall>> {
         const CONTEXT_ERROR: &str =
             "Actor.act() must be called on the current actor within its active cued context";
-        let diagnostics = preflight_diagnostic_sink(py, None)?;
+        let diagnostics = preflight_diagnostic_sink(py, diagnostic_sink)?;
         let context_error = || CueContextError::new_err(CONTEXT_ERROR);
         let authority = self.current_cued_authority(py).ok_or_else(context_error)?;
         let session = authority
@@ -667,6 +668,22 @@ mod tests {
             .borrow()
             .attach_capability(&capability);
         Ok(capability)
+    }
+
+    #[test]
+    fn actor_act_exposes_keyword_only_optional_diagnostic_sink() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        Python::attach(|py| {
+            let signature = py
+                .import("inspect")?
+                .call_method1("signature", (py.get_type::<Actor>().getattr("act")?,))?;
+            assert_eq!(
+                signature.str()?.to_str()?,
+                "(self, /, *, script, output_schema, diagnostic_sink=None)"
+            );
+            Ok::<_, PyErr>(())
+        })
+        .expect("Actor.act signature must expose the diagnostic sink contract");
     }
 
     #[test]
