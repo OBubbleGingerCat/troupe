@@ -122,6 +122,7 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
         c"<troupe.diagnostics>",
         c"troupe.diagnostics",
     )?;
+    crate::diagnostic_runtime::custom_binding::install(&diagnostics)?;
     diagnostics.add("__all__", PyList::new(py, PUBLIC_NAMES)?)?;
     module.add_submodule(&diagnostics)
 }
@@ -176,6 +177,8 @@ assert tuple(_inspect.signature(DiagnosticCapture).parameters) == (
     "agent_messages", "plans", "tool_calls", "result_validation",
     "usage", "custom_events", "tool_inputs", "tool_outputs",
 )
+assert callable(_custom_admission_hook)
+assert type(_custom_admission_hook).__module__ == "troupe.diagnostics"
 assert tuple(_inspect.signature(ToolCallDetail).parameters)[-2:] == (
     "captured_input", "captured_output",
 )
