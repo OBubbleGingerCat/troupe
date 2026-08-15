@@ -1,7 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/unit/test_diagnostic_sink_close.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_sink/seal.rs",
+    "rust/src/diagnostic_sink/shutdown.rs",
+    "rust/src/diagnostic_sink/summary.rs"
+  ],
   "removed": [],
   "generated": []
 }
