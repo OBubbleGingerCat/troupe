@@ -451,3 +451,46 @@ fn non_span_event_references_are_kind_mismatches() {
         ReferenceValidationCode::KindMismatch
     );
 }
+
+#[test]
+fn transactional_validation_commits_only_after_the_consumer_succeeds() {
+    let first = counter(RUN_A, 1, 1, empty_scope(), Vec::new());
+    let second = counter(RUN_A, 2, 2, empty_scope(), Vec::new());
+    let third = counter(
+        RUN_A,
+        3,
+        3,
+        empty_scope(),
+        vec![CausalLink::new(
+            SchemaU64::new(2),
+            CausalRelation::FollowsFrom,
+        )],
+    );
+    let mut validator = ReferenceValidator::new();
+    validator.validate(&first).unwrap();
+
+    let rejected = validator
+        .validate_then(&second, |validated| -> Result<(), &'static str> {
+            let first_consumer = validated;
+            let second_consumer = validated;
+            assert_eq!(first_consumer.event(), second_consumer.event());
+            Err("child projection failed")
+        })
+        .unwrap();
+    assert_eq!(rejected, Err("child projection failed"));
+    validator
+        .validate(&second)
+        .expect("consumer failure did not consume the event");
+
+    let accepted = validator
+        .validate_then(&third, |validated| {
+            Ok::<_, &'static str>(validated.event().header().sequence())
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted, SchemaU64::new(3));
+    assert_eq!(
+        validator.validate(&third).unwrap_err().code(),
+        ReferenceValidationCode::DuplicateSequence
+    );
+}
