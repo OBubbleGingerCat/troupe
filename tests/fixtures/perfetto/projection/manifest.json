@@ -1,0 +1,17 @@
+{
+  "schema": "troupe.perfetto.projection-fixtures",
+  "schema_version": 1,
+  "run_id": "12345678-1234-4234-9234-123456789abc",
+  "captured_watermark": "22",
+  "files": {
+    "canonical-events.json": {
+      "sha256": "6b962fefbbeabd936516cf298f99dbc67c108b97977f296f79317dbf30d449c9"
+    },
+    "expected-packets.json": {
+      "sha256": "e9c3779579e8901b9824823800108fe21dc9dc20c22f5906b38ce5d7c2861bca"
+    },
+    "expected-trace.pb": {
+      "sha256": "51350723e6c7313957f620567ead5f0282c1fe9b6227d718ae683405dbf2140f"
+    }
+  }
+}
