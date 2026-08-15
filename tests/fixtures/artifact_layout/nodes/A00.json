@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-agent-runtime/tests/diagnostic_observer.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-agent-runtime/src/diagnostics/observer.rs",
+    "rust/crates/troupe-agent-runtime/src/diagnostics/session.rs"
+  ],
   "removed": [],
   "generated": []
 }
