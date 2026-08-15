@@ -70,7 +70,7 @@ function rangeIntersectsGap(
     return true;
   }
   return compareU64(gap.affected_elapsed.end_ns, range.start_ns) >= 0
-    && compareU64(gap.affected_elapsed.start_ns, range.end_ns) <= 0;
+    && compareU64(gap.affected_elapsed.start_ns, range.end_ns) < 0;
 }
 
 export function queryDependsOnEvent(
@@ -80,11 +80,17 @@ export function queryDependsOnEvent(
   if (!kindMatches(dependency, event)) {
     return false;
   }
-  const eventScope = event.kind === "observation_gap" && event.affected_scope !== null
-    ? event.affected_scope
-    : event.scope;
-  if (dependency.scope !== null && !scopeMatches(dependency.scope, eventScope)) {
-    return false;
+  if (dependency.scope !== null) {
+    if (event.kind === "observation_gap") {
+      if (
+        event.affected_scope !== null
+        && !scopeMatches(dependency.scope, event.affected_scope)
+      ) {
+        return false;
+      }
+    } else if (!scopeMatches(dependency.scope, event.scope)) {
+      return false;
+    }
   }
   if (dependency.elapsed_range === null) {
     return true;
@@ -96,7 +102,7 @@ export function queryDependsOnEvent(
     return true;
   }
   return compareU64(event.elapsed_ns, dependency.elapsed_range.start_ns) >= 0
-    && compareU64(event.elapsed_ns, dependency.elapsed_range.end_ns) <= 0;
+    && compareU64(event.elapsed_ns, dependency.elapsed_range.end_ns) < 0;
 }
 
 export function invalidateQueries(cache: QueryCache, event: DiagnosticEvent): QueryCache {

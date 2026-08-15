@@ -11,7 +11,7 @@ import {
   presentedLiveEdge,
   reduceDiagnosticState,
 } from "../../src/state/reducer.ts";
-import { cacheQueryResult } from "../../src/state/queries.ts";
+import { cacheQueryResult, queryDependsOnEvent } from "../../src/state/queries.ts";
 import { createPresentationState } from "../../src/state/selection.ts";
 
 
@@ -213,6 +213,43 @@ describe("diagnostic state reducer", () => {
     expect(cached?.value).toEqual({ provider_total_tokens: "9" });
     expect(cached?.stale).toBe(true);
     expect(cached?.invalidated_through).toBe("11");
+  });
+
+  it("treats an unknown gap scope as a wildcard and uses half-open query ranges", () => {
+    const dependency = {
+      event_kinds: ["counter_sampled"] as const,
+      scope: { ...SCOPE, actor_id: "actor-other" },
+      elapsed_range: { start_ns: decodeU64("0"), end_ns: decodeU64("10") },
+    };
+    const boundaryEvent = event(1, {
+      kind: "counter_sampled",
+      counter_kind: "cue.active",
+      value: "1",
+    });
+    const unknownScopeGap = event(2, {
+      kind: "observation_gap",
+      producer: "runtime",
+      component: null,
+      reason: "unknown-scope",
+      dropped_count: null,
+      affected_elapsed: null,
+      affected_kind: "counter_sampled",
+      affected_scope: null,
+    });
+    const boundaryGap = event(3, {
+      kind: "observation_gap",
+      producer: "runtime",
+      component: null,
+      reason: "right-boundary",
+      dropped_count: null,
+      affected_elapsed: { start_ns: "10", end_ns: "20" },
+      affected_kind: "counter_sampled",
+      affected_scope: null,
+    });
+
+    expect(queryDependsOnEvent(dependency, boundaryEvent)).toBe(false);
+    expect(queryDependsOnEvent({ ...dependency, elapsed_range: null }, unknownScopeGap)).toBe(true);
+    expect(queryDependsOnEvent(dependency, boundaryGap)).toBe(false);
   });
 
   it("rejects a late query response when retained events or delivery lag passed its capture", () => {
