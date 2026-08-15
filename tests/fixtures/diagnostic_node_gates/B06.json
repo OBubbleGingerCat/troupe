@@ -1,8 +1,26 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/integration/test_actor_act_diagnostic_sink_preflight.py",
+      "tests/integration/test_actor_act.py",
+      "tests/unit/test_typing.py"
+    ],
+    [
+      "python",
+      "-m",
+      "mypy.stubtest",
+      "troupe",
+      "--concise"
+    ]
+  ],
   "env": {},
-  "maturin_features": [],
+  "maturin_features": [
+    "agent-test-support",
+    "diagnostics-test-support"
+  ],
   "cache_requirements": [],
   "exclusive_resources": []
 }
