@@ -125,7 +125,7 @@ impl DiagnosticRunContext {
     }
 
     #[cfg(test)]
-    fn with_hub<R>(hub: Arc<ProductionDiagnosticHub<R>>, clock: RunClock) -> Self
+    pub(crate) fn with_hub<R>(hub: Arc<ProductionDiagnosticHub<R>>, clock: RunClock) -> Self
     where
         R: MandatoryDurableReserver + 'static,
     {
