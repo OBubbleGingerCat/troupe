@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use troupe_diagnostics_core::view_protocol::{
     ArchivedViewRecordStatus, Coverage, CoverageStatus, ExcludedCounts, IncompatibilityReason,
-    MAX_PAGE_ROWS, MAX_TIME_SERIES_POINTS, OperationalCapabilities, Pagination, QueryBinding,
-    Renderer, ResultMetadata, ScopeMode, TimeRangeMode, ViewRecord, ViewResponse,
+    MAX_METRIC_SERIES, MAX_PAGE_ROWS, MAX_TIME_SERIES_POINTS, OperationalCapabilities, Pagination,
+    QueryBinding, Renderer, ResultMetadata, ScopeMode, TimeRangeMode, ViewRecord, ViewResponse,
     classify_archived_view_record, expected_bucket_width_ns,
 };
 use troupe_diagnostics_core::{id::CanonicalUuid, scalar::SchemaU64};
@@ -211,6 +211,7 @@ fn operational_versions_are_independent_and_capabilities_are_explicit() {
     assert_eq!(fixture.capabilities.view_schema_version(), 1);
     assert_eq!(fixture.capabilities.api_schema_version(), 1);
     assert_eq!(fixture.capabilities.max_page_rows(), MAX_PAGE_ROWS);
+    assert_eq!(fixture.capabilities.max_metric_series(), MAX_METRIC_SERIES);
     assert_eq!(
         fixture.capabilities.max_time_series_points(),
         MAX_TIME_SERIES_POINTS
@@ -331,4 +332,231 @@ fn public_builders_keep_downstream_query_execution_on_the_valid_wire_path() {
         }
     });
     assert!(serde_json::from_value::<ViewRecord>(incompatible_filter).is_err());
+}
+
+#[test]
+fn response_contract_closes_group_caps_count_coverage_and_incompatibility() {
+    let timeline_bytes = fixture_bytes("timeline.json");
+    let mut timeline: Value = serde_json::from_slice(&timeline_bytes).unwrap();
+    let response = timeline["response"].as_object_mut().unwrap();
+    response["binding"]["captured_watermark"] = Value::String("1".to_owned());
+    response["binding"]["captured_elapsed_end_ns"] = Value::String("20".to_owned());
+    response["binding"]["range_end_ns"] = Value::String("20".to_owned());
+    response["coverage"]["matched_count"] = Value::String("1".to_owned());
+    response["coverage"]["contributing_count"] = Value::String("1".to_owned());
+    response["rows"] = serde_json::json!([{
+        "sequence": "1",
+        "group": {
+            "dimension": {"dimension": "actor"},
+            "value": {"type": "string", "value": "actor-1"}
+        },
+        "item_type": "span",
+        "name": "cue.execution",
+        "start_ns": "10",
+        "end_ns": "20",
+        "scope": {
+            "scene_id": "scene-1",
+            "actor_id": "actor-1",
+            "cue_id": "cue-1",
+            "effect_id": null,
+            "act_id": null,
+            "tool_call_id": null,
+            "session_generation": null
+        },
+        "outcome": "completed"
+    }]);
+    let timeline_fixture: RendererFixture = serde_json::from_value(timeline.clone()).unwrap();
+    timeline_fixture
+        .response
+        .validate_for(&timeline_fixture.descriptor)
+        .unwrap();
+    let expected_group = match &timeline_fixture.descriptor {
+        ViewRecord::Timeline(record) => record.query().group_by().unwrap(),
+        _ => panic!("timeline fixture changed renderer"),
+    };
+    assert_eq!(
+        timeline_fixture.response.timeline().unwrap().rows()[0]
+            .group()
+            .unwrap()
+            .dimension(),
+        expected_group
+    );
+
+    let mut future_row = timeline.clone();
+    future_row["response"]["rows"][0]["sequence"] = Value::String("2".to_owned());
+    assert!(serde_json::from_value::<RendererFixture>(future_row).is_err());
+
+    let mut outside_range = timeline.clone();
+    outside_range["response"]["rows"][0]["start_ns"] = Value::String("20".to_owned());
+    outside_range["response"]["rows"][0]["end_ns"] = Value::String("20".to_owned());
+    assert!(serde_json::from_value::<RendererFixture>(outside_range).is_err());
+
+    let mut open_with_outcome = timeline.clone();
+    open_with_outcome["response"]["rows"][0]["end_ns"] = Value::Null;
+    assert!(serde_json::from_value::<RendererFixture>(open_with_outcome).is_err());
+
+    let mut wrong_source = timeline.clone();
+    wrong_source["response"]["rows"][0]["item_type"] = Value::String("instant".to_owned());
+    wrong_source["response"]["rows"][0]["name"] = Value::String("cue.admitted".to_owned());
+    wrong_source["response"]["rows"][0]["end_ns"] = Value::Null;
+    wrong_source["response"]["rows"][0]["outcome"] = Value::Null;
+    let wrong_source: RendererFixture = serde_json::from_value(wrong_source).unwrap();
+    assert!(
+        wrong_source
+            .response
+            .validate_for(&wrong_source.descriptor)
+            .is_err()
+    );
+
+    let selected_scope = serde_json::json!({
+        "scene_id": "scene-1",
+        "actor_id": "actor-2",
+        "cue_id": null,
+        "effect_id": null,
+        "act_id": null,
+        "tool_call_id": null,
+        "session_generation": null
+    });
+    let mut outside_selection = timeline.clone();
+    outside_selection["descriptor"]["scope"] = Value::String("selection".to_owned());
+    outside_selection["response"]["binding"]["scope"] = Value::String("selection".to_owned());
+    outside_selection["response"]["binding"]["selected_scope"] = selected_scope;
+    assert!(serde_json::from_value::<RendererFixture>(outside_selection).is_err());
+
+    let mut wrong_value = timeline.clone();
+    wrong_value["response"]["rows"][0]["group"]["value"]["value"] =
+        Value::String("actor-2".to_owned());
+    let wrong_value: RendererFixture = serde_json::from_value(wrong_value).unwrap();
+    assert!(
+        wrong_value
+            .response
+            .validate_for(&wrong_value.descriptor)
+            .is_err()
+    );
+
+    timeline["response"]["rows"][0]["group"]["dimension"] = serde_json::json!({"dimension": "cue"});
+    let wrong_group: RendererFixture = serde_json::from_value(timeline).unwrap();
+    assert!(
+        wrong_group
+            .response
+            .validate_for(&wrong_group.descriptor)
+            .is_err()
+    );
+
+    let metric_bytes = fixture_bytes("metric.json");
+    let mut metric_boundary: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    let metric_series = metric_boundary["response"]["series"][0].clone();
+    metric_boundary["response"]["series"] = Value::Array(
+        (0..MAX_METRIC_SERIES)
+            .map(|index| {
+                let mut series = metric_series.clone();
+                series["group"]["value"]["value"] = Value::String(format!("act-{index}"));
+                series
+            })
+            .collect(),
+    );
+    let metric_boundary: RendererFixture = serde_json::from_value(metric_boundary).unwrap();
+    metric_boundary
+        .response
+        .validate_for(&metric_boundary.descriptor)
+        .unwrap();
+
+    let mut duplicate_metric: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    let duplicate_series = duplicate_metric["response"]["series"][0].clone();
+    duplicate_metric["response"]["series"] =
+        Value::Array(vec![duplicate_series.clone(), duplicate_series]);
+    assert!(serde_json::from_value::<RendererFixture>(duplicate_metric).is_err());
+
+    let mut invalid_group_value: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    invalid_group_value["response"]["series"][0]["group"]["value"] =
+        serde_json::json!({"type": "null"});
+    assert!(serde_json::from_value::<RendererFixture>(invalid_group_value).is_err());
+
+    let mut metric: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    let one_series = metric["response"]["series"][0].clone();
+    metric["response"]["series"] = Value::Array(vec![one_series; 65]);
+    assert!(serde_json::from_value::<RendererFixture>(metric).is_err());
+
+    let mut count: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    count["descriptor"]["query"]["reducer"] = Value::String("count".to_owned());
+    count["response"]["series"][0]["value"] = serde_json::json!({
+        "aggregate": "exact",
+        "value": {"type": "decimal", "value": "1.5"}
+    });
+    let decimal_count: RendererFixture = serde_json::from_value(count.clone()).unwrap();
+    assert!(
+        decimal_count
+            .response
+            .validate_for(&decimal_count.descriptor)
+            .is_err()
+    );
+    count["response"]["series"][0]["value"] = serde_json::json!({
+        "aggregate": "exact",
+        "value": {"type": "integer", "value": "3"}
+    });
+    let integer_count: RendererFixture = serde_json::from_value(count).unwrap();
+    integer_count
+        .response
+        .validate_for(&integer_count.descriptor)
+        .unwrap();
+
+    let mut fractional_tokens: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    fractional_tokens["response"]["series"][0]["value"]["numerator"] =
+        serde_json::json!({"type": "decimal", "value": "1.5"});
+    let fractional_tokens: RendererFixture = serde_json::from_value(fractional_tokens).unwrap();
+    assert!(
+        fractional_tokens
+            .response
+            .validate_for(&fractional_tokens.descriptor)
+            .is_err()
+    );
+
+    let mut inconsistent_coverage: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    inconsistent_coverage["response"]["coverage"]["matched_count"] = Value::String("6".to_owned());
+    assert!(serde_json::from_value::<RendererFixture>(inconsistent_coverage).is_err());
+
+    let mut incompatible: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    incompatible["response"]["incompatible"] = serde_json::json!({
+        "reason": "corrupt_record",
+        "supported_view_schema_version": 1,
+        "record_view_schema_version": 1
+    });
+    assert!(serde_json::from_value::<RendererFixture>(incompatible).is_err());
+
+    let mut unavailable: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    unavailable["response"]["incompatible"] = serde_json::json!({
+        "reason": "corrupt_record",
+        "supported_view_schema_version": 1,
+        "record_view_schema_version": 1
+    });
+    unavailable["response"]["coverage"]["status"] = Value::String("unavailable".to_owned());
+    unavailable["response"]["coverage"]["contributing_count"] = Value::String("0".to_owned());
+    unavailable["response"]["coverage"]["excluded_count"] = Value::String("5".to_owned());
+    unavailable["response"]["coverage"]["excluded"]["missing_values"] =
+        Value::String("4".to_owned());
+    unavailable["response"]["series"] = Value::Array(Vec::new());
+    serde_json::from_value::<RendererFixture>(unavailable.clone()).unwrap();
+    unavailable["response"]["incompatible"]["reason"] =
+        Value::String("newer_view_schema".to_owned());
+    unavailable["response"]["incompatible"]["record_view_schema_version"] =
+        Value::Number(256_u64.into());
+    serde_json::from_value::<RendererFixture>(unavailable).unwrap();
+
+    let timeseries_bytes = fixture_bytes("timeseries.json");
+    let mut timeseries: Value = serde_json::from_slice(&timeseries_bytes).unwrap();
+    timeseries["response"]["series"] = Value::Array(Vec::new());
+    let empty_grouped: RendererFixture = serde_json::from_value(timeseries).unwrap();
+    empty_grouped
+        .response
+        .validate_for(&empty_grouped.descriptor)
+        .unwrap();
+
+    let mut unsafe_key: Value = serde_json::from_slice(&timeseries_bytes).unwrap();
+    unsafe_key["descriptor"]["query"]["group_by"]["key"] = Value::String("<script>".to_owned());
+    assert!(serde_json::from_value::<RendererFixture>(unsafe_key).is_err());
+
+    let table_bytes = fixture_bytes("table.json");
+    let mut unordered_table: Value = serde_json::from_slice(&table_bytes).unwrap();
+    unordered_table["response"]["rows"][1]["sequence"] = Value::String("1".to_owned());
+    assert!(serde_json::from_value::<RendererFixture>(unordered_table).is_err());
 }

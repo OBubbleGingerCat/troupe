@@ -15,6 +15,7 @@ use crate::{
 pub const VIEW_SCHEMA_VERSION: u8 = 1;
 pub const API_SCHEMA_VERSION: u8 = 1;
 pub const MAX_PAGE_ROWS: u16 = 500;
+pub const MAX_METRIC_SERIES: u16 = 64;
 pub const MAX_TIME_SERIES_POINTS: u16 = 1024;
 pub const MAX_TIME_SERIES_SERIES: u16 = 64;
 pub const MAX_VIEW_ID_BYTES: usize = 64;
@@ -936,6 +937,7 @@ pub struct OperationalCapabilities {
     view_schema_version: u8,
     api_schema_version: u8,
     max_page_rows: u16,
+    max_metric_series: u16,
     max_time_series_points: u16,
     max_time_series_series: u16,
     bucket_origin: BucketOrigin,
@@ -951,6 +953,7 @@ impl Default for OperationalCapabilities {
             view_schema_version: VIEW_SCHEMA_VERSION,
             api_schema_version: API_SCHEMA_VERSION,
             max_page_rows: MAX_PAGE_ROWS,
+            max_metric_series: MAX_METRIC_SERIES,
             max_time_series_points: MAX_TIME_SERIES_POINTS,
             max_time_series_series: MAX_TIME_SERIES_SERIES,
             bucket_origin: BucketOrigin::Run,
@@ -967,6 +970,7 @@ impl OperationalCapabilities {
             || self.view_schema_version != VIEW_SCHEMA_VERSION
             || self.api_schema_version != API_SCHEMA_VERSION
             || self.max_page_rows != MAX_PAGE_ROWS
+            || self.max_metric_series != MAX_METRIC_SERIES
             || self.max_time_series_points != MAX_TIME_SERIES_POINTS
             || self.max_time_series_series != MAX_TIME_SERIES_SERIES
             || !self.exact_mean_components
@@ -989,6 +993,9 @@ impl OperationalCapabilities {
     }
     pub const fn max_page_rows(&self) -> u16 {
         self.max_page_rows
+    }
+    pub const fn max_metric_series(&self) -> u16 {
+        self.max_metric_series
     }
     pub const fn max_time_series_points(&self) -> u16 {
         self.max_time_series_points
@@ -1052,6 +1059,21 @@ impl QueryBinding {
         if self.scope == ScopeMode::Run && self.selected_scope.is_some() {
             return Err(ViewProtocolError::new(
                 "run scope binding cannot select a scope",
+            ));
+        }
+        if let Some(scope) = &self.selected_scope
+            && (scope.effect_id().is_some()
+                || scope.tool_call_id().is_some()
+                || (scope.scene_id().is_none()
+                    && scope.actor_id().is_none()
+                    && scope.cue_id().is_none()
+                    && scope.act_id().is_none())
+                || scope
+                    .session_generation()
+                    .is_some_and(|value| value.get() == 0))
+        {
+            return Err(ViewProtocolError::new(
+                "selected scope is not a Run/Scene/Actor/Cue/Act scope",
             ));
         }
         Ok(())
@@ -1166,13 +1188,11 @@ impl Coverage {
     }
 
     pub fn validate(&self) -> Result<(), ViewProtocolError> {
-        if self.contributing_count.get() > self.matched_count.get()
-            || self.excluded_count.get() > self.matched_count.get()
-            || self
-                .contributing_count
-                .get()
-                .checked_add(self.excluded_count.get())
-                .is_none_or(|total| total > self.matched_count.get())
+        if self
+            .contributing_count
+            .get()
+            .checked_add(self.excluded_count.get())
+            != Some(self.matched_count.get())
             || self.excluded.checked_total() != Some(self.excluded_count.get())
         {
             return Err(ViewProtocolError::new("coverage counts are inconsistent"));
@@ -1257,12 +1277,12 @@ impl Pagination {
 pub struct IncompatibleView {
     reason: IncompatibilityReason,
     supported_view_schema_version: u8,
-    record_view_schema_version: Option<u8>,
+    record_view_schema_version: Option<u64>,
 }
 
 impl IncompatibleView {
-    pub fn newer(record_view_schema_version: u8) -> Result<Self, ViewProtocolError> {
-        if record_view_schema_version <= VIEW_SCHEMA_VERSION {
+    pub fn newer(record_view_schema_version: u64) -> Result<Self, ViewProtocolError> {
+        if record_view_schema_version <= u64::from(VIEW_SCHEMA_VERSION) {
             return Err(ViewProtocolError::new("newer record version is not newer"));
         }
         Ok(Self {
@@ -1272,18 +1292,44 @@ impl IncompatibleView {
         })
     }
 
-    pub const fn corrupt(record_view_schema_version: Option<u8>) -> Self {
-        Self {
+    pub fn corrupt(record_view_schema_version: Option<u64>) -> Result<Self, ViewProtocolError> {
+        let value = Self {
             reason: IncompatibilityReason::CorruptRecord,
             supported_view_schema_version: VIEW_SCHEMA_VERSION,
             record_view_schema_version,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    fn validate(&self) -> Result<(), ViewProtocolError> {
+        if self.supported_view_schema_version != VIEW_SCHEMA_VERSION {
+            return Err(ViewProtocolError::new(
+                "incompatible state has wrong supported version",
+            ));
+        }
+        match (self.reason, self.record_view_schema_version) {
+            (IncompatibilityReason::NewerViewSchema, Some(version))
+                if version > u64::from(VIEW_SCHEMA_VERSION) =>
+            {
+                Ok(())
+            }
+            (IncompatibilityReason::CorruptRecord, None) => Ok(()),
+            (IncompatibilityReason::CorruptRecord, Some(version))
+                if version <= u64::from(VIEW_SCHEMA_VERSION) =>
+            {
+                Ok(())
+            }
+            _ => Err(ViewProtocolError::new(
+                "incompatible reason and record version disagree",
+            )),
         }
     }
 
     pub const fn reason(&self) -> IncompatibilityReason {
         self.reason
     }
-    pub const fn record_view_schema_version(&self) -> Option<u8> {
+    pub const fn record_view_schema_version(&self) -> Option<u64> {
         self.record_view_schema_version
     }
 }
@@ -1345,12 +1391,8 @@ impl ResultMetadata {
             pagination.validate()?;
         }
         self.capabilities.validate()?;
-        if let Some(incompatible) = &self.incompatible
-            && incompatible.supported_view_schema_version != VIEW_SCHEMA_VERSION
-        {
-            return Err(ViewProtocolError::new(
-                "incompatible state has wrong supported version",
-            ));
+        if let Some(incompatible) = &self.incompatible {
+            incompatible.validate()?;
         }
         if self.truncated != (self.coverage.excluded.resource_truncated.get() > 0) {
             return Err(ViewProtocolError::new(
@@ -1399,6 +1441,10 @@ impl ExactNumber {
             Self::Integer(value) => value.as_str(),
             Self::Decimal(value) => value.as_str(),
         }
+    }
+
+    fn is_nonnegative_integer(&self) -> bool {
+        matches!(self, Self::Integer(value) if !value.as_str().starts_with('-'))
     }
 }
 
@@ -1455,8 +1501,33 @@ impl GroupKey {
         dimension: GroupDimension,
         value: DiagnosticScalar,
     ) -> Result<Self, ViewProtocolError> {
-        dimension.validate()?;
-        Ok(Self { dimension, value })
+        let result = Self { dimension, value };
+        result.validate()?;
+        Ok(result)
+    }
+
+    fn validate(&self) -> Result<(), ViewProtocolError> {
+        self.dimension.validate()?;
+        let compatible = match (&self.dimension, &self.value) {
+            (
+                GroupDimension::Scene
+                | GroupDimension::Actor
+                | GroupDimension::Cue
+                | GroupDimension::Act
+                | GroupDimension::EventName
+                | GroupDimension::CustomName,
+                DiagnosticScalar::String(_),
+            ) => true,
+            (GroupDimension::CustomDimension { .. }, DiagnosticScalar::Null) => false,
+            (GroupDimension::CustomDimension { .. } | GroupDimension::Attribute { .. }, _) => true,
+            _ => false,
+        };
+        if !compatible {
+            return Err(ViewProtocolError::new(
+                "group value is incompatible with its dimension",
+            ));
+        }
+        Ok(())
     }
 
     pub const fn dimension(&self) -> &GroupDimension {
@@ -1471,6 +1542,7 @@ impl GroupKey {
 #[serde(deny_unknown_fields)]
 pub struct TimelineRow {
     sequence: SchemaU64,
+    group: Option<GroupKey>,
     item_type: TimelineItemType,
     name: String,
     start_ns: SchemaU64,
@@ -1483,6 +1555,7 @@ impl TimelineRow {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         sequence: SchemaU64,
+        group: Option<GroupKey>,
         item_type: TimelineItemType,
         name: String,
         start_ns: SchemaU64,
@@ -1492,6 +1565,7 @@ impl TimelineRow {
     ) -> Result<Self, ViewProtocolError> {
         let value = Self {
             sequence,
+            group,
             item_type,
             name,
             start_ns,
@@ -1504,6 +1578,9 @@ impl TimelineRow {
     }
 
     fn validate(&self) -> Result<(), ViewProtocolError> {
+        if let Some(group) = &self.group {
+            group.validate()?;
+        }
         if self.name.is_empty() || self.name.len() > MAX_CUSTOM_NAME_BYTES || !self.name.is_ascii()
         {
             return Err(ViewProtocolError::new(
@@ -1517,6 +1594,11 @@ impl TimelineRow {
                 {
                     return Err(ViewProtocolError::new("span row ends before it starts"));
                 }
+                if self.end_ns.is_some() != self.outcome.is_some() {
+                    return Err(ViewProtocolError::new(
+                        "span row completion and outcome disagree",
+                    ));
+                }
             }
             TimelineItemType::Instant => {
                 if self.end_ns.is_some() || self.outcome.is_some() {
@@ -1529,6 +1611,9 @@ impl TimelineRow {
 
     pub const fn sequence(&self) -> SchemaU64 {
         self.sequence
+    }
+    pub const fn group(&self) -> Option<&GroupKey> {
+        self.group.as_ref()
     }
     pub const fn item_type(&self) -> TimelineItemType {
         self.item_type
@@ -1568,6 +1653,9 @@ impl MetricSeries {
     }
 
     fn validate(&self) -> Result<(), ViewProtocolError> {
+        if let Some(group) = &self.group {
+            group.validate()?;
+        }
         self.coverage.validate()?;
         if self.value.is_none() && self.coverage.contributing_count().get() != 0 {
             return Err(ViewProtocolError::new(
@@ -1879,6 +1967,12 @@ impl ViewResponse {
 
     pub fn validate(&self) -> Result<(), ViewProtocolError> {
         self.metadata().validate()?;
+        let incompatible = self.metadata().incompatible.is_some();
+        if incompatible && self.metadata().coverage.status != CoverageStatus::Unavailable {
+            return Err(ViewProtocolError::new(
+                "incompatible result must have unavailable coverage",
+            ));
+        }
         match self {
             Self::Timeline(result) => {
                 let pagination = result.metadata.pagination.as_ref().ok_or_else(|| {
@@ -1887,8 +1981,20 @@ impl ViewResponse {
                 if result.rows.len() > usize::from(pagination.page_size) {
                     return Err(ViewProtocolError::new("timeline result exceeds page size"));
                 }
+                if incompatible && !result.rows.is_empty() {
+                    return Err(ViewProtocolError::new(
+                        "incompatible timeline result contains rows",
+                    ));
+                }
+                let mut previous_sequence = None;
                 for row in &result.rows {
                     row.validate()?;
+                    validate_row_sequence(
+                        row.sequence.get(),
+                        &mut previous_sequence,
+                        result.metadata.binding.captured_watermark.get(),
+                    )?;
+                    validate_timeline_row_binding(row, &result.metadata.binding)?;
                 }
                 Ok(())
             }
@@ -1896,6 +2002,15 @@ impl ViewResponse {
                 if result.metadata.pagination.is_some() {
                     return Err(ViewProtocolError::new("metric result cannot be paginated"));
                 }
+                if result.series.len() > usize::from(MAX_METRIC_SERIES) {
+                    return Err(ViewProtocolError::new("metric result exceeds series cap"));
+                }
+                if incompatible && !result.series.is_empty() {
+                    return Err(ViewProtocolError::new(
+                        "incompatible metric result contains series",
+                    ));
+                }
+                validate_unique_group_keys(result.series.iter().map(|item| item.group.as_ref()))?;
                 for series in &result.series {
                     series.validate()?;
                 }
@@ -1913,6 +2028,11 @@ impl ViewResponse {
                         "table result shape is out of bounds",
                     ));
                 }
+                if incompatible && !result.rows.is_empty() {
+                    return Err(ViewProtocolError::new(
+                        "incompatible table result contains rows",
+                    ));
+                }
                 for column in &result.columns {
                     column.validate()?;
                 }
@@ -1923,15 +2043,35 @@ impl ViewResponse {
                 {
                     return Err(ViewProtocolError::new("table row does not match columns"));
                 }
+                let mut previous_sequence = None;
+                for row in &result.rows {
+                    validate_row_sequence(
+                        row.sequence.get(),
+                        &mut previous_sequence,
+                        result.metadata.binding.captured_watermark.get(),
+                    )?;
+                }
                 Ok(())
             }
-            Self::TimeSeries(result) => validate_time_series(result),
+            Self::TimeSeries(result) => {
+                if incompatible && !result.series.is_empty() {
+                    return Err(ViewProtocolError::new(
+                        "incompatible time-series result contains series",
+                    ));
+                }
+                validate_time_series(result)
+            }
         }
     }
 
     pub fn validate_for(&self, record: &ViewRecord) -> Result<(), ViewProtocolError> {
         record.validate()?;
         self.validate()?;
+        if self.metadata().incompatible.is_some() {
+            return Err(ViewProtocolError::new(
+                "compatible descriptor has an incompatible result",
+            ));
+        }
         if self.renderer() != record.renderer()
             || self.metadata().view_id() != record.id()
             || self.metadata().binding().time_range() != record.time_range()
@@ -1942,7 +2082,13 @@ impl ViewResponse {
             ));
         }
         match (self, record) {
-            (Self::Timeline(_), ViewRecord::Timeline(_)) => Ok(()),
+            (Self::Timeline(result), ViewRecord::Timeline(record)) => {
+                for row in &result.rows {
+                    validate_timeline_group(row, record.query().group_by())?;
+                    validate_timeline_source(row, record.query().source())?;
+                }
+                Ok(())
+            }
             (Self::Metric(result), ViewRecord::Metric(record)) => {
                 validate_aggregate_series(&result.series, record.query())
             }
@@ -1974,21 +2120,101 @@ fn validate_aggregate_series(
     series: &[MetricSeries],
     query: &MetricQuery,
 ) -> Result<(), ViewProtocolError> {
+    validate_unique_group_keys(series.iter().map(|item| item.group.as_ref()))?;
     for item in series {
         validate_group_key(item.group.as_ref(), query.group_by())?;
         validate_aggregate_kind(item.value.as_ref(), query.reducer())?;
+        validate_aggregate_source(item.value.as_ref(), query.source())?;
     }
     Ok(())
+}
+
+fn validate_row_sequence(
+    sequence: u64,
+    previous: &mut Option<u64>,
+    captured_watermark: u64,
+) -> Result<(), ViewProtocolError> {
+    if sequence == 0
+        || sequence > captured_watermark
+        || previous.is_some_and(|previous| sequence <= previous)
+    {
+        return Err(ViewProtocolError::new(
+            "row sequence is outside the captured ordered prefix",
+        ));
+    }
+    *previous = Some(sequence);
+    Ok(())
+}
+
+fn validate_timeline_row_binding(
+    row: &TimelineRow,
+    binding: &QueryBinding,
+) -> Result<(), ViewProtocolError> {
+    let captured_end = binding.captured_elapsed_end_ns.get();
+    let range_start = binding.range_start_ns.get();
+    let range_end = binding.range_end_ns.get();
+    let start = row.start_ns.get();
+    if start > captured_end || row.end_ns.is_some_and(|end| end.get() > captured_end) {
+        return Err(ViewProtocolError::new(
+            "timeline row lies beyond captured time",
+        ));
+    }
+    let intersects = match row.item_type {
+        TimelineItemType::Instant => range_start <= start && start < range_end,
+        TimelineItemType::Span => {
+            let end = row.end_ns.map_or(captured_end, SchemaU64::get);
+            range_start < range_end && start < range_end && end > range_start
+        }
+    };
+    if !intersects {
+        return Err(ViewProtocolError::new(
+            "timeline row does not intersect the captured query range",
+        ));
+    }
+    if let Some(selected_scope) = binding.selected_scope.as_ref()
+        && !scope_contains(selected_scope, &row.scope)
+    {
+        return Err(ViewProtocolError::new(
+            "timeline row lies outside the selected scope",
+        ));
+    }
+    Ok(())
+}
+
+fn scope_contains(parent: &DiagnosticScope, child: &DiagnosticScope) -> bool {
+    parent
+        .scene_id()
+        .is_none_or(|value| child.scene_id() == Some(value))
+        && parent
+            .actor_id()
+            .is_none_or(|value| child.actor_id() == Some(value))
+        && parent
+            .cue_id()
+            .is_none_or(|value| child.cue_id() == Some(value))
+        && parent
+            .effect_id()
+            .is_none_or(|value| child.effect_id() == Some(value))
+        && parent
+            .act_id()
+            .is_none_or(|value| child.act_id() == Some(value))
+        && parent
+            .tool_call_id()
+            .is_none_or(|value| child.tool_call_id() == Some(value))
+        && parent
+            .session_generation()
+            .is_none_or(|value| child.session_generation() == Some(value))
 }
 
 fn validate_time_series_aggregates(
     series: &[TimeSeriesSeries],
     query: &TimeSeriesQuery,
 ) -> Result<(), ViewProtocolError> {
+    validate_unique_group_keys(series.iter().map(|item| item.group.as_ref()))?;
     for item in series {
         validate_group_key(item.group.as_ref(), query.group_by())?;
         for point in &item.points {
             validate_aggregate_kind(point.value.as_ref(), query.reducer())?;
+            validate_aggregate_source(point.value.as_ref(), query.source())?;
         }
     }
     Ok(())
@@ -1998,6 +2224,9 @@ fn validate_group_key(
     actual: Option<&GroupKey>,
     expected: Option<&GroupDimension>,
 ) -> Result<(), ViewProtocolError> {
+    if let Some(actual) = actual {
+        actual.validate()?;
+    }
     match (actual, expected) {
         (None, None) => Ok(()),
         (Some(actual), Some(expected)) if actual.dimension() == expected => Ok(()),
@@ -2007,18 +2236,112 @@ fn validate_group_key(
     }
 }
 
+fn validate_unique_group_keys<'a>(
+    groups: impl IntoIterator<Item = Option<&'a GroupKey>>,
+) -> Result<(), ViewProtocolError> {
+    let mut seen = Vec::new();
+    for group in groups {
+        if seen.contains(&group) {
+            return Err(ViewProtocolError::new(
+                "result contains duplicate group keys",
+            ));
+        }
+        seen.push(group);
+    }
+    Ok(())
+}
+
+fn validate_timeline_group(
+    row: &TimelineRow,
+    expected: Option<&GroupDimension>,
+) -> Result<(), ViewProtocolError> {
+    validate_group_key(row.group.as_ref(), expected)?;
+    let Some(group) = row.group.as_ref() else {
+        return Ok(());
+    };
+    let DiagnosticScalar::String(value) = group.value() else {
+        return Ok(());
+    };
+    let expected_value = match group.dimension() {
+        GroupDimension::Scene => row.scope.scene_id().map(|value| value.as_str()),
+        GroupDimension::Actor => row.scope.actor_id().map(|value| value.as_str()),
+        GroupDimension::Cue => row.scope.cue_id().map(|value| value.as_str()),
+        GroupDimension::Act => row.scope.act_id().map(|value| value.as_str()),
+        GroupDimension::EventName | GroupDimension::CustomName => Some(row.name()),
+        GroupDimension::Attribute { .. } | GroupDimension::CustomDimension { .. } => return Ok(()),
+    };
+    if expected_value != Some(value.as_str()) {
+        return Err(ViewProtocolError::new(
+            "timeline group value differs from its row",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_timeline_source(
+    row: &TimelineRow,
+    source: &TimelineSource,
+) -> Result<(), ViewProtocolError> {
+    let (expected_type, expected_name) = match source {
+        TimelineSource::Span { selector } => (
+            TimelineItemType::Span,
+            match selector {
+                SpanSelector::BuiltIn { kind } => kind.as_str(),
+                SpanSelector::Custom { name } => name,
+            },
+        ),
+        TimelineSource::Instant { selector } => (
+            TimelineItemType::Instant,
+            match selector {
+                InstantSelector::BuiltIn { kind } => kind.as_str(),
+                InstantSelector::Custom { name } => name,
+            },
+        ),
+    };
+    if row.item_type != expected_type || row.name != expected_name {
+        return Err(ViewProtocolError::new(
+            "timeline row differs from its query source",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_aggregate_kind(
     value: Option<&AggregateValue>,
     reducer: Reducer,
 ) -> Result<(), ViewProtocolError> {
     let compatible = match (value, reducer) {
         (None, _) | (Some(AggregateValue::Mean { .. }), Reducer::Mean) => true,
+        (Some(AggregateValue::Exact { value }), Reducer::Count) => value.is_nonnegative_integer(),
         (Some(AggregateValue::Exact { .. }), reducer) => reducer != Reducer::Mean,
         (Some(AggregateValue::Mean { .. }), _) => false,
     };
     if !compatible {
         return Err(ViewProtocolError::new(
             "aggregate value shape differs from reducer",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_aggregate_source(
+    value: Option<&AggregateValue>,
+    source: &MetricSource,
+) -> Result<(), ViewProtocolError> {
+    if !matches!(
+        source,
+        MetricSource::CompletedSpanDuration { .. } | MetricSource::ActToken { .. }
+    ) {
+        return Ok(());
+    }
+    let exact = match value {
+        None => return Ok(()),
+        Some(AggregateValue::Exact { value }) => value,
+        Some(AggregateValue::Mean { numerator, .. }) => numerator,
+    };
+    if !exact.is_nonnegative_integer() {
+        return Err(ViewProtocolError::new(
+            "integral query source produced a non-integral aggregate",
         ));
     }
     Ok(())
@@ -2046,11 +2369,12 @@ fn validate_time_series(result: &TimeSeriesResult) -> Result<(), ViewProtocolErr
             "time-series result cannot be paginated",
         ));
     }
-    if result.series.is_empty() || result.series.len() > usize::from(MAX_TIME_SERIES_SERIES) {
+    if result.series.len() > usize::from(MAX_TIME_SERIES_SERIES) {
         return Err(ViewProtocolError::new(
             "time-series series count is out of bounds",
         ));
     }
+    validate_unique_group_keys(result.series.iter().map(|item| item.group.as_ref()))?;
     let binding = &result.metadata.binding;
     let range_start = binding.range_start_ns.get();
     let range_end = binding.range_end_ns.get();
@@ -2065,6 +2389,9 @@ fn validate_time_series(result: &TimeSeriesResult) -> Result<(), ViewProtocolErr
         return Err(ViewProtocolError::new("time-series exceeds point cap"));
     }
     for series in &result.series {
+        if let Some(group) = &series.group {
+            group.validate()?;
+        }
         if series.points.len() != expected_buckets.len() {
             return Err(ViewProtocolError::new(
                 "time-series does not emit every bucket",
@@ -2185,15 +2512,7 @@ fn validate_plain_title(value: &str) -> Result<(), ViewProtocolError> {
     {
         return Err(ViewProtocolError::new("view title is out of bounds"));
     }
-    let lower = value.to_ascii_lowercase();
-    if value.contains(['<', '>', '`'])
-        || lower.contains("javascript:")
-        || lower.contains("data:text/html")
-        || lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains("url(")
-        || lower.contains("@import")
-    {
+    if contains_forbidden_markup(value) {
         return Err(ViewProtocolError::new("view title must be plain text"));
     }
     Ok(())
@@ -2223,5 +2542,21 @@ fn validate_custom_key(value: &str) -> Result<(), ViewProtocolError> {
     {
         return Err(ViewProtocolError::new("custom key is out of bounds"));
     }
+    if contains_forbidden_markup(value) {
+        return Err(ViewProtocolError::new(
+            "custom key must not contain executable markup or an external URL",
+        ));
+    }
     Ok(())
+}
+
+fn contains_forbidden_markup(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    value.contains(['<', '>', '`'])
+        || lower.contains("javascript:")
+        || lower.contains("data:text/html")
+        || lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains("url(")
+        || lower.contains("@import")
 }

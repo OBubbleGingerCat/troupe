@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,6 +220,7 @@ TOKEN_METRICS: Final = frozenset(
     }
 )
 MAX_PAGE_ROWS: Final = 500
+MAX_METRIC_SERIES: Final = 64
 MAX_TIME_SERIES_POINTS: Final = 1024
 MAX_TIME_SERIES_SERIES: Final = 64
 VIEW_ID: Final = re.compile(r"[a-z][a-z0-9_]*\Z")
@@ -1146,7 +1148,11 @@ def _view_id(value: Any, path: str) -> str:
 
 def _plain_title(value: Any, path: str) -> str:
     text = _string(value, path)
-    if not text or len(text.encode("utf-8")) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in text):
+    if (
+        not text
+        or len(text.encode("utf-8")) > 128
+        or any(unicodedata.category(char) == "Cc" for char in text)
+    ):
         _fail("title", path, "plain-text title is out of bounds")
     lower = text.lower()
     if (
@@ -1158,6 +1164,21 @@ def _plain_title(value: Any, path: str) -> str:
     ):
         _fail("title", path, "title contains executable markup or an external URL")
     return text
+
+
+def _view_custom_key(value: Any, path: str) -> str:
+    key = _custom_key(value, path)
+    lower = key.lower()
+    if (
+        any(unicodedata.category(char) == "Cc" for char in key)
+        or any(marker in key for marker in ("<", ">", "`"))
+        or any(
+            marker in lower
+            for marker in ("javascript:", "data:text/html", "http://", "https://", "url(", "@import")
+        )
+    ):
+        _fail("custom_key", path, "key contains executable markup or an external URL")
+    return key
 
 
 def _selector(value: Any, path: str, builtins: frozenset[str]) -> str:
@@ -1186,7 +1207,7 @@ def _group_dimension(value: Any, path: str) -> None:
     )
     if kind in {"attribute", "custom_dimension"}:
         _closed(dimension, frozenset({"dimension", "key"}), path)
-        _custom_key(dimension["key"], f"{path}.key")
+        _view_custom_key(dimension["key"], f"{path}.key")
     else:
         _closed(dimension, frozenset({"dimension"}), path)
 
@@ -1206,11 +1227,11 @@ def _query_filter(value: Any, path: str) -> None:
         _enum(item["value"], SPAN_OUTCOMES, f"{path}.value")
     elif kind == "attribute_equals":
         _closed(item, frozenset({"filter", "key", "value"}), path)
-        _custom_key(item["key"], f"{path}.key")
+        _view_custom_key(item["key"], f"{path}.key")
         _tagged_scalar(item["value"], f"{path}.value", attribute=False)
     else:
         _closed(item, frozenset({"filter", "key"}), path)
-        _custom_key(item["key"], f"{path}.key")
+        _view_custom_key(item["key"], f"{path}.key")
 
 
 def _query_filters(value: Any, path: str) -> None:
@@ -1289,7 +1310,7 @@ def _table_column(value: Any, path: str) -> None:
     )
     if kind == "attribute":
         _closed(column, frozenset({"column", "key"}), path)
-        _custom_key(column["key"], f"{path}.key")
+        _view_custom_key(column["key"], f"{path}.key")
     elif kind == "token":
         _closed(column, frozenset({"column", "metric"}), path)
         _enum(column["metric"], TOKEN_METRICS, f"{path}.metric")
@@ -1392,6 +1413,7 @@ def _capabilities(value: Any, path: str) -> None:
         "view_schema_version": 1,
         "api_schema_version": 1,
         "max_page_rows": 500,
+        "max_metric_series": 64,
         "max_time_series_points": 1024,
         "max_time_series_series": 64,
         "bucket_origin": "run",
@@ -1429,7 +1451,13 @@ def _binding(value: Any, path: str, record: dict[str, Any]) -> tuple[int, int]:
     if mode != record["time_range"] or scope != record["scope"]:
         _fail("binding", path, "response binding does not match descriptor")
     if binding["selected_scope"] is not None:
-        _scope(binding["selected_scope"], f"{path}.selected_scope")
+        selected = _scope(binding["selected_scope"], f"{path}.selected_scope")
+        if (
+            selected["effect_id"] is not None
+            or selected["tool_call_id"] is not None
+            or all(selected[field] is None for field in ("scene_id", "actor_id", "cue_id", "act_id"))
+        ):
+            _fail("binding", f"{path}.selected_scope", "selection is not a domain scope")
     if scope == "run" and binding["selected_scope"] is not None:
         _fail("binding", f"{path}.selected_scope", "run scope cannot contain selection")
     return start, end
@@ -1455,9 +1483,7 @@ def _coverage(value: Any, path: str) -> dict[str, Any]:
     )
     reason_total = sum(_u64(number, f"{path}.excluded.{name}") for name, number in reasons.items())
     if (
-        contributing > matched
-        or excluded_count > matched
-        or contributing + excluded_count > matched
+        contributing + excluded_count != matched
         or reason_total != excluded_count
     ):
         _fail("coverage", path, "matched, contributing, or excluded counts are inconsistent")
@@ -1510,6 +1536,13 @@ def _group_key(value: Any, path: str) -> dict[str, Any] | None:
     _closed(group, frozenset({"dimension", "value"}), path)
     _group_dimension(group["dimension"], f"{path}.dimension")
     _tagged_scalar(group["value"], f"{path}.value", attribute=False)
+    dimension = group["dimension"]["dimension"]
+    scalar_type = group["value"]["type"]
+    if dimension in {"scene", "actor", "cue", "act", "event_name", "custom_name"}:
+        if scalar_type != "string":
+            _fail("group", f"{path}.value", "built-in group value is not a string")
+    elif dimension == "custom_dimension" and scalar_type == "null":
+        _fail("group", f"{path}.value", "custom dimension group value is null")
     return group
 
 
@@ -1536,9 +1569,22 @@ def _response_common(response: dict[str, Any], path: str, record: dict[str, Any]
             frozenset({"reason", "supported_view_schema_version", "record_view_schema_version"}),
             f"{path}.incompatible",
         )
-        _enum(state["reason"], frozenset({"newer_view_schema", "corrupt_record"}), f"{path}.incompatible.reason")
+        reason = _enum(
+            state["reason"],
+            frozenset({"newer_view_schema", "corrupt_record"}),
+            f"{path}.incompatible.reason",
+        )
         if state["supported_view_schema_version"] != 1:
             _fail("view_schema_version", f"{path}.incompatible", "wrong supported version")
+        record_version = state["record_view_schema_version"]
+        if record_version is not None and type(record_version) is not int:
+            _fail("view_schema_version", f"{path}.incompatible", "record version is not an integer")
+        if reason == "newer_view_schema" and (
+            type(record_version) is not int or record_version <= 1
+        ):
+            _fail("view_schema_version", f"{path}.incompatible", "newer reason is not newer")
+        if reason == "corrupt_record" and type(record_version) is int and record_version > 1:
+            _fail("view_schema_version", f"{path}.incompatible", "newer record is not corrupt")
     _capabilities(response["capabilities"], f"{path}.capabilities")
     return start, end, pagination
 
@@ -1560,6 +1606,9 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
     }[renderer]
     _closed(response, frozenset(common | data_fields), path)
     start, end, pagination = _response_common(response, path, record)
+    incompatible = response["incompatible"] is not None
+    if incompatible and response["coverage"]["status"] != "unavailable":
+        _fail("incompatible", path, "incompatible result coverage is not unavailable")
     if renderer in {"timeline", "table"}:
         if pagination is None:
             _fail("pagination", f"{path}.pagination", "row renderer requires pagination state")
@@ -1568,32 +1617,87 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
 
     if renderer == "timeline":
         rows = _array(response["rows"], f"{path}.rows")
+        if incompatible and rows:
+            _fail("incompatible", f"{path}.rows", "incompatible timeline contains rows")
         if len(rows) > pagination["page_size"]:
             _fail("page_size", f"{path}.rows", "timeline result exceeds page size")
+        captured_watermark = int(response["binding"]["captured_watermark"])
+        captured_end = int(response["binding"]["captured_elapsed_end_ns"])
+        previous_sequence = 0
         for index, raw in enumerate(rows):
             row_path = f"{path}.rows[{index}]"
             row = _object(raw, row_path)
-            _closed(row, frozenset({"sequence", "item_type", "name", "start_ns", "end_ns", "scope", "outcome"}), row_path)
-            _u64(row["sequence"], f"{row_path}.sequence")
+            _closed(
+                row,
+                frozenset(
+                    {"sequence", "group", "item_type", "name", "start_ns", "end_ns", "scope", "outcome"}
+                ),
+                row_path,
+            )
+            sequence = _u64(row["sequence"], f"{row_path}.sequence")
+            if sequence == 0 or sequence <= previous_sequence or sequence > captured_watermark:
+                _fail("sequence", f"{row_path}.sequence", "row is outside the captured ordered prefix")
+            previous_sequence = sequence
+            group = _group_key(row["group"], f"{row_path}.group")
+            expected_group = record["query"]["group_by"]
+            if (None if group is None else group["dimension"]) != expected_group:
+                _fail("group", f"{row_path}.group", "group key differs from descriptor")
             item_type = _enum(row["item_type"], frozenset({"span", "instant"}), f"{row_path}.item_type")
-            _string(row["name"], f"{row_path}.name")
+            name = _string(row["name"], f"{row_path}.name")
             row_start = _u64(row["start_ns"], f"{row_path}.start_ns")
             row_end = _optional(row["end_ns"], _u64, f"{row_path}.end_ns")
-            _scope(row["scope"], f"{row_path}.scope")
+            scope = _scope(row["scope"], f"{row_path}.scope")
+            if group is not None:
+                dimension = group["dimension"]["dimension"]
+                if dimension in {"scene", "actor", "cue", "act"}:
+                    if group["value"]["value"] != scope[f"{dimension}_id"]:
+                        _fail("group", f"{row_path}.group", "group value differs from row scope")
+                elif dimension in {"event_name", "custom_name"}:
+                    if group["value"]["value"] != name:
+                        _fail("group", f"{row_path}.group", "group value differs from row name")
             outcome = _optional(row["outcome"], lambda item, item_path: _enum(item, SPAN_OUTCOMES, item_path), f"{row_path}.outcome")
             if item_type == "instant" and (row_end is not None or outcome is not None):
                 _fail("timeline", row_path, "instant contains span-only fields")
             if row_end is not None and row_end < row_start:
                 _fail("timeline", row_path, "span ends before it starts")
+            if item_type == "span" and ((row_end is None) != (outcome is None)):
+                _fail("timeline", row_path, "span completion and outcome disagree")
+            if row_start > captured_end or (row_end is not None and row_end > captured_end):
+                _fail("binding", row_path, "timeline row lies beyond captured time")
+            intersects = (
+                start <= row_start < end
+                if item_type == "instant"
+                else start < end and row_start < end and (captured_end if row_end is None else row_end) > start
+            )
+            if not intersects:
+                _fail("binding", row_path, "timeline row does not intersect query range")
+            selected_scope = response["binding"]["selected_scope"]
+            if selected_scope is not None and not _scope_contains(selected_scope, scope):
+                _fail("binding", f"{row_path}.scope", "row lies outside selected scope")
+            source = record["query"]["source"]
+            expected_item_type = source["source"]
+            selector = source["selector"]
+            expected_name = selector.get("kind", selector.get("name"))
+            if item_type != expected_item_type or name != expected_name:
+                _fail("source", row_path, "timeline row differs from query source")
         return len(rows), 0
 
     if renderer == "metric":
         series = _array(response["series"], f"{path}.series")
+        if incompatible and series:
+            _fail("incompatible", f"{path}.series", "incompatible metric contains series")
+        if len(series) > MAX_METRIC_SERIES:
+            _fail("series_cap", f"{path}.series", "metric series count exceeds 64")
+        seen_groups: set[str] = set()
         for index, raw in enumerate(series):
             series_path = f"{path}.series[{index}]"
             item = _object(raw, series_path)
             _closed(item, frozenset({"group", "value", "coverage"}), series_path)
             group = _group_key(item["group"], f"{series_path}.group")
+            group_identity = json.dumps(group, sort_keys=True, separators=(",", ":"))
+            if group_identity in seen_groups:
+                _fail("group", f"{series_path}.group", "duplicate metric group")
+            seen_groups.add(group_identity)
             expected_group = record["query"]["group_by"]
             if (None if group is None else group["dimension"]) != expected_group:
                 _fail("group", f"{series_path}.group", "group key differs from descriptor")
@@ -1606,6 +1710,18 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
                 expected_kind = "mean" if record["query"]["reducer"] == "mean" else "exact"
                 if aggregate_kind != expected_kind:
                     _fail("reducer", f"{series_path}.value", "aggregate shape differs from reducer")
+                if record["query"]["reducer"] == "count":
+                    exact = item["value"]["value"]
+                    if exact["type"] != "integer" or exact["value"].startswith("-"):
+                        _fail("reducer", f"{series_path}.value", "count is not a nonnegative integer")
+                if record["query"]["source"]["source"] in {"completed_span_duration", "act_token"}:
+                    exact = (
+                        item["value"]["numerator"]
+                        if aggregate_kind == "mean"
+                        else item["value"]["value"]
+                    )
+                    if exact["type"] != "integer" or exact["value"].startswith("-"):
+                        _fail("source", f"{series_path}.value", "integral source has non-integral value")
                 if aggregate_kind == "mean" and int(item["value"]["contributing_count"]) != int(item_coverage["contributing_count"]):
                     _fail("coverage", series_path, "mean count differs from contributing coverage")
         return 0, 0
@@ -1617,13 +1733,20 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
         for index, column in enumerate(columns):
             _table_column(column, f"{path}.columns[{index}]")
         rows = _array(response["rows"], f"{path}.rows")
+        if incompatible and rows:
+            _fail("incompatible", f"{path}.rows", "incompatible table contains rows")
         if len(rows) > pagination["page_size"] or len(rows) > MAX_PAGE_ROWS:
             _fail("page_size", f"{path}.rows", "table result exceeds page size")
+        captured_watermark = int(response["binding"]["captured_watermark"])
+        previous_sequence = 0
         for index, raw in enumerate(rows):
             row_path = f"{path}.rows[{index}]"
             row = _object(raw, row_path)
             _closed(row, frozenset({"sequence", "cells"}), row_path)
-            _u64(row["sequence"], f"{row_path}.sequence")
+            sequence = _u64(row["sequence"], f"{row_path}.sequence")
+            if sequence == 0 or sequence <= previous_sequence or sequence > captured_watermark:
+                _fail("sequence", f"{row_path}.sequence", "row is outside the captured ordered prefix")
+            previous_sequence = sequence
             cells = _array(row["cells"], f"{row_path}.cells")
             if len(cells) != len(columns):
                 _fail("columns", f"{row_path}.cells", "cell count differs from columns")
@@ -1647,14 +1770,21 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
     if len(expected_buckets) > MAX_TIME_SERIES_POINTS:
         _fail("point_cap", path, "more than 1024 origin-aligned buckets")
     series = _array(response["series"], f"{path}.series")
-    if not series or len(series) > MAX_TIME_SERIES_SERIES:
-        _fail("series_cap", f"{path}.series", "series count is outside 1..=64")
+    if incompatible and series:
+        _fail("incompatible", f"{path}.series", "incompatible time-series contains series")
+    if len(series) > MAX_TIME_SERIES_SERIES:
+        _fail("series_cap", f"{path}.series", "time-series count exceeds 64")
     max_points = 0
+    seen_groups = set()
     for series_index, raw in enumerate(series):
         series_path = f"{path}.series[{series_index}]"
         item = _object(raw, series_path)
         _closed(item, frozenset({"group", "points"}), series_path)
         group = _group_key(item["group"], f"{series_path}.group")
+        group_identity = json.dumps(group, sort_keys=True, separators=(",", ":"))
+        if group_identity in seen_groups:
+            _fail("group", f"{series_path}.group", "duplicate time-series group")
+        seen_groups.add(group_identity)
         expected_group = record["query"]["group_by"]
         if (None if group is None else group["dimension"]) != expected_group:
             _fail("group", f"{series_path}.group", "group key differs from descriptor")
@@ -1686,6 +1816,18 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
                 expected_kind = "mean" if record["query"]["reducer"] == "mean" else "exact"
                 if aggregate_kind != expected_kind:
                     _fail("reducer", f"{point_path}.value", "aggregate shape differs from reducer")
+                if record["query"]["reducer"] == "count":
+                    exact = point["value"]["value"]
+                    if exact["type"] != "integer" or exact["value"].startswith("-"):
+                        _fail("reducer", f"{point_path}.value", "count is not a nonnegative integer")
+                if record["query"]["source"]["source"] in {"completed_span_duration", "act_token"}:
+                    exact = (
+                        point["value"]["numerator"]
+                        if aggregate_kind == "mean"
+                        else point["value"]["value"]
+                    )
+                    if exact["type"] != "integer" or exact["value"].startswith("-"):
+                        _fail("source", f"{point_path}.value", "integral source has non-integral value")
                 if aggregate_kind == "mean" and int(point["value"]["contributing_count"]) != int(point_coverage["contributing_count"]):
                     _fail("coverage", point_path, "mean count differs from contributing coverage")
     return 0, max_points
