@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "coordination_order": [
+    "run_identity_allocated",
+    "archive_prepared",
+    "active_lease_acquired",
+    "initial_store_ready",
+    "writer_supervisor_ready",
+    "listener_ready",
+    "registry_published",
+    "ready_result"
+  ],
+  "cases": [
+    {
+      "fail_after": "run_identity_allocated",
+      "cleanup": []
+    },
+    {
+      "fail_after": "archive_prepared",
+      "cleanup": []
+    },
+    {
+      "fail_after": "active_lease_acquired",
+      "cleanup": ["active_lease"]
+    },
+    {
+      "fail_after": "initial_store_ready",
+      "cleanup": ["store", "active_lease"]
+    },
+    {
+      "fail_after": "writer_supervisor_ready",
+      "cleanup": ["hub", "writer_store", "active_lease"]
+    },
+    {
+      "fail_after": "listener_ready",
+      "cleanup": ["listener", "hub", "writer_store", "active_lease"]
+    },
+    {
+      "fail_after": "registry_published",
+      "cleanup": ["registry", "listener", "hub", "writer_store", "active_lease"]
+    },
+    {
+      "fail_after": "ready_result",
+      "cleanup": ["registry", "listener", "hub", "writer_store", "active_lease"]
+    }
+  ]
+}

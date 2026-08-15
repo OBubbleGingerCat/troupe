@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/fixtures/diagnostics/bootstrap/failure-matrix.json",
+    "tests/integration/test_diagnostic_bootstrap.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_runtime/bootstrap.rs"
+  ],
   "removed": [],
   "generated": []
 }
