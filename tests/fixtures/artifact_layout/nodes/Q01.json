@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/query_views.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/query/aggregate.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/query/filter.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/query/pagination.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/query/views.rs"
+  ],
   "removed": [],
   "generated": []
 }
