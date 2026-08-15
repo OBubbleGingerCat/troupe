@@ -146,6 +146,20 @@ def test_caller_drop_and_scene_shutdown_use_the_existing_cancel_transition() -> 
     assert "operation.request_cancel();" in scene_context
 
 
+def test_prepared_admission_observes_registration_before_cancel_and_enqueue() -> None:
+    scene_context = SCENE_CONTEXT.read_text(encoding="utf-8")
+    commit = _method(scene_context, "commit", "drop")
+
+    registered = commit.index("state.operations.push(operation.clone());")
+    admitted = commit.index(
+        "cue_producer::observe(&operation, CueHook::Admitted);"
+    )
+    close_pending_cancel = commit.index("self.scope.cancel_operations(operations);")
+    enqueue = commit.index("operation.enqueue()?;")
+
+    assert registered < admitted < close_pending_cancel < enqueue
+
+
 def test_native_slot_and_full_library_build_contracts() -> None:
     environment = os.environ.copy()
     libdir = sysconfig.get_config_var("LIBDIR")
