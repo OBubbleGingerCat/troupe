@@ -477,3 +477,34 @@ fn position_and_reference_errors_leave_the_whole_join_retryable() {
         .expect("reference failure did not consume sequence");
     assert_eq!(projector.model().through_sequence().get(), 1);
 }
+
+#[test]
+fn cloned_snapshot_projector_is_an_isolated_batch_candidate() {
+    let scope = act_scope("cue-1", "act-1");
+    let mut committed = SnapshotProjector::new(run_id());
+    committed
+        .apply(&message_delta(1, 10, scope.clone(), "message-1"))
+        .expect("committed prefix");
+    let mut candidate = committed.clone();
+
+    candidate
+        .apply(&message_completed(2, 20, scope.clone(), "message-1", true))
+        .expect("advance candidate");
+    assert_eq!(candidate.model().through_sequence().get(), 2);
+    assert_eq!(committed.model().through_sequence().get(), 1);
+    assert!(
+        committed
+            .model()
+            .messages()
+            .message(&local_id("message-1"))
+            .expect("committed message")
+            .is_open()
+    );
+
+    committed
+        .apply(&counter(2, 20, scope))
+        .expect("candidate did not mutate committed reference or read-model state");
+    assert_eq!(committed.model().through_sequence().get(), 2);
+    assert!(candidate.model().truncations()[0].message_id().is_some());
+    assert!(committed.model().truncations().is_empty());
+}
