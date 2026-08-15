@@ -43,7 +43,7 @@ fn validate_cued_result(value: &Bound<'_, PyAny>) -> PyResult<Py<PyTuple>> {
         let effect = item
             .cast::<Effect>()
             .expect("validated cued result items are Effects");
-        effect_producer::observe(&effect.borrow(), EffectHook::Consumed);
+        effect_producer::observe(&effect.borrow(), EffectHook::Returned);
     }
     Ok(tuple.clone().unbind())
 }

@@ -365,6 +365,10 @@ fn hook_slots_freeze_typed_identity_scope_outcome_and_error_inputs() {
         "&SceneScope",
         "CueMailboxHook",
         "CueTerminalOutcome",
+        "CueLineageSnapshot",
+        "fn lineage_snapshot(cued: &Arc<CuedScope>)",
+        "effect_producer::cue_terminal",
+        "effect_producer::caller_finished",
         "impl FnOnce() -> Option<PyErr>",
     ] {
         assert!(cue.contains(input), "Cue producer is missing {input}");
@@ -376,6 +380,10 @@ fn hook_slots_freeze_typed_identity_scope_outcome_and_error_inputs() {
         "&Effect",
         "Result<&Bound<'_, Effect>, &PyErr>",
         "Option<&Py<PyString>>",
+        "&Arc<CuedScope>",
+        "CueTerminalOutcome",
+        "SchemaU64",
+        "Returned",
     ] {
         assert!(effect.contains(input), "Effect producer is missing {input}");
     }

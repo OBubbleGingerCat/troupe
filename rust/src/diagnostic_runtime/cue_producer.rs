@@ -1,7 +1,18 @@
+#[cfg(not(test))]
+use std::sync::Arc;
+
 use pyo3::types::PyString;
 use pyo3::{Py, PyErr};
+#[cfg(not(test))]
+use troupe_diagnostics_core::{event::DiagnosticScope, scalar::SchemaU64};
 
+#[cfg(not(test))]
+use crate::diagnostic_runtime::load_producer::DiagnosticRunContext;
+#[cfg(not(test))]
+use crate::diagnostic_runtime::runtime_producer::RuntimeLifecycleProducer;
 use crate::orchestration::mailbox::CueOperation;
+#[cfg(not(test))]
+use crate::orchestration::scene_context::CuedScope;
 use crate::orchestration::scene_context::{RunBinding, SceneScope};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,6 +35,40 @@ pub(crate) enum CueTerminalOutcome {
     Failed,
     Cancelled,
     CleanupFailed,
+}
+
+#[cfg(not(test))]
+#[derive(Clone)]
+pub(crate) struct CueLineageSnapshot {
+    runtime: Arc<RuntimeLifecycleProducer>,
+    context: DiagnosticRunContext,
+    cue_scope: DiagnosticScope,
+    containing_span_id: SchemaU64,
+}
+
+#[cfg(not(test))]
+impl CueLineageSnapshot {
+    pub(crate) fn runtime(&self) -> &Arc<RuntimeLifecycleProducer> {
+        &self.runtime
+    }
+
+    pub(crate) fn context(&self) -> DiagnosticRunContext {
+        self.context.clone()
+    }
+
+    pub(crate) fn cue_scope(&self) -> &DiagnosticScope {
+        &self.cue_scope
+    }
+
+    pub(crate) const fn containing_span_id(&self) -> SchemaU64 {
+        self.containing_span_id
+    }
+}
+
+#[inline]
+#[cfg(not(test))]
+pub(crate) fn lineage_snapshot(cued: &Arc<CuedScope>) -> Option<CueLineageSnapshot> {
+    active::lineage_snapshot(cued)
 }
 
 #[inline]
@@ -84,9 +129,9 @@ mod active {
         scalar::SchemaU64,
     };
 
-    use super::{CueHook, CueMailboxHook, CueOperation, CueTerminalOutcome};
+    use super::{CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation, CueTerminalOutcome};
     use crate::diagnostic_runtime::{
-        actor_producer,
+        actor_producer, effect_producer,
         load_producer::{DiagnosticProducerError, DiagnosticRunContext},
         runtime_producer::{self, RuntimeLifecycleProducer},
         scene_producer,
@@ -423,6 +468,7 @@ mod active {
             } else {
                 CausalRelation::Return
             };
+            effect_producer::cue_terminal(&self._owner, outcome, source);
             let terminal_sequence = if let Some(span_id) = span_id {
                 match self.context.finish_span_with_causes(
                     self.cue_scope.clone(),
@@ -509,6 +555,7 @@ mod active {
                 with_producer(operation, |producer| producer.cancel_requested());
             }
             CueHook::CallerFinished => {
+                effect_producer::caller_finished(operation.diagnostic_cued());
                 if let Some(producer) = producer(operation) {
                     producer.caller_finished();
                 }
@@ -551,6 +598,26 @@ mod active {
         if operation.diagnostic_actor().is_none() {
             remove(operation, &producer);
         }
+    }
+
+    pub(super) fn lineage_snapshot(cued: &Arc<CuedScope>) -> Option<CueLineageSnapshot> {
+        let producer = lock(producers()).get(&Arc::as_ptr(cued).addr()).cloned()?;
+        let containing_span_id = {
+            let state = lock(&producer.state);
+            match state.phase {
+                CuePhase::Dispatched { execution_span_id } => execution_span_id,
+                CuePhase::Starting
+                | CuePhase::Admitted { .. }
+                | CuePhase::Enqueued { .. }
+                | CuePhase::Terminal { .. } => return None,
+            }
+        };
+        Some(CueLineageSnapshot {
+            runtime: Arc::clone(&producer.runtime),
+            context: producer.context.clone(),
+            cue_scope: producer.cue_scope.clone(),
+            containing_span_id,
+        })
     }
 
     fn admitted(operation: &CueOperation) {

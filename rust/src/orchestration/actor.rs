@@ -283,6 +283,7 @@ impl Actor {
             effect_kwargs,
             id,
             authority.cued.source(effect_type.py()),
+            &authority.cued,
         )
     }
 
