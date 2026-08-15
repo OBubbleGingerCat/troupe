@@ -1,6 +1,17 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_perfetto_schema_audit.py"
+    ],
+    [
+      "python",
+      "scripts/audit_perfetto_schema.py",
+      "--offline"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
