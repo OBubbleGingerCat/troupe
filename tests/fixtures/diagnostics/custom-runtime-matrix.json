@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "authorized_contexts": [
+    {
+      "context": "production_start",
+      "scope_fields": [],
+      "containing_span": "production.start",
+      "registered_child": false
+    },
+    {
+      "context": "scene",
+      "scope_fields": ["scene_id"],
+      "containing_span": "scene.lifecycle",
+      "registered_child": false
+    },
+    {
+      "context": "cue",
+      "scope_fields": ["scene_id", "actor_id", "cue_id"],
+      "containing_span": "cue.execution",
+      "registered_child": false
+    },
+    {
+      "context": "production_stop",
+      "scope_fields": [],
+      "containing_span": "production.stop",
+      "registered_child": false
+    },
+    {
+      "context": "registered_child",
+      "scope_fields": "inherited_domain",
+      "containing_span": "inherited_builtin_domain",
+      "registered_child": true
+    }
+  ],
+  "rejected_contexts": [
+    {
+      "context": "module_import",
+      "error": "DiagnosticContextError",
+      "allocates_sequence": false
+    },
+    {
+      "context": "production_constructor",
+      "error": "DiagnosticContextError",
+      "allocates_sequence": false
+    },
+    {
+      "context": "plain_thread",
+      "error": "DiagnosticContextError",
+      "allocates_sequence": false
+    },
+    {
+      "context": "unregistered_task",
+      "error": "DiagnosticContextError",
+      "allocates_sequence": false
+    },
+    {
+      "context": "expired_scope",
+      "error": "DiagnosticContextError",
+      "allocates_sequence": false
+    },
+    {
+      "context": "run_ended",
+      "error": "DiagnosticContextError",
+      "allocates_sequence": false
+    }
+  ],
+  "caller_control": {
+    "accepted_fields": ["name", "severity", "attributes", "value", "unit", "dimensions"],
+    "runtime_owned_fields": [
+      "run_id",
+      "sequence",
+      "elapsed_ns",
+      "scope",
+      "parent_span_id",
+      "containing_span_id",
+      "caused_by"
+    ],
+    "returns_canonical_id": false
+  },
+  "temporal_parent": {
+    "same_task_nested_custom_span": "innermost_custom_span",
+    "same_task_without_custom_span": "innermost_builtin_span",
+    "registered_child": "innermost_builtin_span",
+    "propagates_custom_span_to_registered_child": false
+  },
+  "span_exit_outcomes": [
+    {"exit": "normal", "outcome": "completed", "suppresses_exception": false},
+    {"exit": "cancelled", "outcome": "cancelled", "suppresses_exception": false},
+    {"exit": "failed", "outcome": "failed", "suppresses_exception": false}
+  ],
+  "publication": {
+    "event": {"canonical_facts": 1, "path": "mandatory_s04", "return": null},
+    "counter": {"canonical_facts": 1, "path": "mandatory_s04", "return": null},
+    "span_enter": {"canonical_facts": 1, "path": "mandatory_s04", "return": null},
+    "span_exit": {"canonical_facts": 1, "path": "mandatory_s04", "return": null},
+    "core_failure": "fatal_latched"
+  },
+  "canonical_fixtures": [
+    {
+      "kind": "custom_span_started",
+      "path": "tests/fixtures/diagnostics/events/custom-span-started.json"
+    },
+    {
+      "kind": "custom_instant_occurred",
+      "path": "tests/fixtures/diagnostics/events/custom-instant-occurred.json"
+    },
+    {
+      "kind": "custom_counter_sampled",
+      "path": "tests/fixtures/diagnostics/events/custom-counter-sampled.json"
+    },
+    {
+      "kind": "custom_span_finished",
+      "path": "tests/fixtures/diagnostics/events/custom-span-finished.json"
+    }
+  ]
+}
