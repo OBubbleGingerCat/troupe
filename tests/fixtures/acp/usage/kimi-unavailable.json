@@ -1,0 +1,29 @@
+{
+  "adapterProfile": "kimi-code@0.31.1",
+  "turns": [
+    {
+      "shape": "single_request",
+      "promptResponse": {
+        "stopReason": "end_turn",
+        "usage": {
+          "totalTokens": 21,
+          "inputTokens": 13,
+          "outputTokens": 8,
+          "thoughtTokens": 0,
+          "_meta": {
+            "privateCounter": "must-not-survive"
+          }
+        },
+        "_meta": {
+          "privateLogPath": "/private/session.log"
+        }
+      }
+    },
+    {
+      "shape": "tool_loop",
+      "promptResponse": {
+        "stopReason": "end_turn"
+      }
+    }
+  ]
+}
