@@ -323,23 +323,22 @@ impl RuntimeLifecycleProducer {
             );
             return;
         }
-        let lifecycle_shape_is_proven = match (&state.start, &state.stop) {
+        let lifecycle_shape_is_proven = matches!(
+            (&state.start, &state.stop),
             (
                 PhaseState::Closed(TerminalSpan {
                     outcome: SpanOutcome::Completed,
                     ..
                 }),
                 PhaseState::Closed(_),
-            ) => true,
-            (
+            ) | (
                 PhaseState::Closed(TerminalSpan {
                     outcome: SpanOutcome::Cancelled | SpanOutcome::Failed,
                     ..
                 }),
                 PhaseState::NotEntered,
-            ) => true,
-            _ => false,
-        };
+            )
+        );
         if !lifecycle_shape_is_proven {
             latch_failure(
                 state,
