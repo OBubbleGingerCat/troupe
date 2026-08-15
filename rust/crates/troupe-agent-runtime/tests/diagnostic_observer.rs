@@ -20,7 +20,10 @@ fn observer_contract_is_typed_nonblocking_and_owner_isolated() {
         "pub struct AgentDiagnosticObserverFailure",
         "catch_unwind",
     ] {
-        assert!(observer.contains(required), "observer contract is missing {required}");
+        assert!(
+            observer.contains(required),
+            "observer contract is missing {required}"
+        );
     }
 
     for forbidden in ["serde_json", "SessionUpdate", "PromptResponse", "raw_json"] {
@@ -47,7 +50,10 @@ fn session_and_turn_metadata_keep_destination_and_sidecar_policy_separate() {
         "AgentDiagnosticObservation::TurnSubmitted",
         "AgentDiagnosticObservation::TurnTerminal",
     ] {
-        assert!(session.contains(required), "session contract is missing {required}");
+        assert!(
+            session.contains(required),
+            "session contract is missing {required}"
+        );
     }
 
     let production = session
@@ -57,7 +63,10 @@ fn session_and_turn_metadata_keep_destination_and_sidecar_policy_separate() {
         .find("or_else(|| self.standalone_observer.take())")
         .map(|offset| production + offset)
         .expect("standalone fallback selection");
-    assert!(production < standalone, "Run observer must win over sidecar fallback");
+    assert!(
+        production < standalone,
+        "Run observer must win over sidecar fallback"
+    );
 }
 
 #[test]

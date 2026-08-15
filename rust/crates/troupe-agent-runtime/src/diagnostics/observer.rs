@@ -108,9 +108,7 @@ impl AgentDiagnosticObservation {
     pub fn kind(&self) -> AgentDiagnosticObservationKind {
         match self {
             Self::SessionOpening(_) => AgentDiagnosticObservationKind::SessionOpening,
-            Self::SessionOpeningAttempt(_) => {
-                AgentDiagnosticObservationKind::SessionOpeningAttempt
-            }
+            Self::SessionOpeningAttempt(_) => AgentDiagnosticObservationKind::SessionOpeningAttempt,
             Self::SessionReady(_) => AgentDiagnosticObservationKind::SessionReady,
             Self::SessionBroken { .. } => AgentDiagnosticObservationKind::SessionBroken,
             Self::SessionClosing(_) => AgentDiagnosticObservationKind::SessionClosing,
@@ -231,9 +229,7 @@ impl AgentDiagnosticObserver {
         Self {
             inner: Arc::new(AgentDiagnosticObserverInner {
                 destination_identity,
-                destination: Box::new(move |observation| {
-                    destination.try_observe(observation)
-                }),
+                destination: Box::new(move |observation| destination.try_observe(observation)),
                 failure_owner: Box::new(move |failure| {
                     failure_owner.observer_failed(failure);
                 }),

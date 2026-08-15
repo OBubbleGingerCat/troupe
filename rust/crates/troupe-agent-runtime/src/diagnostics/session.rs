@@ -783,7 +783,9 @@ pub(crate) fn observe_turn_submitted(context: Option<&TurnDiagnosticContext>) {
     ) else {
         return;
     };
-    observer.observe(AgentDiagnosticObservation::TurnSubmitted(Arc::clone(metadata)));
+    observer.observe(AgentDiagnosticObservation::TurnSubmitted(Arc::clone(
+        metadata,
+    )));
 }
 
 #[inline]
@@ -803,9 +805,7 @@ pub(crate) fn observe_turn_terminal(
     ) {
         let settlement = match observation.settlement {
             TurnTerminalSettlement::NotSubmitted => AgentTurnDiagnosticSettlement::NotSubmitted,
-            TurnTerminalSettlement::Authoritative => {
-                AgentTurnDiagnosticSettlement::Authoritative
-            }
+            TurnTerminalSettlement::Authoritative => AgentTurnDiagnosticSettlement::Authoritative,
             TurnTerminalSettlement::Unknown => AgentTurnDiagnosticSettlement::Unknown,
         };
         observer.observe(AgentDiagnosticObservation::TurnTerminal {
@@ -924,10 +924,7 @@ mod tests {
     ) {
         let destination = Arc::new(RecordingDestination::default());
         let owner = Arc::new(RecordingFailureOwner::default());
-        let observer = AgentDiagnosticObserver::new(
-            Arc::clone(&destination),
-            Arc::clone(&owner),
-        );
+        let observer = AgentDiagnosticObserver::new(Arc::clone(&destination), Arc::clone(&owner));
         (observer, destination, owner)
     }
 
@@ -978,7 +975,10 @@ mod tests {
                 AgentDiagnosticObservationKind::SessionClosed,
             ]
         );
-        assert_eq!(observations[0].session_metadata().unwrap().generation(), None);
+        assert_eq!(
+            observations[0].session_metadata().unwrap().generation(),
+            None
+        );
         assert_eq!(
             observations[1].session_metadata().unwrap().generation(),
             Some(7)
