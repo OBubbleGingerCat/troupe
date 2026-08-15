@@ -494,3 +494,34 @@ fn transactional_validation_commits_only_after_the_consumer_succeeds() {
         ReferenceValidationCode::DuplicateSequence
     );
 }
+
+#[test]
+fn cloned_reference_state_is_an_isolated_batch_candidate() {
+    let first = counter(RUN_A, 1, 1, empty_scope(), Vec::new());
+    let second = counter(
+        RUN_A,
+        2,
+        2,
+        empty_scope(),
+        vec![CausalLink::new(
+            SchemaU64::new(1),
+            CausalRelation::FollowsFrom,
+        )],
+    );
+    let mut committed = ReferenceValidator::new();
+    committed.validate(&first).unwrap();
+    let mut candidate = committed.clone();
+
+    candidate.validate(&second).expect("advance candidate");
+    committed
+        .validate(&second)
+        .expect("candidate did not mutate committed indexes");
+    assert_eq!(
+        candidate.validate(&second).unwrap_err().code(),
+        ReferenceValidationCode::DuplicateSequence
+    );
+    assert_eq!(
+        committed.validate(&second).unwrap_err().code(),
+        ReferenceValidationCode::DuplicateSequence
+    );
+}

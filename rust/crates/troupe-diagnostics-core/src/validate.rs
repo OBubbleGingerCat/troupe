@@ -150,7 +150,7 @@ pub fn validate_event_stream(
     Ok(ValidatedEventStream { events })
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ReferenceValidator {
     run_id: Option<CanonicalUuid>,
     event_sequences: BTreeSet<SchemaU64>,
@@ -513,7 +513,7 @@ enum SpanFamily {
     Custom,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SpanRecord {
     family: SpanFamily,
     scope: DiagnosticScope,
