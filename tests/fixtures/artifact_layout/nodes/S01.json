@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/schema/diagnostics-v1.sql",
+    "rust/crates/troupe-diagnostics-runtime/tests/store_schema.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/store/connection.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/store/key.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/store/schema.rs"
+  ],
   "removed": [],
   "generated": []
 }
