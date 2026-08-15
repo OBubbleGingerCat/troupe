@@ -9,7 +9,10 @@ use pyo3::types::{PyAny, PyList, PyString};
 
 pub(crate) use class::{ResolvedProductionClass, resolve_production_class};
 pub(crate) use construct::construct_production;
-pub(crate) use path::{ResolvedProductionPath, resolve_production_path};
+pub(crate) use path::{
+    PrevalidatedProductionRoot, ResolvedProductionPath, prevalidate_production_root,
+    resolve_production_package,
+};
 
 create_exception!(troupe._runtime, ProductionLoadError, PyException);
 
@@ -106,7 +109,8 @@ pub fn load_production(
     package_dir: &Bound<'_, PyString>,
     args: &Bound<'_, PyList>,
 ) -> PyResult<Py<PyAny>> {
-    let path = resolve_production_path(py, package_dir)?;
+    let root = prevalidate_production_root(py, package_dir)?;
+    let path = resolve_production_package(py, root)?;
     let production_class = resolve_production_class(py, path)?;
     construct_production(py, production_class, args)
 }

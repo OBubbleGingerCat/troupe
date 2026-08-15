@@ -1,7 +1,11 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/integration/test_diagnostic_runtime_events.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_runtime/runtime_producer.rs"
+  ],
   "removed": [],
   "generated": []
 }

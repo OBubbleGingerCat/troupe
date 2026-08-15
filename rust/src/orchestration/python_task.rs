@@ -490,19 +490,15 @@ impl SceneTaskCallback {
         let Some(production) = self.production.take() else {
             return Ok(());
         };
+        let mut created_scene = None;
         let result = (|| {
             if let Err(error) = binding.check_wrapper(py) {
                 binding.ensure_wrapper_for_drain(py);
                 return Err(error);
             }
             let scene = binding.next_scene(py)?;
-            let awaitable = match production.bind(py).getattr("scene")?.call0() {
-                Ok(awaitable) => awaitable,
-                Err(error) => {
-                    scene.close();
-                    return Err(error);
-                }
-            };
+            created_scene = Some(Arc::clone(&scene));
+            let awaitable = production.bind(py).getattr("scene")?.call0()?;
             let driver = Py::new(
                 py,
                 ScopeDriver::new_scene(Arc::clone(&scene), awaitable.unbind()),
@@ -519,6 +515,10 @@ impl SceneTaskCallback {
             }
             Ok((task, scene))
         })();
+        if let (Some(scene), Err(error)) = (created_scene.as_ref(), result.as_ref()) {
+            scene_producer::task_finished(scene, Some(error));
+            scene.close();
+        }
         let _ = sender.send(result);
         Ok(())
     }

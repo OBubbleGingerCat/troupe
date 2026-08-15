@@ -1,8 +1,19 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/integration/test_diagnostic_scene_events.py",
+      "tests/integration/test_cancellation.py",
+      "tests/integration/test_cue_context.py"
+    ]
+  ],
   "env": {},
-  "maturin_features": [],
+  "maturin_features": [
+    "agent-test-support",
+    "diagnostics-test-support"
+  ],
   "cache_requirements": [],
   "exclusive_resources": []
 }

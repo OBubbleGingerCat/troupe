@@ -163,9 +163,11 @@ def test_loader_source_exposes_path_class_and_construct_phases() -> None:
 
     module_source = (loader / "mod.rs").read_text(encoding="utf-8")
     for marker in (
-        "resolve_production_path",
+        "prevalidate_production_root",
+        "resolve_production_package",
         "resolve_production_class",
         "construct_production",
+        "PrevalidatedProductionRoot",
         "ResolvedProductionClass",
         "ResolvedProductionPath",
     ):
@@ -173,6 +175,7 @@ def test_loader_source_exposes_path_class_and_construct_phases() -> None:
 
     class_source = (loader / "class.rs").read_text(encoding="utf-8")
     path_source = (loader / "path.rs").read_text(encoding="utf-8")
+    assert "pub(crate) fn package_candidate" in path_source
     assert "pub(crate) fn production_root" in path_source
     assert "pub(crate) fn inspect_static_attribute" in class_source
     assert "pub(crate) fn rollback" in class_source
