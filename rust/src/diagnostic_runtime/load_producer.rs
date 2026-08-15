@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Instant};
+use std::{cell::RefCell, fmt, sync::Arc, time::Instant};
 
 use pyo3::{
     exceptions::PySystemExit,
@@ -7,10 +7,13 @@ use pyo3::{
 };
 use troupe_diagnostics_core::{
     detail::{
-        ProductionConstructDetail, ProductionLoadDetail, ProductionPathResolutionDetail,
-        SpanStartDetail,
+        InstantDetail, ProductionConstructDetail, ProductionLoadDetail,
+        ProductionPathResolutionDetail, SpanStartDetail,
     },
-    event::{DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope, SpanFinished, SpanStarted},
+    event::{
+        DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope, InstantOccurred, SpanFinished,
+        SpanStarted,
+    },
     hub::{EventIdentity, HubAdmissionError, MandatoryDurableReserver, ProductionDiagnosticHub},
     kinds::SpanOutcome,
     scalar::SchemaU64,
@@ -30,7 +33,7 @@ const PATH_RESOLUTION_FALLBACK_ERROR: &str = "production-path-resolution-failed"
 const LOAD_FALLBACK_ERROR: &str = "production-load-failed";
 const CONSTRUCT_FALLBACK_ERROR: &str = "production-construct-failed";
 
-trait SpanEventAdmission: Send + Sync {
+trait DiagnosticEventAdmission: Send + Sync {
     fn admit_start(
         &self,
         elapsed_ns: ElapsedNs,
@@ -47,9 +50,17 @@ trait SpanEventAdmission: Send + Sync {
         outcome: SpanOutcome,
         error_code: Option<String>,
     ) -> Result<(), DiagnosticProducerError>;
+
+    fn admit_instant(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        detail: InstantDetail,
+        containing_span_id: Option<SchemaU64>,
+    ) -> Result<(), DiagnosticProducerError>;
 }
 
-impl<R> SpanEventAdmission for ProductionDiagnosticHub<R>
+impl<R> DiagnosticEventAdmission for ProductionDiagnosticHub<R>
 where
     R: MandatoryDurableReserver,
 {
@@ -106,18 +117,47 @@ where
         .map_err(DiagnosticProducerError::admission)?;
         Ok(())
     }
+
+    fn admit_instant(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        detail: InstantDetail,
+        containing_span_id: Option<SchemaU64>,
+    ) -> Result<(), DiagnosticProducerError> {
+        self.admit(
+            move |identity: EventIdentity| {
+                let header = DiagnosticEventHeader::new(
+                    identity.run_id(),
+                    identity.sequence(),
+                    elapsed_ns,
+                    scope,
+                    Vec::new(),
+                )
+                .expect("hub-assigned identity always has a nonzero sequence");
+                DiagnosticEvent::InstantOccurred(InstantOccurred::new(
+                    header,
+                    detail,
+                    containing_span_id,
+                ))
+            },
+            None,
+        )
+        .map_err(DiagnosticProducerError::admission)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct DiagnosticRunContext {
-    admission: Arc<dyn SpanEventAdmission>,
+    admission: Arc<dyn DiagnosticEventAdmission>,
     clock: RunClock,
 }
 
 impl DiagnosticRunContext {
     fn ready(runtime: &DiagnosticRuntimeGuard) -> Self {
         let hub = Arc::clone(runtime.hub());
-        let admission: Arc<dyn SpanEventAdmission> = hub;
+        let admission: Arc<dyn DiagnosticEventAdmission> = hub;
         Self {
             admission,
             clock: RunClock::from_origin(Instant::now()),
@@ -129,7 +169,7 @@ impl DiagnosticRunContext {
     where
         R: MandatoryDurableReserver + 'static,
     {
-        let admission: Arc<dyn SpanEventAdmission> = hub;
+        let admission: Arc<dyn DiagnosticEventAdmission> = hub;
         Self { admission, clock }
     }
 
@@ -164,6 +204,81 @@ impl DiagnosticRunContext {
             .map_err(DiagnosticProducerError::clock)?;
         self.admission
             .admit_finish(elapsed_ns, scope, span_id, outcome, error_code)
+    }
+
+    pub(crate) fn emit_instant(
+        &self,
+        scope: DiagnosticScope,
+        detail: InstantDetail,
+        containing_span_id: Option<SchemaU64>,
+    ) -> Result<(), DiagnosticProducerError> {
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission
+            .admit_instant(elapsed_ns, scope, detail, containing_span_id)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ProductionConstructionSnapshot {
+    context: DiagnosticRunContext,
+    construct_span_id: SchemaU64,
+}
+
+impl ProductionConstructionSnapshot {
+    pub(crate) fn context(&self) -> DiagnosticRunContext {
+        self.context.clone()
+    }
+
+    pub(crate) const fn construct_span_id(&self) -> SchemaU64 {
+        self.construct_span_id
+    }
+}
+
+thread_local! {
+    static PRODUCTION_CONSTRUCTION_STACK: RefCell<Vec<ProductionConstructionSnapshot>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn current_production_construction() -> Option<ProductionConstructionSnapshot> {
+    PRODUCTION_CONSTRUCTION_STACK.with(|stack| stack.borrow().last().cloned())
+}
+
+struct ProductionConstructionGuard {
+    context: DiagnosticRunContext,
+    construct_span_id: SchemaU64,
+}
+
+impl ProductionConstructionGuard {
+    fn enter(context: DiagnosticRunContext, construct_span_id: SchemaU64) -> Self {
+        PRODUCTION_CONSTRUCTION_STACK.with(|stack| {
+            stack.borrow_mut().push(ProductionConstructionSnapshot {
+                context: context.clone(),
+                construct_span_id,
+            });
+        });
+        Self {
+            context,
+            construct_span_id,
+        }
+    }
+}
+
+impl Drop for ProductionConstructionGuard {
+    fn drop(&mut self) {
+        PRODUCTION_CONSTRUCTION_STACK.with(|stack| {
+            let popped = stack
+                .borrow_mut()
+                .pop()
+                .expect("Production construction context must remain installed");
+            assert!(
+                popped.construct_span_id == self.construct_span_id
+                    && Arc::ptr_eq(&popped.context.admission, &self.context.admission),
+                "Production construction contexts must leave in LIFO order"
+            );
+        });
     }
 }
 
@@ -454,7 +569,11 @@ impl ProductionLoadProducer {
             }
         };
 
-        match construct_production(py, resolved, args) {
+        let construction = ProductionConstructionGuard::enter(self.context.clone(), span_id);
+        let result = construct_production(py, resolved, args);
+        drop(construction);
+
+        match result {
             Ok(production) => {
                 if let Err(error) =
                     self.context
@@ -521,7 +640,7 @@ mod tests {
         types::{PyDict, PyDictMethods, PyList, PyListMethods, PyString},
     };
     use troupe_diagnostics_core::{
-        detail::SpanStartDetail,
+        detail::{EmptyDetail, SpanStartDetail},
         event::DiagnosticEvent,
         hub::{
             AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
@@ -1006,5 +1125,57 @@ mod tests {
             Ok::<_, PyErr>(())
         })
         .expect("enforce mandatory admission around operations");
+    }
+
+    #[test]
+    fn shared_context_admits_typed_instants_and_construction_scope_is_lifo() {
+        let (producer, log) = make_producer(Path::new("/tmp/diagnostic-context"), None);
+        let context = producer.context();
+        let span_id = context
+            .start_span(
+                empty_scope(),
+                SpanStartDetail::RunLifecycle(EmptyDetail::new()),
+                None,
+            )
+            .expect("admit containing span");
+        context
+            .emit_instant(
+                empty_scope(),
+                InstantDetail::CueAdmitted(EmptyDetail::new()),
+                Some(span_id),
+            )
+            .expect("admit typed instant");
+
+        let events = log.events();
+        let DiagnosticEvent::InstantOccurred(instant) = events[1].event() else {
+            panic!("expected typed instant")
+        };
+        assert_eq!(instant.containing_span_id(), Some(span_id));
+
+        assert!(current_production_construction().is_none());
+        let outer = ProductionConstructionGuard::enter(context.clone(), span_id);
+        assert_eq!(
+            current_production_construction()
+                .expect("outer construction scope")
+                .construct_span_id(),
+            span_id
+        );
+        let nested_id = SchemaU64::new(span_id.get() + 1);
+        let nested = ProductionConstructionGuard::enter(context, nested_id);
+        assert_eq!(
+            current_production_construction()
+                .expect("nested construction scope")
+                .construct_span_id(),
+            nested_id
+        );
+        drop(nested);
+        assert_eq!(
+            current_production_construction()
+                .expect("restored outer construction scope")
+                .construct_span_id(),
+            span_id
+        );
+        drop(outer);
+        assert!(current_production_construction().is_none());
     }
 }
