@@ -391,7 +391,7 @@ fn request_errors_and_client_disconnects_stay_local() {
 
 #[test]
 fn injected_routes_can_stream_without_buffering_the_response() {
-    let streaming = RouteDefinition::read_only("/api/v1/stream", |_request| async {
+    let streaming = RouteDefinition::get("/api/v1/stream", |_request| async {
         let frames = stream::iter([
             Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"part-one"))),
             Ok(Frame::data(Bytes::from_static(b"part-two"))),
@@ -409,6 +409,10 @@ fn injected_routes_can_stream_without_buffering_the_response() {
     assert_eq!(response.body, b"part-onepart-two");
     assert_eq!(response.header("transfer-encoding"), Some("chunked"));
     assert_common_headers(&response);
+    let head = request(&server, "HEAD", "/api/v1/stream", &[]);
+    assert_eq!(head.status, 405);
+    assert_eq!(head.header("allow"), Some("GET"));
+    assert!(head.body.is_empty());
     assert!(server.try_core_failure().is_none());
     server.shutdown().unwrap();
 }

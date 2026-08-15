@@ -199,12 +199,62 @@ impl fmt::Debug for RouteResponse {
 #[derive(Clone)]
 pub struct RouteDefinition {
     relative_path: String,
+    methods: RouteMethods,
     handler: Arc<dyn ReadOnlyRouteHandler>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteMethods {
+    GetOnly,
+    GetAndHead,
+}
+
+impl RouteMethods {
+    pub(crate) fn allows(self, method: &Method) -> bool {
+        *method == Method::GET || (self == Self::GetAndHead && *method == Method::HEAD)
+    }
+
+    pub(crate) const fn allow_header(self) -> &'static str {
+        match self {
+            Self::GetOnly => "GET",
+            Self::GetAndHead => "GET, HEAD",
+        }
+    }
+
+    pub(crate) const fn description(self) -> &'static str {
+        match self {
+            Self::GetOnly => "route is read-only and accepts GET",
+            Self::GetAndHead => "route is read-only and accepts GET or HEAD",
+        }
+    }
 }
 
 impl RouteDefinition {
     pub fn read_only<F, Fut>(
         relative_path: &str,
+        handler: F,
+    ) -> Result<Self, RouteConfigurationError>
+    where
+        F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RouteResponse, RequestError>> + Send + 'static,
+    {
+        Self::new(relative_path, RouteMethods::GetAndHead, handler)
+    }
+
+    pub fn get<F, Fut>(
+        relative_path: &str,
+        handler: F,
+    ) -> Result<Self, RouteConfigurationError>
+    where
+        F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RouteResponse, RequestError>> + Send + 'static,
+    {
+        Self::new(relative_path, RouteMethods::GetOnly, handler)
+    }
+
+    fn new<F, Fut>(
+        relative_path: &str,
+        methods: RouteMethods,
         handler: F,
     ) -> Result<Self, RouteConfigurationError>
     where
@@ -219,12 +269,17 @@ impl RouteDefinition {
         }
         Ok(Self {
             relative_path: relative_path.to_owned(),
+            methods,
             handler: Arc::new(handler),
         })
     }
 
     pub fn relative_path(&self) -> &str {
         &self.relative_path
+    }
+
+    pub const fn methods(&self) -> RouteMethods {
+        self.methods
     }
 }
 
@@ -243,7 +298,7 @@ pub(crate) fn validate_route_definitions(
 }
 
 pub(crate) struct Router {
-    routes: std::collections::HashMap<String, RouteTarget>,
+    routes: std::collections::HashMap<String, ResolvedRoute>,
 }
 
 impl Router {
@@ -256,12 +311,21 @@ impl Router {
         let mut routes = std::collections::HashMap::with_capacity(definitions.len() + 1);
         routes.insert(
             identity.identity_path().to_owned(),
-            RouteTarget::Identity(identity_bytes),
+            ResolvedRoute {
+                methods: RouteMethods::GetAndHead,
+                target: RouteTarget::Identity(identity_bytes),
+            },
         );
         for definition in definitions {
             let path = join_base_path(identity.base_path(), &definition.relative_path);
             if routes
-                .insert(path, RouteTarget::Injected(definition.handler))
+                .insert(
+                    path,
+                    ResolvedRoute {
+                        methods: definition.methods,
+                        target: RouteTarget::Injected(definition.handler),
+                    },
+                )
                 .is_some()
             {
                 return Err(RouteConfigurationError::new(
@@ -272,8 +336,24 @@ impl Router {
         Ok(Self { routes })
     }
 
-    pub(crate) fn resolve(&self, path: &str) -> Option<RouteTarget> {
+    pub(crate) fn resolve(&self, path: &str) -> Option<ResolvedRoute> {
         self.routes.get(path).cloned()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ResolvedRoute {
+    methods: RouteMethods,
+    target: RouteTarget,
+}
+
+impl ResolvedRoute {
+    pub(crate) const fn methods(&self) -> RouteMethods {
+        self.methods
+    }
+
+    pub(crate) fn into_target(self) -> RouteTarget {
+        self.target
     }
 }
 

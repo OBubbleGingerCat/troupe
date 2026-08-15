@@ -26,28 +26,28 @@ pub(crate) async fn handle_request(
 }
 
 async fn dispatch(router: &Router, request: Request<Incoming>) -> Response<ResponseBody> {
-    let Some(target) = router.resolve(request.uri().path()) else {
+    let is_head = request.method() == Method::HEAD;
+    let Some(route) = router.resolve(request.uri().path()) else {
         return finalize(error_response(
             StatusCode::NOT_FOUND,
             "not_found",
             "route is not registered",
-        ), false);
+        ), is_head);
     };
-    let is_head = request.method() == Method::HEAD;
-    if request.method() != Method::GET && !is_head {
+    if !route.methods().allows(request.method()) {
         let mut response = error_response(
             StatusCode::METHOD_NOT_ALLOWED,
             "method_not_allowed",
-            "route is read-only and accepts GET or HEAD",
+            route.methods().description(),
         );
         response.headers_mut().insert(
             ALLOW,
-            HeaderValue::from_static("GET, HEAD"),
+            HeaderValue::from_static(route.methods().allow_header()),
         );
-        return finalize(response, false);
+        return finalize(response, is_head);
     }
 
-    let response = match target {
+    let response = match route.into_target() {
         RouteTarget::Identity(bytes) => {
             let mut response = RouteResponse::bytes(StatusCode::OK, bytes);
             response.headers_mut().insert(
