@@ -76,6 +76,10 @@ pub trait AdmissionReserver: Send {
     type Reservation: AdmissionReservation;
 
     fn try_reserve(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error>;
+
+    fn try_reserve_fatal(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
+        self.try_reserve(size)
+    }
 }
 
 pub trait MandatoryDurableReserver: AdmissionReserver {}
@@ -307,7 +311,18 @@ where
     where
         C: DiagnosticEventCandidate,
     {
-        self.admit_inner(candidate, subscriber)
+        self.admit_inner(candidate, subscriber, AdmissionClass::Normal)
+    }
+
+    pub fn admit_fatal<C>(
+        &self,
+        candidate: C,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<AdmissionReceipt, HubAdmissionError<R::Error>>
+    where
+        C: DiagnosticEventCandidate,
+    {
+        self.admit_inner(candidate, subscriber, AdmissionClass::Fatal)
     }
 }
 
@@ -327,8 +342,14 @@ where
     where
         C: DiagnosticEventCandidate,
     {
-        self.admit_inner(candidate, Some(subscriber))
+        self.admit_inner(candidate, Some(subscriber), AdmissionClass::Normal)
     }
+}
+
+#[derive(Clone, Copy)]
+enum AdmissionClass {
+    Normal,
+    Fatal,
 }
 
 impl<R, P> DiagnosticHub<R, P>
@@ -356,6 +377,7 @@ where
         &self,
         candidate: C,
         subscriber: Option<&dyn ActEventSubscriber>,
+        class: AdmissionClass,
     ) -> Result<AdmissionReceipt, HubAdmissionError<R::Error>>
     where
         C: DiagnosticEventCandidate,
@@ -381,10 +403,11 @@ where
         let canonical_bytes =
             serde_json::to_vec(&event).map_err(|_| HubAdmissionError::CanonicalEncoding)?;
         let size = AdmissionSize::one_event(canonical_bytes.len());
-        let reservation = state
-            .reserver
-            .try_reserve(size)
-            .map_err(HubAdmissionError::Reservation)?;
+        let reservation = match class {
+            AdmissionClass::Normal => state.reserver.try_reserve(size),
+            AdmissionClass::Fatal => state.reserver.try_reserve_fatal(size),
+        }
+        .map_err(HubAdmissionError::Reservation)?;
 
         state
             .validator
