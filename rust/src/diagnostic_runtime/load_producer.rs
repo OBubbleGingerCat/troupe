@@ -11,11 +11,11 @@ use troupe_diagnostics_core::{
         ProductionPathResolutionDetail, SpanStartDetail,
     },
     event::{
-        DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope, InstantOccurred, SpanFinished,
-        SpanStarted,
+        CausalLink, CounterSampled, DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope,
+        InstantOccurred, SpanFinished, SpanStarted,
     },
     hub::{EventIdentity, HubAdmissionError, MandatoryDurableReserver, ProductionDiagnosticHub},
-    kinds::SpanOutcome,
+    kinds::{CounterKind, SpanOutcome},
     scalar::SchemaU64,
     time::{ElapsedNs, RunClock, TimeError},
 };
@@ -40,6 +40,7 @@ trait DiagnosticEventAdmission: Send + Sync {
         scope: DiagnosticScope,
         detail: SpanStartDetail,
         parent_span_id: Option<SchemaU64>,
+        caused_by: Vec<CausalLink>,
     ) -> Result<SchemaU64, DiagnosticProducerError>;
 
     fn admit_finish(
@@ -49,7 +50,8 @@ trait DiagnosticEventAdmission: Send + Sync {
         span_id: SchemaU64,
         outcome: SpanOutcome,
         error_code: Option<String>,
-    ) -> Result<(), DiagnosticProducerError>;
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
 
     fn admit_instant(
         &self,
@@ -57,7 +59,17 @@ trait DiagnosticEventAdmission: Send + Sync {
         scope: DiagnosticScope,
         detail: InstantDetail,
         containing_span_id: Option<SchemaU64>,
-    ) -> Result<(), DiagnosticProducerError>;
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
+
+    fn admit_counter(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        counter_kind: CounterKind,
+        value: SchemaU64,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
 }
 
 impl<R> DiagnosticEventAdmission for ProductionDiagnosticHub<R>
@@ -70,6 +82,7 @@ where
         scope: DiagnosticScope,
         detail: SpanStartDetail,
         parent_span_id: Option<SchemaU64>,
+        caused_by: Vec<CausalLink>,
     ) -> Result<SchemaU64, DiagnosticProducerError> {
         let receipt = self
             .admit(
@@ -79,7 +92,7 @@ where
                         identity.sequence(),
                         elapsed_ns,
                         scope,
-                        Vec::new(),
+                        caused_by,
                     )
                     .expect("hub-assigned identity always has a nonzero sequence");
                     DiagnosticEvent::SpanStarted(SpanStarted::new(header, detail, parent_span_id))
@@ -97,25 +110,27 @@ where
         span_id: SchemaU64,
         outcome: SpanOutcome,
         error_code: Option<String>,
-    ) -> Result<(), DiagnosticProducerError> {
-        self.admit(
-            move |identity: EventIdentity| {
-                let header = DiagnosticEventHeader::new(
-                    identity.run_id(),
-                    identity.sequence(),
-                    elapsed_ns,
-                    scope,
-                    Vec::new(),
-                )
-                .expect("hub-assigned identity always has a nonzero sequence");
-                DiagnosticEvent::SpanFinished(SpanFinished::new(
-                    header, span_id, outcome, error_code,
-                ))
-            },
-            None,
-        )
-        .map_err(DiagnosticProducerError::admission)?;
-        Ok(())
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        caused_by,
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::SpanFinished(SpanFinished::new(
+                        header, span_id, outcome, error_code,
+                    ))
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
     }
 
     fn admit_instant(
@@ -124,27 +139,60 @@ where
         scope: DiagnosticScope,
         detail: InstantDetail,
         containing_span_id: Option<SchemaU64>,
-    ) -> Result<(), DiagnosticProducerError> {
-        self.admit(
-            move |identity: EventIdentity| {
-                let header = DiagnosticEventHeader::new(
-                    identity.run_id(),
-                    identity.sequence(),
-                    elapsed_ns,
-                    scope,
-                    Vec::new(),
-                )
-                .expect("hub-assigned identity always has a nonzero sequence");
-                DiagnosticEvent::InstantOccurred(InstantOccurred::new(
-                    header,
-                    detail,
-                    containing_span_id,
-                ))
-            },
-            None,
-        )
-        .map_err(DiagnosticProducerError::admission)?;
-        Ok(())
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        caused_by,
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::InstantOccurred(InstantOccurred::new(
+                        header,
+                        detail,
+                        containing_span_id,
+                    ))
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
+    }
+
+    fn admit_counter(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        counter_kind: CounterKind,
+        value: SchemaU64,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        caused_by,
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::CounterSampled(CounterSampled::new(
+                        header,
+                        counter_kind,
+                        value,
+                    ))
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
     }
 }
 
@@ -183,12 +231,22 @@ impl DiagnosticRunContext {
         detail: SpanStartDetail,
         parent_span_id: Option<SchemaU64>,
     ) -> Result<SchemaU64, DiagnosticProducerError> {
+        self.start_span_with_causes(scope, detail, parent_span_id, Vec::new())
+    }
+
+    pub(crate) fn start_span_with_causes(
+        &self,
+        scope: DiagnosticScope,
+        detail: SpanStartDetail,
+        parent_span_id: Option<SchemaU64>,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
         let elapsed_ns = self
             .clock
             .elapsed_now()
             .map_err(DiagnosticProducerError::clock)?;
         self.admission
-            .admit_start(elapsed_ns, scope, detail, parent_span_id)
+            .admit_start(elapsed_ns, scope, detail, parent_span_id, caused_by)
     }
 
     pub(crate) fn finish_span(
@@ -198,12 +256,24 @@ impl DiagnosticRunContext {
         outcome: SpanOutcome,
         error_code: Option<String>,
     ) -> Result<(), DiagnosticProducerError> {
+        self.finish_span_with_causes(scope, span_id, outcome, error_code, Vec::new())
+            .map(|_| ())
+    }
+
+    pub(crate) fn finish_span_with_causes(
+        &self,
+        scope: DiagnosticScope,
+        span_id: SchemaU64,
+        outcome: SpanOutcome,
+        error_code: Option<String>,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
         let elapsed_ns = self
             .clock
             .elapsed_now()
             .map_err(DiagnosticProducerError::clock)?;
         self.admission
-            .admit_finish(elapsed_ns, scope, span_id, outcome, error_code)
+            .admit_finish(elapsed_ns, scope, span_id, outcome, error_code, caused_by)
     }
 
     pub(crate) fn emit_instant(
@@ -212,12 +282,38 @@ impl DiagnosticRunContext {
         detail: InstantDetail,
         containing_span_id: Option<SchemaU64>,
     ) -> Result<(), DiagnosticProducerError> {
+        self.emit_instant_with_causes(scope, detail, containing_span_id, Vec::new())
+            .map(|_| ())
+    }
+
+    pub(crate) fn emit_instant_with_causes(
+        &self,
+        scope: DiagnosticScope,
+        detail: InstantDetail,
+        containing_span_id: Option<SchemaU64>,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
         let elapsed_ns = self
             .clock
             .elapsed_now()
             .map_err(DiagnosticProducerError::clock)?;
         self.admission
-            .admit_instant(elapsed_ns, scope, detail, containing_span_id)
+            .admit_instant(elapsed_ns, scope, detail, containing_span_id, caused_by)
+    }
+
+    pub(crate) fn emit_counter(
+        &self,
+        scope: DiagnosticScope,
+        counter_kind: CounterKind,
+        value: SchemaU64,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission
+            .admit_counter(elapsed_ns, scope, counter_kind, value, caused_by)
     }
 }
 
@@ -641,13 +737,13 @@ mod tests {
     };
     use troupe_diagnostics_core::{
         detail::{EmptyDetail, SpanStartDetail},
-        event::DiagnosticEvent,
+        event::{CausalLink, DiagnosticEvent},
         hub::{
             AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
             DeliveryFailure, LiveEventNotifier, MandatoryDurableReserver, ProductionDiagnosticHub,
         },
         id::CanonicalUuid,
-        kinds::SpanOutcome,
+        kinds::{CausalRelation, CounterKind, SpanOutcome},
         time::RunClock,
     };
     use uuid::Uuid;
@@ -1128,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_context_admits_typed_instants_and_construction_scope_is_lifo() {
+    fn shared_context_admits_typed_causal_events_and_construction_scope_is_lifo() {
         let (producer, log) = make_producer(Path::new("/tmp/diagnostic-context"), None);
         let context = producer.context();
         let span_id = context
@@ -1138,19 +1234,49 @@ mod tests {
                 None,
             )
             .expect("admit containing span");
-        context
-            .emit_instant(
+        let instant_sequence = context
+            .emit_instant_with_causes(
                 empty_scope(),
                 InstantDetail::CueAdmitted(EmptyDetail::new()),
                 Some(span_id),
+                vec![CausalLink::new(span_id, CausalRelation::FollowsFrom)],
             )
             .expect("admit typed instant");
+        let counter_sequence = context
+            .emit_counter(
+                empty_scope(),
+                CounterKind::CueActive,
+                SchemaU64::new(1),
+                vec![CausalLink::new(
+                    instant_sequence,
+                    CausalRelation::FollowsFrom,
+                )],
+            )
+            .expect("admit typed counter");
 
         let events = log.events();
         let DiagnosticEvent::InstantOccurred(instant) = events[1].event() else {
             panic!("expected typed instant")
         };
+        assert_eq!(instant.header().sequence(), instant_sequence);
         assert_eq!(instant.containing_span_id(), Some(span_id));
+        assert_eq!(
+            instant.header().caused_by(),
+            &[CausalLink::new(span_id, CausalRelation::FollowsFrom)]
+        );
+        let DiagnosticEvent::CounterSampled(counter) = events[2].event() else {
+            panic!("expected typed counter")
+        };
+        assert_eq!(counter.header().sequence(), counter_sequence);
+        assert_eq!(counter.counter_kind(), CounterKind::CueActive);
+        assert_eq!(counter.value(), SchemaU64::new(1));
+        assert_eq!(
+            counter.header().caused_by(),
+            &[CausalLink::new(
+                instant_sequence,
+                CausalRelation::FollowsFrom,
+            )]
+        );
 
         assert!(current_production_construction().is_none());
         let outer = ProductionConstructionGuard::enter(context.clone(), span_id);
