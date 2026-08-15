@@ -504,13 +504,24 @@ fn hooks_bracket_real_transitions_and_overridden_lifecycle_calls() {
     let cue_call = read("src/orchestration/cue_future.rs");
     assert_ordered(
         &cue_call,
-        "Cue admission",
+        "Cue admission preparation",
         &[
             "validate_lineage_for_scene(py, &scene)?",
             ".begin_admission()",
             "cue_producer::admission_started(&binding, &scene);",
             "prepared.commit(operation.clone())?;",
-            "CueHook::Admitted",
+        ],
+    );
+
+    let scene_context = read("src/orchestration/scene_context.rs");
+    assert_ordered(
+        &scene_context,
+        "Cue committed admission",
+        &[
+            "state.operations.push(operation.clone());",
+            "cue_producer::observe(&operation, CueHook::Admitted);",
+            "self.scope.cancel_operations(operations);",
+            "operation.enqueue()?;",
         ],
     );
 
