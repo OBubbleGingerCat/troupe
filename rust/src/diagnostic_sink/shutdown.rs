@@ -15,6 +15,7 @@ use super::thread::{
 };
 
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const ASYNC_CANCEL_SETTLE_INTERVAL: Duration = Duration::from_millis(10);
 const DISCARD_CONTENTION_ATTEMPTS: usize = 8;
 
 #[derive(Debug)]
@@ -76,7 +77,10 @@ impl DiagnosticSinkRuntime {
             .thread
             .as_ref()
             .expect("diagnostic sink Runtime must own its callback thread");
-        let stop_error = thread.request_stop_when_idle().err();
+        let cancel_at = deadline
+            .checked_sub(ASYNC_CANCEL_SETTLE_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let stop_error = thread.request_stop_at(cancel_at).err();
 
         loop {
             for sink in &sinks {
@@ -653,6 +657,108 @@ class Healthy:
                 .expect("read peer callback count")
         });
         assert_eq!(healthy_calls, 0);
+    }
+
+    #[test]
+    fn deadline_cancels_async_callback_without_recording_callback_failure() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        let module = compile_module(
+            r#"
+import asyncio
+import threading
+
+started = threading.Event()
+cancelled = threading.Event()
+
+class AsyncBlocking:
+    async def __call__(self, event):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+"#,
+            "diagnostic_close_async_cancel",
+        );
+        let runtime = DiagnosticSinkRuntime::start().expect("start diagnostic sink Runtime");
+        let sink = runtime
+            .register_sink(
+                run_id(),
+                act_id("act-async-cancel"),
+                callback(&module, "AsyncBlocking"),
+            )
+            .expect("register async sink");
+        admit(&sink, 1, AdmissionClass::Content);
+        wait_until("async callback start", || {
+            python_event_is_set(&module, "started")
+        });
+
+        let started = Instant::now();
+        let report = runtime.shutdown_until(started + Duration::from_millis(50));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            report.thread_close(),
+            DiagnosticThreadClose::Joined
+        ));
+        assert!(python_event_is_set(&module, "cancelled"));
+        assert_eq!(report.callback_abandoned(), 0);
+        let summary = &report.summaries()[0];
+        assert_eq!(summary.close_reason(), SinkCloseReason::RuntimeShutdown);
+        assert!(!summary.complete());
+        assert!(!summary.callback_abandoned());
+        assert_eq!(summary.callback_failure(), None);
+        assert_eq!(summary.delivered_events(), 0);
+        assert!(Arc::ptr_eq(
+            summary,
+            &sink
+                .summary()
+                .expect("async cancellation summary remains stable")
+        ));
+    }
+
+    #[test]
+    fn summary_waits_until_delivery_progress_publication_is_settled() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        let module = compile_module(
+            r#"
+class Healthy:
+    def __call__(self, event):
+        return None
+"#,
+            "diagnostic_close_delivery_settlement",
+        );
+        let runtime = DiagnosticSinkRuntime::start().expect("start diagnostic sink Runtime");
+        let sink = runtime
+            .register_sink(
+                run_id(),
+                act_id("act-delivery-settlement"),
+                callback(&module, "Healthy"),
+            )
+            .expect("register settlement sink");
+        sink.seal(SinkSealFacts::runtime_shutdown(None))
+            .expect("seal empty settlement sink");
+
+        sink.set_delivery_settling_for_test(true);
+        assert_eq!(
+            sink.try_close_drained().expect("poll settling sink"),
+            crate::diagnostic_sink::seal::SinkClosePoll::Pending
+        );
+        sink.set_delivery_settling_for_test(false);
+        assert!(matches!(
+            sink.try_close_drained().expect("close settled sink"),
+            crate::diagnostic_sink::seal::SinkClosePoll::Closed(_)
+        ));
+
+        let report = runtime.shutdown_until(Instant::now() + TEST_TIMEOUT);
+        assert!(matches!(
+            report.thread_close(),
+            DiagnosticThreadClose::Joined
+        ));
+        assert!(Arc::ptr_eq(
+            &report.summaries()[0],
+            &sink.summary().expect("settled summary remains stable")
+        ));
     }
 
     #[test]

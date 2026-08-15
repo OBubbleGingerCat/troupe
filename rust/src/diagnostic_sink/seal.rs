@@ -208,6 +208,13 @@ impl SinkHandle {
         self.inner.summary.get().cloned()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_delivery_settling_for_test(&self, settling: bool) {
+        self.inner
+            .dispatcher
+            .set_delivery_settling_for_test(settling);
+    }
+
     pub(crate) fn try_close_drained(&self) -> Result<SinkClosePoll, SinkCloseError> {
         match self.inner.phase.load(Ordering::Acquire) {
             CLOSED => {
@@ -226,11 +233,17 @@ impl SinkHandle {
             .dispatcher
             .try_queue_snapshot()
             .map_err(SinkCloseError::Queue)?;
-        if queue.queued_events() != 0 || queue.callback_active() {
+        if queue.queued_events() != 0
+            || queue.callback_active()
+            || self.inner.dispatcher.delivery_settling()
+        {
             return Ok(SinkClosePoll::Pending);
         }
         let nominal = match queue.terminal_reason() {
             Some(SinkTerminalReason::DeliveryOverflow) => SinkCloseReason::DeliveryOverflow,
+            None if self.inner.dispatcher.runtime_cancel_requested() => {
+                SinkCloseReason::RuntimeShutdown
+            }
             None => self.inner.seal_facts().nominal_close_reason(),
         };
         Ok(SinkClosePoll::Closed(
@@ -246,7 +259,7 @@ impl SinkHandle {
         self.inner
             .dispatcher
             .try_queue_snapshot()
-            .map(|snapshot| snapshot.callback_active())
+            .map(|snapshot| snapshot.callback_active() || self.inner.dispatcher.delivery_settling())
     }
 
     pub(crate) fn close_for_runtime_shutdown(
