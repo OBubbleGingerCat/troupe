@@ -54,6 +54,27 @@ def test_view_declarations_are_static_exact_and_pre_constructor() -> None:
     assert prepare.index("compile_static_views") < prepare.index("persist_view_set")
     assert prepare.index("persist_view_set") < prepare.index("Ok(PreparedViewClass")
 
+    compile_views = compiler[
+        compiler.index("fn compile_static_views<") : compiler.index(
+            "struct EncodedViewRecords"
+        )
+    ]
+    assert compile_views.index("tuple.len() > MAX_VIEW_RECORDS") < compile_views.index(
+        "PythonViewEncoder::load"
+    )
+    assert compile_views.index("encoder.encode") < compile_views.index("records.try_push")
+    accumulator = compiler[
+        compiler.index("impl EncodedViewRecords") : compiler.index(
+            "struct PythonViewEncoder"
+        )
+    ]
+    assert accumulator.index("bytes.len() > MAX_VIEW_RECORD_BYTES") < accumulator.index(
+        "self.records.push"
+    )
+    assert accumulator.index("next_total > MAX_TOTAL_VIEW_RECORD_BYTES") < (
+        accumulator.index("self.records.push")
+    )
+
 
 def test_compiled_records_are_bounded_versioned_and_atomically_persisted() -> None:
     records = RECORDS.read_text(encoding="utf-8")

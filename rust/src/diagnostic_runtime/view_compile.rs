@@ -6,7 +6,8 @@ use pyo3::{
 };
 use troupe_diagnostics_core::id::CanonicalUuid;
 use troupe_diagnostics_runtime::store::view_records::{
-    CompiledViewSet, ViewManifest, persist_view_set,
+    CompiledViewSet, MAX_TOTAL_VIEW_RECORD_BYTES, MAX_VIEW_RECORD_BYTES, MAX_VIEW_RECORDS,
+    ViewManifest, persist_view_set,
 };
 
 use super::load_producer::ObservedProductionClass;
@@ -208,13 +209,19 @@ where
             format!("validated diagnostic view tuple could not be read: {error}"),
         )
     })?;
+    if tuple.len() > MAX_VIEW_RECORDS {
+        return Err(ViewStartupError::user(
+            "diagnostic_views.too_many_records",
+            "diagnostic view count exceeds the V1 limit",
+        ));
+    }
     if tuple.is_empty() {
         return CompiledViewSet::from_json_records(std::iter::empty::<&[u8]>())
             .map_err(|error| ViewStartupError::core(error.code().as_str(), error.to_string()));
     }
 
     let encoder = PythonViewEncoder::load(py)?;
-    let mut records = Vec::with_capacity(tuple.len());
+    let mut records = EncodedViewRecords::with_capacity(tuple.len());
     for (ordinal, item) in tuple.iter().enumerate() {
         if !encoder.accepts_exact(&item) {
             return Err(ViewStartupError::user(
@@ -224,11 +231,57 @@ where
                 ),
             ));
         }
-        records.push(encoder.encode(&item, ordinal)?);
+        let encoded = encoder.encode(&item, ordinal)?;
+        records.try_push(encoded.as_bytes(), ordinal)?;
     }
 
-    CompiledViewSet::from_json_records(records)
+    CompiledViewSet::from_json_records(records.into_records())
         .map_err(|error| ViewStartupError::user(error.code().as_str(), error.to_string()))
+}
+
+struct EncodedViewRecords {
+    records: Vec<Vec<u8>>,
+    total_bytes: usize,
+}
+
+impl EncodedViewRecords {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            records: Vec::with_capacity(capacity),
+            total_bytes: 0,
+        }
+    }
+
+    fn try_push(&mut self, bytes: &[u8], ordinal: usize) -> Result<(), ViewStartupError> {
+        if bytes.len() > MAX_VIEW_RECORD_BYTES {
+            return Err(ViewStartupError::user(
+                "diagnostic_views.record_too_large",
+                format!("diagnostic view record at ordinal {ordinal} exceeds the V1 byte limit"),
+            ));
+        }
+        let Some(next_total) = self.total_bytes.checked_add(bytes.len()) else {
+            return Err(ViewStartupError::user(
+                "diagnostic_views.total_bytes_exceeded",
+                format!("diagnostic view record bytes overflowed at ordinal {ordinal}"),
+            ));
+        };
+        if next_total > MAX_TOTAL_VIEW_RECORD_BYTES {
+            return Err(ViewStartupError::user(
+                "diagnostic_views.total_bytes_exceeded",
+                format!(
+                    "diagnostic view records exceed the V1 total byte limit at ordinal {ordinal}"
+                ),
+            ));
+        }
+
+        self.records.push(bytes.to_vec());
+        self.total_bytes = next_total;
+        Ok(())
+    }
+
+    fn into_records(self) -> Vec<Vec<u8>> {
+        self.records
+    }
 }
 
 struct PythonViewEncoder<'py> {
@@ -299,7 +352,11 @@ impl<'py> PythonViewEncoder<'py> {
             .any(|class| item_type.as_any().is(&class))
     }
 
-    fn encode(&self, item: &Bound<'_, PyAny>, ordinal: usize) -> Result<Vec<u8>, ViewStartupError> {
+    fn encode(
+        &self,
+        item: &Bound<'py, PyAny>,
+        ordinal: usize,
+    ) -> Result<Bound<'py, PyBytes>, ViewStartupError> {
         let encoded = self.encode.call1((item,)).map_err(|error| {
             ViewStartupError::core(
                 "diagnostic_views.encoder_failed",
@@ -312,15 +369,12 @@ impl<'py> PythonViewEncoder<'py> {
                 format!("built-in diagnostic view encoder returned non-bytes at ordinal {ordinal}"),
             ));
         }
-        encoded
-            .cast_into::<PyBytes>()
-            .map(|bytes| bytes.as_bytes().to_vec())
-            .map_err(|error| {
-                ViewStartupError::core(
-                    "diagnostic_views.encoder_contract_invalid",
-                    format!("built-in diagnostic view bytes could not be read: {error}"),
-                )
-            })
+        encoded.cast_into::<PyBytes>().map_err(|error| {
+            ViewStartupError::core(
+                "diagnostic_views.encoder_contract_invalid",
+                format!("built-in diagnostic view bytes could not be read: {error}"),
+            )
+        })
     }
 }
 
@@ -636,6 +690,97 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("read view persistence counts")
+    }
+
+    #[test]
+    fn encoded_record_accumulator_never_retains_bytes_beyond_either_limit() {
+        let mut records = EncodedViewRecords::with_capacity(MAX_VIEW_RECORDS);
+        let oversized = vec![b'x'; MAX_VIEW_RECORD_BYTES + 1];
+        let error = records
+            .try_push(&oversized, 0)
+            .expect_err("oversized record must be rejected before retention");
+        assert_eq!(error.kind(), ViewStartupErrorKind::UserConfiguration);
+        assert_eq!(error.code(), "diagnostic_views.record_too_large");
+        assert!(records.records.is_empty());
+        assert_eq!(records.total_bytes, 0);
+
+        let maximum_record = vec![b'x'; MAX_VIEW_RECORD_BYTES];
+        let accepted = MAX_TOTAL_VIEW_RECORD_BYTES / MAX_VIEW_RECORD_BYTES;
+        for ordinal in 0..accepted {
+            records
+                .try_push(&maximum_record, ordinal)
+                .expect("record remains within the cumulative limit");
+        }
+        assert_eq!(records.total_bytes, MAX_TOTAL_VIEW_RECORD_BYTES);
+        assert_eq!(records.records.len(), accepted);
+
+        let error = records
+            .try_push(&[b'x'], accepted)
+            .expect_err("cumulative overflow must be rejected before retention");
+        assert_eq!(error.kind(), ViewStartupErrorKind::UserConfiguration);
+        assert_eq!(error.code(), "diagnostic_views.total_bytes_exceeded");
+        assert_eq!(records.total_bytes, MAX_TOTAL_VIEW_RECORD_BYTES);
+        assert_eq!(records.records.len(), accepted);
+        assert!(records.total_bytes <= MAX_TOTAL_VIEW_RECORD_BYTES);
+    }
+
+    #[test]
+    fn over_count_tuple_is_rejected_before_the_encoder_is_called() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        Python::attach(|py| {
+            let module = install_diagnostics(py);
+            let namespace = module.dict();
+            namespace
+                .set_item("_max_view_records", MAX_VIEW_RECORDS)
+                .expect("publish record limit");
+            py.run(
+                cr#"
+_view = TimelineView(
+    id="one", title="One", time_range="run", scope="run",
+    query=TimelineQuery(source=SpanSource(kind="cue.execution")),
+)
+_encoder_calls = 0
+_original_view_encoder = _view_to_json_bytes
+def _counting_view_encoder(value):
+    global _encoder_calls
+    _encoder_calls += 1
+    return _original_view_encoder(value)
+_view_to_json_bytes = _counting_view_encoder
+_too_many_views = (_view,) * (_max_view_records + 1)
+"#,
+                Some(&namespace),
+                Some(&namespace),
+            )
+            .expect("install counting view encoder");
+            let too_many = namespace
+                .get_item("_too_many_views")
+                .expect("read oversized tuple")
+                .expect("oversized tuple exists")
+                .unbind();
+            let directory = TestRunDirectory::new("too-many");
+            let log = LifecycleLog::new();
+
+            let error = prepare_views(
+                py,
+                TestClass::new(Some(too_many), log.clone()),
+                TestLifecycle::new(directory.path(), log.clone()),
+            )
+            .expect_err("over-count tuple must prevent startup");
+            assert_eq!(error.kind(), ViewStartupErrorKind::UserConfiguration);
+            assert_eq!(error.code(), "diagnostic_views.too_many_records");
+            assert_eq!(
+                namespace
+                    .get_item("_encoder_calls")
+                    .expect("read encoder counter")
+                    .expect("encoder counter exists")
+                    .extract::<usize>()
+                    .expect("encoder counter is an integer"),
+                0
+            );
+            assert_eq!(log.values(), ["rollback", "finalize_user_failure"]);
+            assert_eq!(persisted_counts(directory.path()), (0, 0));
+            remove_diagnostics(py);
+        });
     }
 
     #[test]
