@@ -20,6 +20,7 @@ use troupe_diagnostics_runtime::{
     registry::{model::WebBaseUrl, process_identity::ProcessIdentity},
     server::{
         error::{RequestError, ServerCoreFailureCode, ServerStartErrorCode},
+        identity::OperationalLimits,
         routes::{RouteDefinition, RouteResponse},
         runtime::{DiagnosticServer, ServerConfig},
     },
@@ -217,12 +218,20 @@ fn default_listener_is_ephemeral_ready_and_reports_complete_identity() {
     assert_eq!(identity["identity_path"], "/api/v1/identity");
     assert_eq!(identity["security_scope"], "trusted_network");
     assert_eq!(
-        identity["operational_limits"]["max_uncommitted_events"],
-        "32768"
-    );
-    assert_eq!(
-        identity["operational_limits"]["max_batch_age_ms"],
-        "25"
+        identity["operational_limits"],
+        json!({
+            "max_batch_age_ms": "25",
+            "max_batch_canonical_bytes": "1048576",
+            "max_batch_events": "512",
+            "max_metric_series": "64",
+            "max_page_rows": "500",
+            "max_time_series_points": "1024",
+            "max_time_series_series": "64",
+            "max_uncommitted_canonical_bytes": "67108864",
+            "max_uncommitted_events": "32768",
+            "shutdown_drain_timeout_ms": "30000",
+            "writer_stall_timeout_ms": "10000",
+        })
     );
 
     let injected = request(&server, "GET", "/api/v1/test?cue=2", &[]);
@@ -241,10 +250,14 @@ fn configured_base_path_and_explicit_port_are_authoritative() {
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
     let advertise = WebBaseUrl::parse("https://diagnostics.example/troupe/").unwrap();
+    let limits = OperationalLimits::default()
+        .with_limit("sse_heartbeat_interval_ms", 5_000)
+        .unwrap();
     let server = DiagnosticServer::start(
         config()
             .with_bind("127.0.0.1", port)
-            .with_advertise_url(Some(advertise)),
+            .with_advertise_url(Some(advertise))
+            .with_operational_limits(limits),
         vec![test_route(Arc::new(AtomicUsize::new(0)))],
     )
     .unwrap();
@@ -260,6 +273,10 @@ fn configured_base_path_and_explicit_port_are_authoritative() {
     assert_eq!(identity["base_path"], "/troupe");
     assert_eq!(identity["api_base_path"], "/troupe/api/v1");
     assert_eq!(identity["identity_path"], "/troupe/api/v1/identity");
+    assert_eq!(
+        identity["operational_limits"]["sse_heartbeat_interval_ms"],
+        "5000"
+    );
     assert_eq!(request(&server, "GET", "/troupe/api/v1/test", &[]).status, 200);
     server.shutdown().unwrap();
 }

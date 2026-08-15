@@ -1,28 +1,30 @@
-use std::{collections::BTreeMap, fmt, net::IpAddr, time::Duration};
+use std::{collections::BTreeMap, fmt, net::IpAddr};
 
 use hyper::Uri;
 use serde::Serialize;
-use troupe_diagnostics_core::{
-    event::EVENT_SCHEMA_VERSION,
-    id::CanonicalUuid,
-    scalar::SchemaU64,
-    view_protocol::{
-        API_SCHEMA_VERSION, MAX_METRIC_SERIES, MAX_PAGE_ROWS, MAX_TIME_SERIES_POINTS,
-        MAX_TIME_SERIES_SERIES, VIEW_SCHEMA_VERSION,
-    },
+use troupe_diagnostics_core::{id::CanonicalUuid, scalar::SchemaU64};
+
+use crate::registry::{
+    model::{BindEndpoint, SERVER_PROTOCOL_VERSION, SecurityScope, WebBaseUrl},
+    process_identity::ProcessIdentity,
 };
 
-use crate::{
-    registry::{
-        model::{BindEndpoint, SERVER_PROTOCOL_VERSION, SecurityScope, WebBaseUrl},
-        process_identity::ProcessIdentity,
-    },
-    store::{
-        admission::{MAX_UNCOMMITTED_CANONICAL_BYTES, MAX_UNCOMMITTED_EVENTS},
-        batch::{MAX_BATCH_AGE, MAX_BATCH_CANONICAL_BYTES, MAX_BATCH_EVENTS},
-        progress::{DEFAULT_SHUTDOWN_DRAIN_TIMEOUT, DEFAULT_WRITER_STALL_TIMEOUT},
-    },
-};
+const EVENT_SCHEMA_VERSION: u8 = 1;
+const VIEW_SCHEMA_VERSION: u8 = 1;
+const API_SCHEMA_VERSION: u8 = 1;
+const V1_OPERATIONAL_LIMITS: [(&str, u64); 11] = [
+    ("max_uncommitted_events", 32_768),
+    ("max_uncommitted_canonical_bytes", 64 * 1024 * 1024),
+    ("max_batch_age_ms", 25),
+    ("max_batch_events", 512),
+    ("max_batch_canonical_bytes", 1024 * 1024),
+    ("writer_stall_timeout_ms", 10_000),
+    ("shutdown_drain_timeout_ms", 30_000),
+    ("max_page_rows", 500),
+    ("max_metric_series", 64),
+    ("max_time_series_points", 1024),
+    ("max_time_series_series", 64),
+];
 
 pub const IDENTITY_SCHEMA_VERSION: u8 = 1;
 
@@ -62,37 +64,7 @@ impl OperationalLimits {
 impl Default for OperationalLimits {
     fn default() -> Self {
         let mut value = Self::new();
-        for (name, limit) in [
-            ("max_uncommitted_events", MAX_UNCOMMITTED_EVENTS as u64),
-            (
-                "max_uncommitted_canonical_bytes",
-                MAX_UNCOMMITTED_CANONICAL_BYTES as u64,
-            ),
-            ("max_batch_age_ms", duration_millis(MAX_BATCH_AGE)),
-            ("max_batch_events", MAX_BATCH_EVENTS as u64),
-            (
-                "max_batch_canonical_bytes",
-                MAX_BATCH_CANONICAL_BYTES as u64,
-            ),
-            (
-                "writer_stall_timeout_ms",
-                duration_millis(DEFAULT_WRITER_STALL_TIMEOUT),
-            ),
-            (
-                "shutdown_drain_timeout_ms",
-                duration_millis(DEFAULT_SHUTDOWN_DRAIN_TIMEOUT),
-            ),
-            ("max_page_rows", u64::from(MAX_PAGE_ROWS)),
-            ("max_metric_series", u64::from(MAX_METRIC_SERIES)),
-            (
-                "max_time_series_points",
-                u64::from(MAX_TIME_SERIES_POINTS),
-            ),
-            (
-                "max_time_series_series",
-                u64::from(MAX_TIME_SERIES_SERIES),
-            ),
-        ] {
+        for (name, limit) in V1_OPERATIONAL_LIMITS {
             value
                 .set_limit(name, limit)
                 .expect("built-in operational limit names are valid");
@@ -249,10 +221,6 @@ impl fmt::Display for IdentityError {
 }
 
 impl std::error::Error for IdentityError {}
-
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).expect("built-in duration fits u64 milliseconds")
-}
 
 fn valid_limit_name(name: &str) -> bool {
     !name.is_empty()
