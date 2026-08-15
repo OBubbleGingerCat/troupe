@@ -1,7 +1,11 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_python_events.rs"
+  ],
+  "modified": [
+    "rust/src/diagnostic_python/events.rs"
+  ],
   "removed": [],
   "generated": []
 }
