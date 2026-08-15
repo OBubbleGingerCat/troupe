@@ -11,7 +11,10 @@ use crate::{
     archive::lease::ActiveArchiveLease,
     query::{
         events::{EventQueryError, FiniteEventQuery, query_events},
-        reader::{CapturedEventSource, DiagnosticReader, ReaderFailure},
+        reader::{
+            CapturedEventSource, DiagnosticReader, ReaderErrorCode, ReaderFailure,
+            ReaderFailureClass, ReaderProfile,
+        },
         snapshot::{SnapshotQueryError, SnapshotQueryErrorCode, project_snapshot},
         status::{
             self, ActiveStatusObservation, DiagnosticStatus, Observation, StatusProjectionError,
@@ -34,11 +37,98 @@ pub const DEFAULT_EVENT_TAIL: u64 = 100;
 
 type ActiveStatusProvider = dyn Fn() -> Option<ActiveStatusObservation> + Send + Sync + 'static;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryEndpointKind {
+    Status,
+    Snapshot,
+    Events,
+}
+
+impl QueryEndpointKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Snapshot => "snapshot",
+            Self::Events => "events",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryFailureCode {
+    Reader(ReaderErrorCode),
+    Snapshot(SnapshotQueryErrorCode),
+    StatusUnknownProductionOutcome,
+    StatusNumericOutOfRange,
+    RunIdentityMismatch,
+    SnapshotWatermarkMismatch,
+    ResponseEncoding,
+}
+
+impl QueryFailureCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reader(code) => code.as_str(),
+            Self::Snapshot(code) => code.as_str(),
+            Self::StatusUnknownProductionOutcome => "diagnostic_status.unknown_production_outcome",
+            Self::StatusNumericOutOfRange => "diagnostic_status.numeric_out_of_range",
+            Self::RunIdentityMismatch => "diagnostic_query.run_identity_mismatch",
+            Self::SnapshotWatermarkMismatch => "diagnostic_query.snapshot_watermark_mismatch",
+            Self::ResponseEncoding => "diagnostic_query.response_encoding",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryCoreFailureSignal {
+    run_id: CanonicalUuid,
+    endpoint: QueryEndpointKind,
+    class: ReaderFailureClass,
+    code: QueryFailureCode,
+    store_code: Option<StoreOpenErrorCode>,
+}
+
+impl QueryCoreFailureSignal {
+    pub const fn run_id(self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub const fn endpoint(self) -> QueryEndpointKind {
+        self.endpoint
+    }
+
+    pub const fn class(self) -> ReaderFailureClass {
+        self.class
+    }
+
+    pub const fn code(self) -> QueryFailureCode {
+        self.code
+    }
+
+    pub const fn store_code(self) -> Option<StoreOpenErrorCode> {
+        self.store_code
+    }
+}
+
+pub trait QueryCoreFailureReporter: Send + Sync + 'static {
+    fn report(&self, failure: QueryCoreFailureSignal);
+}
+
+impl<F> QueryCoreFailureReporter for F
+where
+    F: Fn(QueryCoreFailureSignal) + Send + Sync + 'static,
+{
+    fn report(&self, failure: QueryCoreFailureSignal) {
+        self(failure);
+    }
+}
+
 #[derive(Clone)]
 enum QueryTarget {
     Active {
         lease: Arc<ActiveArchiveLease>,
         status_provider: Arc<ActiveStatusProvider>,
+        core_failure_reporter: Arc<dyn QueryCoreFailureReporter>,
     },
     Archive {
         run_directory: Arc<PathBuf>,
@@ -52,25 +142,35 @@ pub struct QueryEndpoints {
 }
 
 impl QueryEndpoints {
-    pub fn active<F>(
+    pub fn active<F, R>(
         run_id: CanonicalUuid,
         lease: Arc<ActiveArchiveLease>,
         status_provider: F,
+        core_failure_reporter: R,
     ) -> Self
     where
         F: Fn() -> Option<ActiveStatusObservation> + Send + Sync + 'static,
+        R: QueryCoreFailureReporter,
     {
         Self {
             run_id,
             target: QueryTarget::Active {
                 lease,
                 status_provider: Arc::new(status_provider),
+                core_failure_reporter: Arc::new(core_failure_reporter),
             },
         }
     }
 
-    pub fn active_unobserved(run_id: CanonicalUuid, lease: Arc<ActiveArchiveLease>) -> Self {
-        Self::active(run_id, lease, || None)
+    pub fn active_unobserved<R>(
+        run_id: CanonicalUuid,
+        lease: Arc<ActiveArchiveLease>,
+        core_failure_reporter: R,
+    ) -> Self
+    where
+        R: QueryCoreFailureReporter,
+    {
+        Self::active(run_id, lease, || None, core_failure_reporter)
     }
 
     pub fn archive(run_id: CanonicalUuid, run_directory: impl Into<PathBuf>) -> Self {
@@ -110,10 +210,10 @@ impl QueryEndpoints {
         let result = validate_json_request(&request)
             .and_then(|()| validate_no_query(&request))
             .and_then(|()| {
-                self.with_capture(|source, active| {
+                let result = self.with_capture(|source, active| {
                     encode_status_response(self.run_id, source, active)
-                })
-                .map_err(ClientError::from_operation)
+                });
+                self.finish_operation(QueryEndpointKind::Status, result)
             });
         self.finish(result)
     }
@@ -122,8 +222,9 @@ impl QueryEndpoints {
         let result = validate_json_request(&request)
             .and_then(|()| validate_no_query(&request))
             .and_then(|()| {
-                self.with_capture(|source, _active| encode_snapshot_response(self.run_id, source))
-                    .map_err(ClientError::from_operation)
+                let result = self
+                    .with_capture(|source, _active| encode_snapshot_response(self.run_id, source));
+                self.finish_operation(QueryEndpointKind::Snapshot, result)
             });
         self.finish(result)
     }
@@ -132,10 +233,10 @@ impl QueryEndpoints {
         let result = validate_json_request(&request)
             .and_then(|()| parse_event_query(&request))
             .and_then(|query| {
-                self.with_capture(|source, _active| {
+                let result = self.with_capture(|source, _active| {
                     encode_events_response(self.run_id, source, query)
-                })
-                .map_err(ClientError::from_operation)
+                });
+                self.finish_operation(QueryEndpointKind::Events, result)
             });
         self.finish(result)
     }
@@ -144,6 +245,27 @@ impl QueryEndpoints {
         match result {
             Ok(bytes) => json_bytes(StatusCode::OK, bytes),
             Err(error) => error.response(self.run_id),
+        }
+    }
+
+    fn finish_operation(
+        &self,
+        endpoint: QueryEndpointKind,
+        result: Result<Vec<u8>, QueryEndpointError>,
+    ) -> Result<Vec<u8>, ClientError> {
+        match result {
+            Ok(bytes) => Ok(bytes),
+            Err(error) => {
+                if let QueryTarget::Active {
+                    core_failure_reporter,
+                    ..
+                } = &self.target
+                    && let Some(failure) = error.core_failure_signal(self.run_id, endpoint)
+                {
+                    core_failure_reporter.report(failure);
+                }
+                Err(ClientError::from_operation(error))
+            }
         }
     }
 
@@ -158,6 +280,7 @@ impl QueryEndpoints {
             QueryTarget::Active {
                 lease,
                 status_provider,
+                ..
             } => {
                 let mut reader = DiagnosticReader::open_active(self.run_id, lease.guard())?;
                 let captured = reader.capture()?;
@@ -191,30 +314,104 @@ impl fmt::Debug for QueryEndpoints {
 #[derive(Debug)]
 pub enum QueryEndpointError {
     Reader(ReaderFailure),
-    Status(StatusProjectionError),
+    Status {
+        profile: ReaderProfile,
+        source: StatusProjectionError,
+    },
     Snapshot(SnapshotQueryError),
     Events(EventQueryError),
     IdentityMismatch {
+        profile: ReaderProfile,
         expected: CanonicalUuid,
         actual: CanonicalUuid,
     },
-    SnapshotWatermarkMismatch,
-    Json(serde_json::Error),
+    SnapshotWatermarkMismatch {
+        profile: ReaderProfile,
+    },
+    Json {
+        profile: ReaderProfile,
+        source: serde_json::Error,
+    },
 }
 
 impl QueryEndpointError {
-    fn store_code(&self) -> Option<StoreOpenErrorCode> {
+    pub const fn class(&self) -> ReaderFailureClass {
+        match self {
+            Self::Reader(error) => error.class(),
+            Self::Status { profile, .. }
+            | Self::IdentityMismatch { profile, .. }
+            | Self::SnapshotWatermarkMismatch { profile }
+            | Self::Json { profile, .. } => failure_class(*profile),
+            Self::Snapshot(error) => error.class(),
+            Self::Events(error) => error.class(),
+        }
+    }
+
+    pub const fn profile(&self) -> ReaderProfile {
+        match self {
+            Self::Reader(error) => error.profile(),
+            Self::Status { profile, .. }
+            | Self::IdentityMismatch { profile, .. }
+            | Self::SnapshotWatermarkMismatch { profile }
+            | Self::Json { profile, .. } => *profile,
+            Self::Snapshot(error) => error.profile(),
+            Self::Events(error) => error.profile(),
+        }
+    }
+
+    pub const fn code(&self) -> QueryFailureCode {
+        match self {
+            Self::Reader(error) => QueryFailureCode::Reader(error.code()),
+            Self::Status { source, .. } => match source {
+                StatusProjectionError::UnknownProductionOutcome(_) => {
+                    QueryFailureCode::StatusUnknownProductionOutcome
+                }
+                StatusProjectionError::NumericOutOfRange { .. } => {
+                    QueryFailureCode::StatusNumericOutOfRange
+                }
+            },
+            Self::Snapshot(error) => QueryFailureCode::Snapshot(error.code()),
+            Self::Events(error) => QueryFailureCode::Reader(error.code()),
+            Self::IdentityMismatch { .. } => QueryFailureCode::RunIdentityMismatch,
+            Self::SnapshotWatermarkMismatch { .. } => QueryFailureCode::SnapshotWatermarkMismatch,
+            Self::Json { .. } => QueryFailureCode::ResponseEncoding,
+        }
+    }
+
+    pub const fn store_code(&self) -> Option<StoreOpenErrorCode> {
         match self {
             Self::Reader(error) => error.store_code(),
-            Self::Events(error) => error.reader_failure().and_then(ReaderFailure::store_code),
+            Self::Events(error) => match error.reader_failure() {
+                Some(error) => error.store_code(),
+                None => None,
+            },
             _ => None,
         }
     }
 
-    fn snapshot_code(&self) -> Option<SnapshotQueryErrorCode> {
+    pub const fn snapshot_code(&self) -> Option<SnapshotQueryErrorCode> {
         match self {
             Self::Snapshot(error) => Some(error.code()),
             _ => None,
+        }
+    }
+
+    pub const fn core_failure_signal(
+        &self,
+        run_id: CanonicalUuid,
+        endpoint: QueryEndpointKind,
+    ) -> Option<QueryCoreFailureSignal> {
+        let class = self.class();
+        if matches!(class, ReaderFailureClass::CoreFatal) {
+            Some(QueryCoreFailureSignal {
+                run_id,
+                endpoint,
+                class,
+                code: self.code(),
+                store_code: self.store_code(),
+            })
+        } else {
+            None
         }
     }
 }
@@ -223,18 +420,20 @@ impl fmt::Display for QueryEndpointError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Reader(error) => fmt::Display::fmt(error, formatter),
-            Self::Status(error) => fmt::Display::fmt(error, formatter),
+            Self::Status { source, .. } => fmt::Display::fmt(source, formatter),
             Self::Snapshot(error) => fmt::Display::fmt(error, formatter),
             Self::Events(error) => fmt::Display::fmt(error, formatter),
-            Self::IdentityMismatch { expected, actual } => {
+            Self::IdentityMismatch {
+                expected, actual, ..
+            } => {
                 write!(
                     formatter,
                     "query response belongs to Run {actual}, expected {expected}"
                 )
             }
-            Self::SnapshotWatermarkMismatch => formatter
+            Self::SnapshotWatermarkMismatch { .. } => formatter
                 .write_str("snapshot state watermark does not match the response watermark"),
-            Self::Json(error) => fmt::Display::fmt(error, formatter),
+            Self::Json { source, .. } => fmt::Display::fmt(source, formatter),
         }
     }
 }
@@ -243,12 +442,11 @@ impl std::error::Error for QueryEndpointError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
-            Self::Status(error) => Some(error),
+            Self::Status { source, .. } => Some(source),
             Self::Snapshot(error) => Some(error),
             Self::Events(error) => Some(error),
-            Self::IdentityMismatch { .. } => None,
-            Self::SnapshotWatermarkMismatch => None,
-            Self::Json(error) => Some(error),
+            Self::IdentityMismatch { .. } | Self::SnapshotWatermarkMismatch { .. } => None,
+            Self::Json { source, .. } => Some(source),
         }
     }
 }
@@ -256,12 +454,6 @@ impl std::error::Error for QueryEndpointError {
 impl From<ReaderFailure> for QueryEndpointError {
     fn from(error: ReaderFailure) -> Self {
         Self::Reader(error)
-    }
-}
-
-impl From<StatusProjectionError> for QueryEndpointError {
-    fn from(error: StatusProjectionError) -> Self {
-        Self::Status(error)
     }
 }
 
@@ -277,31 +469,29 @@ impl From<EventQueryError> for QueryEndpointError {
     }
 }
 
-impl From<serde_json::Error> for QueryEndpointError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
-    }
-}
-
 pub fn encode_status_response(
     expected_run_id: CanonicalUuid,
     source: &CapturedEventSource<'_>,
     active: Option<&ActiveStatusObservation>,
 ) -> Result<Vec<u8>, QueryEndpointError> {
-    let status = project_status(source, active)?;
-    ensure_run_id(expected_run_id, status.identity().run_id())?;
-    serde_json::to_vec(&StatusResponse::from_status(&status)).map_err(Into::into)
+    let profile = source.profile();
+    let status = project_status(source, active)
+        .map_err(|source| QueryEndpointError::Status { profile, source })?;
+    ensure_run_id(profile, expected_run_id, status.identity().run_id())?;
+    serde_json::to_vec(&StatusResponse::from_status(&status))
+        .map_err(|source| QueryEndpointError::Json { profile, source })
 }
 
 pub fn encode_snapshot_response(
     expected_run_id: CanonicalUuid,
     source: &CapturedEventSource<'_>,
 ) -> Result<Vec<u8>, QueryEndpointError> {
+    let profile = source.profile();
     let snapshot = project_snapshot(source)?;
-    ensure_run_id(expected_run_id, snapshot.run_id())?;
-    ensure_run_id(expected_run_id, snapshot.state().run_id())?;
+    ensure_run_id(profile, expected_run_id, snapshot.run_id())?;
+    ensure_run_id(profile, expected_run_id, snapshot.state().run_id())?;
     if snapshot.state().through_sequence() != snapshot.watermark_sequence() {
-        return Err(QueryEndpointError::SnapshotWatermarkMismatch);
+        return Err(QueryEndpointError::SnapshotWatermarkMismatch { profile });
     }
 
     let earliest = snapshot
@@ -324,7 +514,8 @@ pub fn encode_events_response(
     source: &CapturedEventSource<'_>,
     query: FiniteEventQuery,
 ) -> Result<Vec<u8>, QueryEndpointError> {
-    ensure_run_id(expected_run_id, source.metadata().run_id())?;
+    let profile = source.profile();
+    ensure_run_id(profile, expected_run_id, source.metadata().run_id())?;
     let mut events = query_events(source, query);
     let captured_watermark = events.range().captured_watermark();
     let mut bytes = format!(
@@ -335,7 +526,7 @@ pub fn encode_events_response(
     let mut first = true;
     for captured in &mut events {
         let captured = captured?;
-        ensure_run_id(expected_run_id, captured.event().header().run_id())?;
+        ensure_run_id(profile, expected_run_id, captured.event().header().run_id())?;
         if !first {
             bytes.push(b',');
         }
@@ -346,11 +537,26 @@ pub fn encode_events_response(
     Ok(bytes)
 }
 
-fn ensure_run_id(expected: CanonicalUuid, actual: CanonicalUuid) -> Result<(), QueryEndpointError> {
+fn ensure_run_id(
+    profile: ReaderProfile,
+    expected: CanonicalUuid,
+    actual: CanonicalUuid,
+) -> Result<(), QueryEndpointError> {
     if expected == actual {
         Ok(())
     } else {
-        Err(QueryEndpointError::IdentityMismatch { expected, actual })
+        Err(QueryEndpointError::IdentityMismatch {
+            profile,
+            expected,
+            actual,
+        })
+    }
+}
+
+const fn failure_class(profile: ReaderProfile) -> ReaderFailureClass {
+    match profile {
+        ReaderProfile::Active => ReaderFailureClass::CoreFatal,
+        ReaderProfile::Archive => ReaderFailureClass::ArchiveOperation,
     }
 }
 

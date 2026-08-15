@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -32,16 +32,25 @@ use troupe_diagnostics_core::{
 };
 use troupe_diagnostics_runtime::{
     archive::lease::ActiveArchiveLease,
-    query::{events::FiniteEventQuery, reader::DiagnosticReader, status::ActiveStatusObservation},
+    query::{
+        events::FiniteEventQuery,
+        reader::{DiagnosticReader, ReaderErrorCode, ReaderFailureClass, ReaderProfile},
+        snapshot::SnapshotQueryErrorCode,
+        status::{ActiveStatusObservation, StatusProjectionError},
+    },
     registry::{model::WebBaseUrl, process_identity::ProcessIdentity},
     server::{
-        query::{QueryEndpoints, encode_events_response, encode_snapshot_response},
+        query::{
+            QueryCoreFailureSignal, QueryEndpointError, QueryEndpointKind, QueryEndpoints,
+            QueryFailureCode, encode_events_response, encode_snapshot_response,
+        },
         runtime::{DiagnosticServer, ServerConfig},
     },
     store::{
         admission::MandatoryIngress,
         batch::EventBatch,
-        connection::{DiagnosticStore, InitialStoreMetadata},
+        connection::{DiagnosticStore, InitialStoreMetadata, StoreOpenErrorCode},
+        key::SortableU64Key,
         progress::WriterProgressSupervisor,
         quota::RunQuota,
         schema::DIAGNOSTIC_DATABASE_FILENAME,
@@ -251,6 +260,8 @@ fn build_archive(
 fn process_identity() -> ProcessIdentity {
     ProcessIdentity::new("test", "h01:4242").expect("valid process identity")
 }
+
+fn ignore_core_failure(_failure: QueryCoreFailureSignal) {}
 
 fn start_archive_server(expected_run_id: CanonicalUuid, directory: &Path) -> DiagnosticServer {
     let endpoint = QueryEndpoints::archive(expected_run_id, directory);
@@ -615,7 +626,12 @@ fn active_status_serializes_available_live_observations() {
         progress.status(),
         quota.status().expect("quota status"),
     );
-    let endpoint = QueryEndpoints::active(run_id(), lease, move || Some(observation.clone()));
+    let endpoint = QueryEndpoints::active(
+        run_id(),
+        lease,
+        move || Some(observation.clone()),
+        ignore_core_failure,
+    );
     let server = DiagnosticServer::start(
         ServerConfig::new(run_id(), std::process::id(), process_identity())
             .with_bind("127.0.0.1", 0),
@@ -635,6 +651,224 @@ fn active_status_serializes_available_live_observations() {
     assert_eq!(body["quota"]["status"], "available");
     assert_eq!(body["quota"]["value"]["max_run_bytes"], Value::Null);
     server.shutdown().expect("clean active server shutdown");
+}
+
+fn recording_reporter(
+    failures: &Arc<Mutex<Vec<QueryCoreFailureSignal>>>,
+) -> impl Fn(QueryCoreFailureSignal) + Send + Sync + 'static {
+    let failures = Arc::clone(failures);
+    move |failure| {
+        failures
+            .lock()
+            .expect("failure recorder lock")
+            .push(failure)
+    }
+}
+
+fn only_failure(failures: &Arc<Mutex<Vec<QueryCoreFailureSignal>>>) -> QueryCoreFailureSignal {
+    let failures = failures.lock().expect("failure recorder lock");
+    assert_eq!(failures.len(), 1);
+    failures[0]
+}
+
+#[test]
+fn active_reader_and_projection_failures_report_typed_core_fatal_signals() {
+    let identity_directory = TestRunDirectory::new("active-signal-identity");
+    let identity_lease = Arc::new(
+        ActiveArchiveLease::acquire(identity_directory.path()).expect("identity active lease"),
+    );
+    let _identity_store = create_store(identity_directory.path());
+    let identity_failures = Arc::new(Mutex::new(Vec::new()));
+    let identity_endpoint = QueryEndpoints::active_unobserved(
+        other_run_id(),
+        identity_lease,
+        recording_reporter(&identity_failures),
+    );
+    let identity_server = DiagnosticServer::start(
+        ServerConfig::new(other_run_id(), std::process::id(), process_identity())
+            .with_bind("127.0.0.1", 0),
+        identity_endpoint.route_definitions().unwrap(),
+    )
+    .unwrap();
+    assert_closed_error(
+        &request(&identity_server, "GET", "/api/v1/events?after=01", &[]),
+        400,
+        "invalid_cursor",
+        OTHER_RUN_ID,
+    );
+    assert!(identity_failures.lock().unwrap().is_empty());
+    assert_closed_error(
+        &request(&identity_server, "GET", "/api/v1/status", &[]),
+        409,
+        "run_identity_mismatch",
+        OTHER_RUN_ID,
+    );
+    let identity = only_failure(&identity_failures);
+    assert_eq!(identity.run_id(), other_run_id());
+    assert_eq!(identity.endpoint(), QueryEndpointKind::Status);
+    assert_eq!(identity.class(), ReaderFailureClass::CoreFatal);
+    assert_eq!(
+        identity.code(),
+        QueryFailureCode::Reader(ReaderErrorCode::StoreValidation)
+    );
+    assert_eq!(
+        identity.store_code(),
+        Some(StoreOpenErrorCode::RunIdentityMismatch)
+    );
+    identity_server.shutdown().unwrap();
+
+    let dense_directory = TestRunDirectory::new("active-signal-dense");
+    let dense_lease =
+        Arc::new(ActiveArchiveLease::acquire(dense_directory.path()).expect("dense active lease"));
+    let dense_store = create_store(dense_directory.path());
+    let one = SortableU64Key::new(1);
+    dense_store
+        .connection()
+        .execute(
+            "UPDATE run_metadata SET committed_key = ?1, committed_sequence = '1', \
+             read_model_key = ?1, read_model_sequence = '1' WHERE singleton = 1",
+            params![one.as_bytes().as_slice()],
+        )
+        .expect("inject impossible dense prefix");
+    let dense_failures = Arc::new(Mutex::new(Vec::new()));
+    let dense_endpoint = QueryEndpoints::active_unobserved(
+        run_id(),
+        dense_lease,
+        recording_reporter(&dense_failures),
+    );
+    let dense_server = DiagnosticServer::start(
+        ServerConfig::new(run_id(), std::process::id(), process_identity())
+            .with_bind("127.0.0.1", 0),
+        dense_endpoint.route_definitions().unwrap(),
+    )
+    .unwrap();
+    assert_closed_error(
+        &request(&dense_server, "GET", "/api/v1/events", &[]),
+        500,
+        "query_failed",
+        RUN_ID,
+    );
+    let dense = only_failure(&dense_failures);
+    assert_eq!(dense.endpoint(), QueryEndpointKind::Events);
+    assert_eq!(dense.class(), ReaderFailureClass::CoreFatal);
+    assert_eq!(
+        dense.code(),
+        QueryFailureCode::Reader(ReaderErrorCode::StoreValidation)
+    );
+    assert_eq!(
+        dense.store_code(),
+        Some(StoreOpenErrorCode::DensePrefixViolation)
+    );
+    dense_server.shutdown().unwrap();
+
+    let snapshot_directory = TestRunDirectory::new("active-signal-snapshot");
+    let snapshot_lease = Arc::new(
+        ActiveArchiveLease::acquire(snapshot_directory.path()).expect("snapshot active lease"),
+    );
+    let mut snapshot_writer = TransactionalWriter::new(create_store(snapshot_directory.path()), ())
+        .expect("construct snapshot writer");
+    let snapshot_hub = diagnostic_hub();
+    snapshot_writer
+        .commit_batch(&EventBatch::new(vec![counter_event(&snapshot_hub)]).unwrap())
+        .expect("commit snapshot event");
+    let snapshot_store = snapshot_writer.into_store();
+    snapshot_store
+        .connection()
+        .execute("DELETE FROM materialized_snapshot", [])
+        .expect("remove materialized snapshot");
+    let snapshot_failures = Arc::new(Mutex::new(Vec::new()));
+    let snapshot_endpoint = QueryEndpoints::active_unobserved(
+        run_id(),
+        Arc::clone(&snapshot_lease),
+        recording_reporter(&snapshot_failures),
+    );
+    let snapshot_server = DiagnosticServer::start(
+        ServerConfig::new(run_id(), std::process::id(), process_identity())
+            .with_bind("127.0.0.1", 0),
+        snapshot_endpoint.route_definitions().unwrap(),
+    )
+    .unwrap();
+    drop(snapshot_endpoint);
+    assert_closed_error(
+        &request(&snapshot_server, "GET", "/api/v1/snapshot", &[]),
+        500,
+        "query_failed",
+        RUN_ID,
+    );
+    let snapshot = only_failure(&snapshot_failures);
+    assert_eq!(snapshot.endpoint(), QueryEndpointKind::Snapshot);
+    assert_eq!(snapshot.class(), ReaderFailureClass::CoreFatal);
+    assert_eq!(
+        snapshot.code(),
+        QueryFailureCode::Snapshot(SnapshotQueryErrorCode::MaterializedMissing)
+    );
+    assert_eq!(snapshot.store_code(), None);
+    snapshot_server.shutdown().unwrap();
+
+    drop(snapshot_store);
+    drop(snapshot_lease);
+    let mut archive_reader =
+        DiagnosticReader::open_archive(snapshot_directory.path(), run_id()).unwrap();
+    let archive_capture = archive_reader.capture().unwrap();
+    let archive_error = encode_snapshot_response(run_id(), &archive_capture).unwrap_err();
+    assert_eq!(archive_error.profile(), ReaderProfile::Archive);
+    assert_eq!(archive_error.class(), ReaderFailureClass::ArchiveOperation);
+    assert_eq!(
+        archive_error.code(),
+        QueryFailureCode::Snapshot(SnapshotQueryErrorCode::MaterializedMissing)
+    );
+    assert!(
+        archive_error
+            .core_failure_signal(run_id(), QueryEndpointKind::Snapshot)
+            .is_none()
+    );
+    drop(archive_capture);
+    drop(archive_reader);
+    let archive_server = start_archive_server(run_id(), snapshot_directory.path());
+    assert_closed_error(
+        &request(
+            &archive_server,
+            "GET",
+            &format!("{BASE_PATH}/api/v1/snapshot"),
+            &[],
+        ),
+        500,
+        "query_failed",
+        RUN_ID,
+    );
+    assert_eq!(snapshot_failures.lock().unwrap().len(), 1);
+    archive_server.shutdown().unwrap();
+}
+
+#[test]
+fn h01_owned_projection_errors_have_profile_aware_typed_signals() {
+    let active = QueryEndpointError::Status {
+        profile: ReaderProfile::Active,
+        source: StatusProjectionError::UnknownProductionOutcome("future".to_owned()),
+    };
+    let signal = active
+        .core_failure_signal(run_id(), QueryEndpointKind::Status)
+        .expect("active status projection must be core-fatal");
+    assert_eq!(signal.class(), ReaderFailureClass::CoreFatal);
+    assert_eq!(
+        signal.code(),
+        QueryFailureCode::StatusUnknownProductionOutcome
+    );
+    assert_eq!(
+        signal.code().as_str(),
+        "diagnostic_status.unknown_production_outcome"
+    );
+
+    let archive = QueryEndpointError::Status {
+        profile: ReaderProfile::Archive,
+        source: StatusProjectionError::UnknownProductionOutcome("future".to_owned()),
+    };
+    assert_eq!(archive.class(), ReaderFailureClass::ArchiveOperation);
+    assert!(
+        archive
+            .core_failure_signal(run_id(), QueryEndpointKind::Status)
+            .is_none()
+    );
 }
 
 #[test]
