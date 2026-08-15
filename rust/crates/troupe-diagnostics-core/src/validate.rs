@@ -110,7 +110,7 @@ impl fmt::Display for ReferenceValidationError {
 
 impl std::error::Error for ReferenceValidationError {}
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ValidatedEvent<'event> {
     event: &'event DiagnosticEvent,
 }
@@ -170,6 +170,25 @@ impl ReferenceValidator {
         &mut self,
         event: &'event DiagnosticEvent,
     ) -> Result<ValidatedEvent<'event>, ReferenceValidationError> {
+        let change = self.prepare(event)?;
+        self.commit(event, change);
+        Ok(ValidatedEvent { event })
+    }
+
+    pub fn validate_then<'event, T, E>(
+        &mut self,
+        event: &'event DiagnosticEvent,
+        consumer: impl FnOnce(ValidatedEvent<'event>) -> Result<T, E>,
+    ) -> Result<Result<T, E>, ReferenceValidationError> {
+        let change = self.prepare(event)?;
+        let result = consumer(ValidatedEvent { event });
+        if result.is_ok() {
+            self.commit(event, change);
+        }
+        Ok(result)
+    }
+
+    fn prepare(&self, event: &DiagnosticEvent) -> Result<StateChange, ReferenceValidationError> {
         let header = event.header();
         let run_id = header.run_id();
         let sequence = header.sequence();
@@ -215,7 +234,13 @@ impl ReferenceValidator {
             | DiagnosticEvent::ObservationGap(_)
             | DiagnosticEvent::CustomCounterSampled(_) => StateChange::RecordEvent,
         };
+        Ok(change)
+    }
 
+    fn commit(&mut self, event: &DiagnosticEvent, change: StateChange) {
+        let header = event.header();
+        let run_id = header.run_id();
+        let sequence = header.sequence();
         let inserted = self.event_sequences.insert(sequence);
         debug_assert!(
             inserted,
@@ -253,8 +278,6 @@ impl ReferenceValidator {
             }
         }
         self.run_id = Some(run_id);
-
-        Ok(ValidatedEvent { event })
     }
 
     fn validate_causal_links(
