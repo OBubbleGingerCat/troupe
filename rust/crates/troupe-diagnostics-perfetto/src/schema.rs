@@ -143,6 +143,8 @@ pub(crate) struct DebugAnnotation {
 
 pub(crate) mod debug_annotation {
     // perfetto-schema: oneof perfetto.protos.DebugAnnotation.value
+    // Keep the generated-style variants aligned with the audited Perfetto field names.
+    #[allow(clippy::enum_variant_names)]
     #[derive(Clone, PartialEq, prost::Oneof)]
     pub(crate) enum Value {
         // perfetto-schema: field perfetto.protos.DebugAnnotation.bool_value
