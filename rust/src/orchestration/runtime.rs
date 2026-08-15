@@ -128,7 +128,13 @@ pub(crate) async fn run_lifecycle(
     );
     if let Err(error) = start_result {
         failures.push(("start", error));
-        return lifecycle_result(failures);
+        let result = lifecycle_result(failures);
+        runtime_producer::observe_binding(
+            &binding,
+            RuntimeHook::RunLifecycleReturned,
+            result.as_ref().err(),
+        );
+        return result;
     }
 
     if let Err(error) =
@@ -221,7 +227,13 @@ pub(crate) async fn run_lifecycle(
     if let Err(error) = stop_result {
         failures.push(("stop", error));
     }
-    lifecycle_result(failures)
+    let result = lifecycle_result(failures);
+    runtime_producer::observe_binding(
+        &binding,
+        RuntimeHook::RunLifecycleReturned,
+        result.as_ref().err(),
+    );
+    result
 }
 
 struct OuterRunGuard {
