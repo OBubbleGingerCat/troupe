@@ -77,13 +77,13 @@ def custom_renderer_is_closed() -> diagnostics.TimelineView:
     query = diagnostics.TimelineQuery(
         source=diagnostics.SpanSource(kind="cue.execution")
     )
-    return diagnostics.TimelineView(
+    return diagnostics.TimelineView(  # E: call-arg
         id="timeline",
         title="Timeline",
         query=query,
         time_range="run",
         scope="run",
-        renderer="custom",  # E: call-arg
+        renderer="custom",
     )
 
 
