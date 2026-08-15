@@ -881,8 +881,7 @@ mod tests {
                 .expect("resolve valid Production class");
             let error = producer
                 .construct(py, class, &PyList::empty(py))
-                .err()
-                .expect("constructor must fail");
+                .expect_err("constructor must fail");
             assert_eq!(python_reason(py, &error), "construction-failed");
             assert_eq!(calls.bind(py).len(), 1);
             assert_finish(
@@ -924,8 +923,7 @@ mod tests {
                 .expect("resolve valid Production class");
             let error = producer
                 .construct(py, class, &PyList::empty(py))
-                .err()
-                .expect("SystemExit constructor must fail");
+                .expect_err("SystemExit constructor must fail");
             let python_error = error.python_error().expect("retain SystemExit");
             assert!(python_error.value(py).is(expected.bind(py)));
             assert_finish(
@@ -959,8 +957,7 @@ mod tests {
                 .expect("resolve valid Production class");
             let error = producer
                 .construct(py, class, &PyList::empty(py))
-                .err()
-                .expect("construct start admission must fail");
+                .expect_err("construct start admission must fail");
             assert!(error.python_error().is_none());
             assert_eq!(
                 error.diagnostic_error().expect("diagnostic failure").code(),
@@ -988,8 +985,7 @@ mod tests {
                 .expect("resolve valid Production class");
             let error = producer
                 .construct(py, class, &PyList::empty(py))
-                .err()
-                .expect("constructor and finish admission must fail");
+                .expect_err("constructor and finish admission must fail");
             assert_eq!(python_reason(py, &error), "construction-failed");
             assert_eq!(
                 error.diagnostic_error().expect("retain finish failure").code(),
