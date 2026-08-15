@@ -55,7 +55,7 @@ use troupe_diagnostics_runtime::{
 };
 use uuid::Uuid;
 
-use crate::application::loader::ResolvedProductionPath;
+use crate::application::loader::PrevalidatedProductionRoot;
 
 const WRITER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -685,11 +685,11 @@ impl Drop for DiagnosticRuntimeGuard {
 
 pub(crate) fn bootstrap(
     py: Python<'_>,
-    production_path: &ResolvedProductionPath,
+    production_root: &PrevalidatedProductionRoot,
     config: BootstrapConfig,
     components: BootstrapComponents,
 ) -> Result<DiagnosticRuntimeGuard, BootstrapError> {
-    let production_root = production_path
+    let production_root = production_root
         .production_root(py)
         .extract::<PathBuf>()
         .map_err(|error| {
