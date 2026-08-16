@@ -1,0 +1,28 @@
+{
+  "schema": "troupe.perfetto.ui-pixel-oracle.v1",
+  "viewport": {"width":1440,"height":1000,"device_scale_factor":1},
+  "timeouts_ms": {"load":120000,"query":30000,"pixels":30000},
+  "fixtures": {
+    "projection-flow": {
+      "minimum_canvas_count": 4,
+      "canvases": [
+        {
+          "index": 0,
+          "width": 1210,
+          "height": 70,
+          "minimum_opaque_pixels": 1000,
+          "minimum_distinct_colors": 20,
+          "key_pixels": [{"x":120,"y":0,"rgba":[204,204,204,255]}]
+        },
+        {
+          "index": 1,
+          "width": 1195,
+          "height": 57,
+          "minimum_opaque_pixels": 2000,
+          "minimum_distinct_colors": 40,
+          "key_pixels": [{"x":10,"y":6,"rgba":[117,121,124,255]}]
+        }
+      ]
+    }
+  }
+}
