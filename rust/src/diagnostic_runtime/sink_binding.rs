@@ -31,7 +31,6 @@ pub(crate) fn admit_act(
 #[allow(unused_imports)]
 pub(crate) use active::{
     ActSinkAdmissionCapability, BoundActSink, bound_sink_for, production_capability,
-    retire_bound_sink,
 };
 
 #[cfg(not(test))]
@@ -51,9 +50,9 @@ mod active {
         AgentToolPayloadActBudget, SinkOnlyToolPayload, ToolPayloadSource,
     };
     use troupe_agent_runtime::{
-        AgentDiagnosticDestination, AgentDiagnosticErrorCode, AgentDiagnosticFailureOwner,
-        AgentDiagnosticObservation, AgentDiagnosticObserver, AgentDiagnosticObserverFailure,
-        AgentSessionDiagnosticContext, AgentTurnControl, ToolPayloadCapturePolicy,
+        AgentDiagnosticErrorCode, AgentDiagnosticFailureOwner, AgentDiagnosticObserver,
+        AgentDiagnosticObserverFailure, AgentSessionDiagnosticContext, AgentTurnControl,
+        ToolPayloadCapturePolicy,
     };
     use troupe_diagnostics_core::detail::{DiagnosticComponentFailedDetail, InstantDetail};
     use troupe_diagnostics_core::event::{CausalLink, DiagnosticEvent, DiagnosticScope};
@@ -64,7 +63,7 @@ mod active {
     use troupe_diagnostics_core::id::{CanonicalUuid, RunLocalId};
     use troupe_diagnostics_core::kinds::{
         CausalRelation, ComponentFailureErrorCode, ComponentFailureStage, CounterKind, InstantKind,
-        SpanKind,
+        SpanKind, SpanOutcome,
     };
     use troupe_diagnostics_core::scalar::SchemaU64;
     use troupe_diagnostics_core::time::RunClock;
@@ -80,14 +79,21 @@ mod active {
     use crate::diagnostic_runtime::load_producer::{
         DiagnosticActSubscriberInstallError, DiagnosticProducerError, DiagnosticRunContext,
     };
-    use crate::diagnostic_runtime::observation_bridge::CanonicalObservationBridge;
     use crate::diagnostic_runtime::sink_projection::{
         PreparedSinkToolPayload, SinkProjectedEvent, SinkProjectedJsonValue,
         prepare_sink_tool_payload, project_act_event,
     };
+    use crate::diagnostic_runtime::sink_settlement::{
+        ActAuthorityExpiry, ActAuthorityExpiryInstallError, ActSettlementError, ActSettlementSink,
+        ActSettlementSinkCommit, ActSinkSettlement,
+    };
+    use crate::diagnostic_runtime::usage_finalization::{
+        UsageFinalizationFailureOwner, UsageFinalizingObservationBridge,
+        UsageObservationDisposition,
+    };
     use crate::diagnostic_runtime::{act_producer, runtime_producer};
     use crate::diagnostic_sink::{
-        AdmissionClass, AdmissionOutcome, DiagnosticSinkRuntime, DispatchEvent,
+        ActOutcome, AdmissionClass, AdmissionOutcome, DiagnosticSinkRuntime, DispatchEvent,
         SinkDeliveryFailure, SinkHandle,
     };
     use crate::orchestration::scene_context::{CuedScope, RunBinding};
@@ -95,6 +101,7 @@ mod active {
     const STANDALONE_EVENT_MAX_BYTES: usize = 8 * 1024 * 1024;
     const BINDING_SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
     const SINK_DELIVERY_FAILED: &str = "sink_delivery_failed";
+    const SINK_SETTLEMENT_FAILED: &str = "sink_settlement_failed";
 
     fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         mutex
@@ -122,7 +129,9 @@ mod active {
             ));
         }
 
-        let candidate = ActSinkAdmissionCapability::standalone();
+        let candidate = ActSinkAdmissionCapability::standalone().map_err(|error| {
+            PyRuntimeError::new_err(format!("initialize standalone diagnostics: {error}"))
+        })?;
         let erased: Arc<dyn DiagnosticAdmissionCapability> = candidate.clone();
         let capability = match run.diagnostic_admission().install(erased) {
             Ok(()) => candidate,
@@ -161,7 +170,7 @@ mod active {
     }
 
     impl ActSinkAdmissionCapability {
-        fn standalone() -> Arc<Self> {
+        fn standalone() -> Result<Arc<Self>, AgentDiagnosticErrorCode> {
             let run_id = CanonicalUuid::new(Uuid::new_v4());
             let clock = RunClock::from_origin(Instant::now());
             let registry = Arc::new(ActSinkRegistry::default());
@@ -169,13 +178,17 @@ mod active {
             let hub = Arc::new(SinkOnlyDiagnosticHub::sink_only(run_id, StandaloneReserver));
             let context =
                 DiagnosticRunContext::sink_only(Arc::clone(&hub), clock, Arc::clone(&lookup));
-            let canonical =
-                CanonicalObservationBridge::sink_only_with_subscribers(hub, lookup, clock);
-            let destination = Arc::new(StandaloneCanonicalDestination { canonical });
             let local_owner = Arc::new(StandaloneFailureOwner::default());
-            let observer = AgentDiagnosticObserver::new(destination, Arc::clone(&local_owner));
+            let usage_owner: Arc<dyn UsageFinalizationFailureOwner> = local_owner.clone();
+            let usage = UsageFinalizingObservationBridge::sink_only_with_subscribers(
+                hub,
+                lookup,
+                clock,
+                usage_owner,
+            )?;
+            let observer = AgentDiagnosticObserver::new(usage.clone(), Arc::clone(&local_owner));
             let failure_owner: Arc<dyn ActDiagnosticFailureOwner> = local_owner;
-            Arc::new(Self {
+            Ok(Arc::new(Self {
                 state: Arc::new(CapabilityState {
                     profile: DiagnosticAdmissionProfile::SinkOnlyVolatile,
                     run_id,
@@ -184,11 +197,12 @@ mod active {
                     failure_owner,
                     standalone: Some(StandaloneResources {
                         observer,
+                        usage,
                         lineages: Mutex::new(StandaloneLineages::default()),
                     }),
                     sink_runtime: Mutex::new(None),
                 }),
-            })
+            }))
         }
 
         fn prepare(
@@ -285,6 +299,11 @@ mod active {
                     observed_failure_facts.delivery_failed(failure);
                 }))
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let settlement = ActSinkSettlement::new(
+                handle.clone(),
+                request.clone_ref(py),
+                Arc::clone(&self.state.failure_owner),
+            );
             let subscriber = Arc::new(ActSinkSubscriber {
                 state: Arc::downgrade(&self.state),
                 capture,
@@ -294,6 +313,7 @@ mod active {
                 payload: Mutex::new(PayloadState::default()),
                 drop_facts: Mutex::new(DropFactState::default()),
                 failure_facts,
+                settlement,
                 terminal_enqueued: AtomicBool::new(false),
             });
 
@@ -327,6 +347,27 @@ mod active {
             // ActCall control in the prepared producer. Its defensive registry-race branch is
             // therefore unreachable on this valid path, so commit cannot follow a half-publish.
             prepared.commit();
+            if let Some(resources) = &self.state.standalone {
+                match resources.usage.bind_act(act_id.as_str()) {
+                    Ok(UsageObservationDisposition::LateIgnored) => {
+                        self.state
+                            .failure_owner
+                            .latch_state_failure("act.standalone-usage-bind-late");
+                        return Err(PyRuntimeError::new_err(
+                            "standalone diagnostic usage binding missed the admitted Act",
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.state
+                            .failure_owner
+                            .latch_state_failure("act.standalone-usage-bind-failed");
+                        return Err(PyRuntimeError::new_err(format!(
+                            "bind standalone diagnostic usage: {error}"
+                        )));
+                    }
+                }
+            }
             Ok(())
         }
     }
@@ -408,29 +449,28 @@ mod active {
             else {
                 return;
             };
+            let bound = self.registry.bound_all();
+            for subscriber in &bound {
+                if let Err(error) = subscriber.settlement.begin_runtime_shutdown() {
+                    self.failure_owner.latch_state_failure(error.code());
+                }
+            }
             let deadline = Instant::now() + BINDING_SHUTDOWN_GRACE;
             Python::attach(|py| {
-                let _ = py.detach(|| runtime.shutdown_until(deadline));
+                let _report = py.detach(|| runtime.shutdown_until(deadline));
             });
+            for subscriber in bound {
+                if let Err(error) = subscriber.settlement.publish_latched_summary() {
+                    self.failure_owner.latch_state_failure(error.code());
+                }
+            }
         }
     }
 
     struct StandaloneResources {
         observer: AgentDiagnosticObserver,
+        usage: Arc<UsageFinalizingObservationBridge>,
         lineages: Mutex<StandaloneLineages>,
-    }
-
-    struct StandaloneCanonicalDestination {
-        canonical: Arc<CanonicalObservationBridge>,
-    }
-
-    impl AgentDiagnosticDestination for StandaloneCanonicalDestination {
-        fn try_observe(
-            &self,
-            observation: AgentDiagnosticObservation,
-        ) -> Result<(), AgentDiagnosticErrorCode> {
-            self.canonical.observe(&observation).map(|_| ())
-        }
     }
 
     #[derive(Default)]
@@ -545,6 +585,14 @@ mod active {
         }
     }
 
+    impl UsageFinalizationFailureOwner for StandaloneFailureOwner {
+        fn usage_finalization_failed(&self, act_id: &str, error_code: AgentDiagnosticErrorCode) {
+            let _ = self
+                .first_failure
+                .set(format!("{act_id}:{}", error_code.as_str()));
+        }
+    }
+
     #[derive(Default)]
     struct ActSinkRegistry {
         entries: Mutex<HashMap<String, RegistryEntry>>,
@@ -578,11 +626,34 @@ mod active {
             }
         }
 
-        fn retire(&self, act_id: &str) -> Option<Arc<ActSinkSubscriber>> {
-            match lock(&self.entries).remove(act_id) {
-                Some(RegistryEntry::Bound(value)) => Some(value),
-                Some(RegistryEntry::Reserved) | None => None,
+        fn bound_all(&self) -> Vec<Arc<ActSinkSubscriber>> {
+            lock(&self.entries)
+                .values()
+                .filter_map(|entry| match entry {
+                    RegistryEntry::Bound(value) => Some(Arc::clone(value)),
+                    RegistryEntry::Reserved => None,
+                })
+                .collect()
+        }
+
+        fn contains_bound_sink(&self, act_id: &str, sink_id: u64) -> bool {
+            matches!(
+                lock(&self.entries).get(act_id),
+                Some(RegistryEntry::Bound(subscriber)) if subscriber.handle.id() == sink_id
+            )
+        }
+
+        fn retire_expected(&self, act_id: &str, sink_id: u64) -> bool {
+            let mut entries = lock(&self.entries);
+            let expected = matches!(
+                entries.get(act_id),
+                Some(RegistryEntry::Bound(subscriber)) if subscriber.handle.id() == sink_id
+            );
+            if expected {
+                let removed = entries.remove(act_id);
+                debug_assert!(matches!(removed, Some(RegistryEntry::Bound(_))));
             }
+            expected
         }
 
         fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
@@ -641,6 +712,7 @@ mod active {
         payload: Mutex<PayloadState>,
         drop_facts: Mutex<DropFactState>,
         failure_facts: Arc<DeliveryFactEmitter>,
+        settlement: Arc<ActSinkSettlement>,
         terminal_enqueued: AtomicBool,
     }
 
@@ -698,8 +770,19 @@ mod active {
                 DiagnosticEvent::CounterSampled(event)
                     if event.counter_kind() == CounterKind::DiagnosticDroppedEvents
             );
-            let is_act_terminal = matches!(projected.event(), DiagnosticEvent::SpanFinished(_))
-                && projected.canonical().built_in_span_kind() == Some(SpanKind::ActLifecycle);
+            let act_outcome = match projected.event() {
+                DiagnosticEvent::SpanFinished(event)
+                    if projected.canonical().built_in_span_kind()
+                        == Some(SpanKind::ActLifecycle) =>
+                {
+                    Some(match event.outcome() {
+                        SpanOutcome::Completed => ActOutcome::Completed,
+                        SpanOutcome::Cancelled => ActOutcome::Cancelled,
+                        SpanOutcome::Failed => ActOutcome::Failed,
+                    })
+                }
+                _ => None,
+            };
             let materialized = Python::attach(|py| materialize_projected_event(py, &projected));
             let (event, sidecar_bytes) = match materialized {
                 Ok(value) => value,
@@ -713,7 +796,7 @@ mod active {
                 .len()
                 .saturating_add(sidecar_bytes);
             let dispatch = DispatchEvent::new(sequence.get(), event);
-            let outcome = if is_act_terminal {
+            let outcome = if act_outcome.is_some() {
                 let outcome = self
                     .handle
                     .try_enqueue_terminal(dispatch, event_kind, encoded_bytes);
@@ -743,7 +826,34 @@ mod active {
             if !is_drop_counter {
                 self.record_drops(sequence, &outcome);
             }
+            if let Some(act_outcome) = act_outcome {
+                self.settle_terminal(act_outcome)?;
+            }
             Ok(())
+        }
+
+        fn settle_terminal(&self, outcome: ActOutcome) -> Result<(), DeliveryFailure> {
+            let Some(state) = self.state.upgrade() else {
+                return Err(DeliveryFailure::new(SINK_SETTLEMENT_FAILED));
+            };
+            let sink = BoundSinkSettlement {
+                subscriber: self,
+                state: &state,
+                outcome,
+            };
+            if let Err(error) = self.settlement.coordinator().settle_with_sink(&sink) {
+                state.failure_owner.latch_state_failure(error.code());
+                return Err(DeliveryFailure::new(SINK_SETTLEMENT_FAILED));
+            }
+            Ok(())
+        }
+
+        #[allow(dead_code)] // Installed by the ordered B14 successor before subscriber publication.
+        fn install_authority_expiry(
+            &self,
+            authority: Arc<dyn ActAuthorityExpiry>,
+        ) -> Result<(), ActAuthorityExpiryInstallError> {
+            self.settlement.install_authority_expiry(authority)
         }
 
         fn record_drops(&self, source_sequence: SchemaU64, outcome: &AdmissionOutcome) {
@@ -768,6 +878,70 @@ mod active {
             );
             if let Err(error) = result {
                 state.failure_owner.latch_diagnostic_failure(error);
+            }
+        }
+    }
+
+    struct BoundSinkSettlement<'a> {
+        subscriber: &'a ActSinkSubscriber,
+        state: &'a CapabilityState,
+        outcome: ActOutcome,
+    }
+
+    impl ActSettlementSink for BoundSinkSettlement<'_> {
+        fn prepare_settlement(&self) -> Result<(), ActSettlementError> {
+            self.subscriber.settlement.prepare_terminal_seal()?;
+            let act_id = self
+                .subscriber
+                .act_scope
+                .act_id()
+                .expect("an Act sink settlement has an Act ID");
+            if !self
+                .state
+                .registry
+                .contains_bound_sink(act_id.as_str(), self.subscriber.handle.id())
+            {
+                return Err(ActSettlementError::new(
+                    "act.sink-retire-missing",
+                    "diagnostic sink binding is missing before terminal settlement",
+                ));
+            }
+            Ok(())
+        }
+
+        fn commit_settlement(&self) -> ActSettlementSinkCommit {
+            let mut committed_failure = match self
+                .subscriber
+                .settlement
+                .commit_terminal_seal(self.outcome)
+            {
+                ActSettlementSinkCommit::Rejected(error) => {
+                    return ActSettlementSinkCommit::Rejected(error);
+                }
+                ActSettlementSinkCommit::Committed => None,
+                ActSettlementSinkCommit::CommittedWithFailure(error) => Some(error),
+            };
+            let act_id = self
+                .subscriber
+                .act_scope
+                .act_id()
+                .expect("an Act sink settlement has an Act ID");
+            if !self
+                .state
+                .registry
+                .retire_expected(act_id.as_str(), self.subscriber.handle.id())
+            {
+                committed_failure.get_or_insert_with(|| {
+                    ActSettlementError::new(
+                        "act.sink-retire-missing",
+                        "diagnostic sink binding disappeared during terminal settlement",
+                    )
+                });
+            }
+            self.subscriber.settlement.start_close_waiter();
+            match committed_failure {
+                Some(error) => ActSettlementSinkCommit::CommittedWithFailure(error),
+                None => ActSettlementSinkCommit::Committed,
             }
         }
     }
@@ -920,6 +1094,14 @@ mod active {
         pub(crate) fn terminal_enqueued(&self) -> bool {
             self.subscriber.terminal_enqueued.load(Ordering::Acquire)
         }
+
+        #[allow(dead_code)] // Installed by the ordered B14 successor during its admission transaction.
+        pub(crate) fn install_authority_expiry(
+            &self,
+            authority: Arc<dyn ActAuthorityExpiry>,
+        ) -> Result<(), ActAuthorityExpiryInstallError> {
+            self.subscriber.install_authority_expiry(authority)
+        }
     }
 
     pub(crate) fn bound_sink_for(run: &RunBinding, act_id: &str) -> Option<BoundActSink> {
@@ -931,18 +1113,6 @@ mod active {
             .state
             .registry
             .bound(act_id)
-            .map(|subscriber| BoundActSink { subscriber })
-    }
-
-    pub(crate) fn retire_bound_sink(run: &RunBinding, act_id: &str) -> Option<BoundActSink> {
-        let capability = run.diagnostic_admission().capability()?;
-        let capability = capability
-            .as_any()
-            .downcast_ref::<ActSinkAdmissionCapability>()?;
-        capability
-            .state
-            .registry
-            .retire(act_id)
             .map(|subscriber| BoundActSink { subscriber })
     }
 

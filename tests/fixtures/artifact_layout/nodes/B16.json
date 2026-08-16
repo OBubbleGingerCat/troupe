@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/integration/test_actor_act_diagnostic_sink_close.py",
+    "tests/integration/test_actor_act_diagnostic_sink_standalone.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_runtime/sink_binding.rs",
+    "rust/src/diagnostic_runtime/sink_settlement.rs",
+    "rust/src/diagnostic_sink/mod.rs"
+  ],
   "removed": [],
   "generated": []
 }

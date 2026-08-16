@@ -1,8 +1,20 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/integration/test_actor_act_diagnostic_sink_close.py",
+      "tests/integration/test_actor_act_diagnostic_sink_standalone.py",
+      "tests/integration/test_actor_act_cancellation.py",
+      "tests/unit/test_diagnostic_sink_close.py"
+    ]
+  ],
   "env": {},
-  "maturin_features": [],
+  "maturin_features": [
+    "agent-test-support",
+    "diagnostics-test-support"
+  ],
   "cache_requirements": [],
   "exclusive_resources": []
 }

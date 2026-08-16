@@ -11,6 +11,7 @@ mod thread;
 pub(crate) use {
     dispatcher::{DispatchEvent, SinkDeliveryFailure},
     queue::{AdmissionClass, AdmissionOutcome},
-    seal::SinkHandle,
+    seal::{SinkCloseError, SinkClosePoll, SinkHandle, SinkSealError, SinkSealFacts},
     shutdown::DiagnosticSinkRuntime,
+    summary::{ActOutcome, SinkDeliverySummary},
 };
