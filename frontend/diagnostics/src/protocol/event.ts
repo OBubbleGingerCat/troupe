@@ -331,7 +331,7 @@ function utf8ByteLength(value: string): number {
   return bytes;
 }
 
-function decodeRunLocalId(value: unknown, path: string): string {
+export function decodeRunLocalId(value: unknown, path: string): string {
   const text = expectString(value, path);
   if (text.length === 0 || !/^[\x00-\x7f]+$/.test(text) || utf8ByteLength(text) > 128) {
     failProtocol("run_local_id", path, "expected nonempty ASCII with at most 128 bytes");

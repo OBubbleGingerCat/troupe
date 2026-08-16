@@ -64,6 +64,10 @@ export function loadViewFixture(file: string): unknown {
   return readJson(resolve(diagnosticFixtureRoot, "views", file));
 }
 
+export function loadHttpFixture(file: string): unknown {
+  return readJson(resolve(diagnosticFixtureRoot, "http", file));
+}
+
 export function loadAllValidEventFixtures(): readonly unknown[] {
   return loadEventManifest().fixtures
     .filter((entry) => entry.format === "event_array")

@@ -324,6 +324,30 @@ fn run_scene_actor_and_act_queries_share_the_same_terminal_records() {
     assert_eq!(actor_aggregate.finalized_acts().get(), 2);
     assert_eq!(actor_aggregate.input_tokens().reported_acts().get(), 2);
     assert_eq!(model.usages_within_scope(&actor).count(), 2);
+
+    let scoped = model.scoped_aggregates();
+    assert_eq!(scoped.len(), 5);
+    assert_eq!(scoped[0].scope(), &scene);
+    assert_eq!(scoped[0].aggregate(), &scene_aggregate);
+    assert_eq!(scoped[1].scope(), &actor);
+    assert_eq!(scoped[1].aggregate(), &actor_aggregate);
+    assert_eq!(
+        scoped
+            .iter()
+            .map(|item| (
+                item.scope().scene_id().map(RunLocalId::as_str),
+                item.scope().actor_id().map(RunLocalId::as_str),
+                item.aggregate().finalized_acts().get(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("scene-1"), None, 3),
+            (Some("scene-1"), Some("actor-1"), 2),
+            (Some("scene-1"), Some("actor-2"), 1),
+            (Some("scene-2"), None, 1),
+            (Some("scene-2"), Some("actor-3"), 1),
+        ]
+    );
 }
 
 #[test]
@@ -414,6 +438,34 @@ fn illegal_availability_and_corrupt_aggregate_fail_closed() {
         invalid_aggregate
             .validate()
             .expect_err("aggregate drift")
+            .code(),
+        "usage_aggregate_mismatch"
+    );
+
+    let mut invalid_scoped = serde_json::to_value(&model).expect("encode model");
+    invalid_scoped["scoped_aggregates"][0]["aggregate"]["finalized_acts"] =
+        serde_json::json!("999");
+    let invalid_scoped: UsageReadModel =
+        serde_json::from_value(invalid_scoped).expect("decode scoped aggregate drift");
+    assert_eq!(
+        invalid_scoped
+            .validate()
+            .expect_err("scoped aggregate drift")
+            .code(),
+        "usage_aggregate_mismatch"
+    );
+
+    let mut reordered_scopes = serde_json::to_value(&model).expect("encode model");
+    reordered_scopes["scoped_aggregates"]
+        .as_array_mut()
+        .expect("scoped aggregate array")
+        .swap(0, 1);
+    let reordered_scopes: UsageReadModel =
+        serde_json::from_value(reordered_scopes).expect("decode reordered scopes");
+    assert_eq!(
+        reordered_scopes
+            .validate()
+            .expect_err("scoped aggregate order")
             .code(),
         "usage_aggregate_mismatch"
     );

@@ -6,6 +6,7 @@ import type {
   DiagnosticEvent,
   DiagnosticScope,
 } from "../protocol/event.ts";
+import type { UsageSnapshot } from "../protocol/http.ts";
 import type {
   CachedQueryResult,
   DiagnosticState,
@@ -25,6 +26,8 @@ import type {
   ProjectedToolFact,
   ProjectionBucket,
   SelectionReference,
+  SelectedUsageAggregate,
+  UsageSnapshotState,
 } from "./model.ts";
 import {
   ACT_USAGE_CAPACITY,
@@ -36,6 +39,7 @@ import {
   RESULT_FACT_CAPACITY,
   SPAN_CAPACITY,
   TOOL_FACT_CAPACITY,
+  USAGE_SCOPE_AGGREGATE_CAPACITY,
 } from "./model.ts";
 import {
   cacheQueryResult,
@@ -52,6 +56,7 @@ import {
   setFollowLive,
   setViewport,
   setZoom,
+  scopeFromReference,
   toggleExpanded,
 } from "./selection.ts";
 import { activateWindow, appendLiveEvent, createWindowState } from "./windows.ts";
@@ -64,6 +69,7 @@ export type DiagnosticStateAction =
   | { readonly type: "resume" }
   | { readonly type: "resume_request_consumed" }
   | { readonly type: "window_activated"; readonly window: EventWindow }
+  | { readonly type: "usage_snapshot_received"; readonly snapshot: UsageSnapshot }
   | { readonly type: "query_cached"; readonly result: CachedQueryResult }
   | { readonly type: "select"; readonly selection: SelectionReference | null }
   | { readonly type: "pin_detail"; readonly selection: SelectionReference | null }
@@ -123,6 +129,7 @@ export function createDiagnosticState(
     delivery_issue: null,
     windows: createWindowState(),
     live: createLiveEdge(throughSequence, throughElapsedNs),
+    usage_snapshot: null,
     queries: createQueryCache(),
     presentation: createPresentationState(),
     pause: {
@@ -654,6 +661,10 @@ function acceptedEvent(state: DiagnosticState, event: DiagnosticEvent): Diagnost
     },
     delivery_issue: null,
     live: appendLiveEvent(state.live, event, projection),
+    usage_snapshot: event.kind === "act_token_usage_finalized"
+      || gapAffects(event, ["act_token_usage_finalized"])
+      ? staleUsageSnapshot(state.usage_snapshot, event.sequence)
+      : state.usage_snapshot,
     queries: invalidateQueries(state.queries, event),
     pause: withPauseWatermark(state.pause, watermark),
   };
@@ -726,10 +737,59 @@ function receiveEvent(state: DiagnosticState, event: DiagnosticEvent): Diagnosti
         received_sequence: event.sequence,
       },
       queries: invalidateAllQueries(state.queries, watermark),
+      usage_snapshot: staleUsageSnapshot(state.usage_snapshot, watermark),
       pause: withPauseWatermark(state.pause, watermark),
     };
   }
   return acceptedEvent(state, event);
+}
+
+function staleUsageSnapshot(
+  snapshot: UsageSnapshotState | null,
+  through: U64String,
+): UsageSnapshotState | null {
+  if (snapshot === null || compareU64(through, snapshot.captured_through) <= 0) {
+    return snapshot;
+  }
+  if (snapshot.stale_through !== null && compareU64(snapshot.stale_through, through) >= 0) {
+    return snapshot;
+  }
+  return { ...snapshot, stale_through: through };
+}
+
+function receiveUsageSnapshot(
+  state: DiagnosticState,
+  snapshot: UsageSnapshot,
+): DiagnosticState {
+  if (snapshot.run_id !== state.run_id) {
+    throw new RangeError("usage snapshot belongs to another Run");
+  }
+  if (
+    state.usage_snapshot !== null
+    && compareU64(snapshot.through_sequence, state.usage_snapshot.captured_through) <= 0
+  ) {
+    return state;
+  }
+  const usages = snapshot.usages.slice(-ACT_USAGE_CAPACITY).map((item): ProjectedActUsage => ({
+    act_key: item.act_id,
+    event: item.event,
+  }));
+  const scopedAggregates = snapshot.scoped_aggregates.slice(-USAGE_SCOPE_AGGREGATE_CAPACITY);
+  const staleThrough = compareU64(state.cursor.committed_watermark, snapshot.through_sequence) > 0
+    ? state.cursor.committed_watermark
+    : null;
+  return {
+    ...state,
+    usage_snapshot: {
+      captured_through: snapshot.through_sequence,
+      usages,
+      aggregate: snapshot.aggregate,
+      scoped_aggregates: scopedAggregates,
+      truncated: usages.length !== snapshot.usages.length
+        || scopedAggregates.length !== snapshot.scoped_aggregates.length,
+      stale_through: staleThrough,
+    },
+  };
 }
 
 function staleAt(result: CachedQueryResult, sequence: U64String): CachedQueryResult {
@@ -783,6 +843,7 @@ export function reduceDiagnosticState(
         ...state,
         cursor: { ...state.cursor, committed_watermark: action.through_sequence },
         queries: invalidateAllQueries(state.queries, action.through_sequence),
+        usage_snapshot: staleUsageSnapshot(state.usage_snapshot, action.through_sequence),
         pause: withPauseWatermark(state.pause, action.through_sequence),
       };
     }
@@ -819,6 +880,8 @@ export function reduceDiagnosticState(
         };
       }
       return { ...state, windows: activateWindow(state.windows, action.window) };
+    case "usage_snapshot_received":
+      return receiveUsageSnapshot(state, action.snapshot);
     case "query_cached":
       return { ...state, queries: cacheQueryForCurrentState(state, action.result) };
     case "select":
@@ -842,4 +905,110 @@ export function presentedLiveEdge(state: DiagnosticState): LiveEdgeState {
   return state.pause.paused && state.pause.frozen_live !== null
     ? state.pause.frozen_live
     : state.live;
+}
+
+function selectedUsageScope(state: DiagnosticState, edge: LiveEdgeState): DiagnosticScope | null {
+  const selection = state.presentation.selection;
+  if (selection === null) {
+    return null;
+  }
+  const direct = scopeFromReference(selection);
+  if (direct !== null) {
+    return direct;
+  }
+  if (selection.kind === "event") {
+    const snapshotUsage = state.usage_snapshot?.usages.find(
+      (usage) => usage.event.sequence === selection.id,
+    );
+    if (snapshotUsage !== undefined) {
+      return snapshotUsage.event.scope;
+    }
+    const event = edge.events.find((candidate) => candidate.sequence === selection.id)
+      ?? state.windows.visible?.events.find((candidate) => candidate.sequence === selection.id);
+    return event?.scope ?? null;
+  }
+  if (selection.kind === "span") {
+    const span = edge.projection.spans.items.find((candidate) => candidate.span_id === selection.id);
+    return span?.start?.scope ?? span?.finish?.scope ?? null;
+  }
+  if (selection.kind === "message") {
+    return edge.projection.messages.items.find((message) => message.message_id === selection.id)?.scope
+      ?? null;
+  }
+  return null;
+}
+
+function aggregateMatchesScope(
+  aggregateScope: DiagnosticScope,
+  selected: DiagnosticScope | null,
+): boolean {
+  if (selected === null || selected.scene_id === null) {
+    return false;
+  }
+  if (aggregateScope.scene_id !== selected.scene_id) {
+    return false;
+  }
+  return aggregateScope.actor_id === null
+    || selected.actor_id !== null && aggregateScope.actor_id === selected.actor_id;
+}
+
+function scopeContains(parent: DiagnosticScope | null, child: DiagnosticScope): boolean {
+  if (parent === null) {
+    return true;
+  }
+  return (
+    (parent.scene_id === null || parent.scene_id === child.scene_id)
+    && (parent.actor_id === null || parent.actor_id === child.actor_id)
+    && (parent.cue_id === null || parent.cue_id === child.cue_id)
+    && (parent.effect_id === null || parent.effect_id === child.effect_id)
+    && (parent.act_id === null || parent.act_id === child.act_id)
+    && (parent.tool_call_id === null || parent.tool_call_id === child.tool_call_id)
+    && (parent.session_generation === null
+      || parent.session_generation === child.session_generation)
+  );
+}
+
+export function selectUsagePanelFacts(state: DiagnosticState): {
+  readonly usages: readonly ProjectedActUsage[];
+  readonly aggregates: readonly SelectedUsageAggregate[];
+  readonly needs_server_refresh: boolean;
+} {
+  const edge = presentedLiveEdge(state);
+  const selected = selectedUsageScope(state, edge);
+  const usages = new Map<string, ProjectedActUsage>();
+  for (const usage of state.usage_snapshot?.usages ?? []) {
+    usages.set(usage.act_key, usage);
+  }
+  for (const usage of edge.projection.act_usage.items) {
+    usages.set(usage.act_key, usage);
+  }
+  const snapshot = state.usage_snapshot;
+  const aggregates: SelectedUsageAggregate[] = snapshot === null ? [] : [{
+    scope_kind: "run",
+    scope_label: "Run",
+    aggregate: snapshot.aggregate,
+  }];
+  if (snapshot !== null) {
+    for (const scoped of snapshot.scoped_aggregates) {
+      if (!aggregateMatchesScope(scoped.scope, selected)) {
+        continue;
+      }
+      const actor = scoped.scope.actor_id;
+      aggregates.push({
+        scope_kind: actor === null ? "scene" : "actor",
+        scope_label: actor ?? scoped.scope.scene_id ?? "Unknown scope",
+        aggregate: scoped.aggregate,
+      });
+    }
+  }
+  return {
+    usages: [...usages.values()]
+      .filter((usage) => scopeContains(selected, usage.event.scope))
+      .sort((left, right) => compareU64(left.event.sequence, right.event.sequence)),
+    aggregates,
+    needs_server_refresh: snapshot === null
+      || edge.projection.act_usage.needs_server_refresh
+      || snapshot?.truncated === true
+      || snapshot?.stale_through !== null && snapshot?.stale_through !== undefined,
+  };
 }

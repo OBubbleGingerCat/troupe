@@ -22,6 +22,7 @@ pub struct UsageReadModel {
     through_elapsed_ns: ElapsedNs,
     usages: Vec<ProjectedActUsage>,
     aggregate: UsageAggregate,
+    scoped_aggregates: Vec<ScopedUsageAggregate>,
 }
 
 impl UsageReadModel {
@@ -33,6 +34,7 @@ impl UsageReadModel {
             through_elapsed_ns: ElapsedNs::new(0),
             usages: Vec::new(),
             aggregate: UsageAggregate::empty(),
+            scoped_aggregates: Vec::new(),
         }
     }
 
@@ -58,6 +60,10 @@ impl UsageReadModel {
 
     pub const fn aggregate(&self) -> &UsageAggregate {
         &self.aggregate
+    }
+
+    pub fn scoped_aggregates(&self) -> &[ScopedUsageAggregate] {
+        &self.scoped_aggregates
     }
 
     pub fn usage_for_act(&self, act_id: &RunLocalId) -> Option<&ProjectedActUsage> {
@@ -133,12 +139,30 @@ impl UsageReadModel {
         }
 
         let expected = aggregate_records(self.usages.iter())?;
-        if self.aggregate != expected {
+        let expected_scoped = aggregate_records_by_scope(self.usages.iter())?;
+        if self.aggregate != expected || self.scoped_aggregates != expected_scoped {
             return Err(UsageProjectionError::AggregateMismatch {
                 event_sequence: self.through_sequence,
             });
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedUsageAggregate {
+    scope: DiagnosticScope,
+    aggregate: UsageAggregate,
+}
+
+impl ScopedUsageAggregate {
+    pub const fn scope(&self) -> &DiagnosticScope {
+        &self.scope
+    }
+
+    pub const fn aggregate(&self) -> &UsageAggregate {
+        &self.aggregate
     }
 }
 
@@ -502,6 +526,7 @@ fn candidate_for_event(
             });
         }
         candidate.aggregate.record(&projected)?;
+        record_scoped_aggregates(&mut candidate.scoped_aggregates, &projected)?;
         candidate.usages.push(projected);
     }
     candidate.through_sequence = event.header().sequence();
@@ -559,6 +584,62 @@ fn aggregate_records<'a>(
         aggregate.record(usage)?;
     }
     Ok(aggregate)
+}
+
+fn aggregate_records_by_scope<'a>(
+    usages: impl IntoIterator<Item = &'a ProjectedActUsage>,
+) -> Result<Vec<ScopedUsageAggregate>, UsageProjectionError> {
+    let mut aggregates = Vec::new();
+    for usage in usages {
+        record_scoped_aggregates(&mut aggregates, usage)?;
+    }
+    Ok(aggregates)
+}
+
+fn record_scoped_aggregates(
+    aggregates: &mut Vec<ScopedUsageAggregate>,
+    usage: &ProjectedActUsage,
+) -> Result<(), UsageProjectionError> {
+    let Some(scene_id) = usage.scope().scene_id().cloned() else {
+        return Ok(());
+    };
+    let scene = DiagnosticScope::new(
+        Some(scene_id.clone()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    record_scoped_aggregate(aggregates, scene, usage)?;
+    if let Some(actor_id) = usage.scope().actor_id().cloned() {
+        let actor = DiagnosticScope::new(
+            Some(scene_id),
+            Some(actor_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        record_scoped_aggregate(aggregates, actor, usage)?;
+    }
+    Ok(())
+}
+
+fn record_scoped_aggregate(
+    aggregates: &mut Vec<ScopedUsageAggregate>,
+    scope: DiagnosticScope,
+    usage: &ProjectedActUsage,
+) -> Result<(), UsageProjectionError> {
+    if let Some(existing) = aggregates.iter_mut().find(|item| item.scope == scope) {
+        return existing.aggregate.record(usage);
+    }
+    let mut aggregate = UsageAggregate::empty();
+    aggregate.record(usage)?;
+    aggregates.push(ScopedUsageAggregate { scope, aggregate });
+    Ok(())
 }
 
 fn increment_count(

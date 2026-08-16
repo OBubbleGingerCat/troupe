@@ -67,5 +67,6 @@ state:
         known_sum: null
         reported_acts: 0
         finalized_acts: 0
+    scoped_aggregates: []
   gaps: []
   truncations: []

@@ -14,6 +14,10 @@ import type {
   SpanStartedEvent,
 } from "../protocol/event.ts";
 import type { CanonicalUuid, U64String } from "../protocol/decimal.ts";
+import type {
+  ScopedUsageAggregateSnapshot,
+  UsageAggregateSnapshot,
+} from "../protocol/http.ts";
 import type { FixedLru } from "./lru.ts";
 
 
@@ -31,6 +35,7 @@ export const RESULT_FACT_CAPACITY = 256;
 export const GAP_CAPACITY = 128;
 export const QUERY_RESULT_CAPACITY = 64;
 export const EXPANDED_ITEM_CAPACITY = 128;
+export const USAGE_SCOPE_AGGREGATE_CAPACITY = 256;
 
 export interface SequenceCursor {
   readonly delivered_through: U64String;
@@ -183,6 +188,21 @@ export interface LiveEdgeState {
   readonly projection: LiveProjection;
 }
 
+export interface UsageSnapshotState {
+  readonly captured_through: U64String;
+  readonly usages: readonly ProjectedActUsage[];
+  readonly aggregate: UsageAggregateSnapshot;
+  readonly scoped_aggregates: readonly ScopedUsageAggregateSnapshot[];
+  readonly truncated: boolean;
+  readonly stale_through: U64String | null;
+}
+
+export interface SelectedUsageAggregate {
+  readonly scope_kind: "run" | "scene" | "actor";
+  readonly scope_label: string;
+  readonly aggregate: UsageAggregateSnapshot;
+}
+
 export interface QueryDependency {
   readonly event_kinds: readonly DiagnosticEventKind[] | null;
   readonly scope: DiagnosticScope | null;
@@ -251,6 +271,7 @@ export interface DiagnosticState {
   readonly delivery_issue: DeliveryIssue | null;
   readonly windows: WindowState;
   readonly live: LiveEdgeState;
+  readonly usage_snapshot: UsageSnapshotState | null;
   readonly queries: QueryCache;
   readonly presentation: PresentationState;
   readonly pause: PauseState;

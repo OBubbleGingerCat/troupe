@@ -6,12 +6,18 @@ import {
   type DiagnosticScope,
   decodeDiagnosticEvent,
 } from "../../src/protocol/event.ts";
+import { type UsageSnapshot, decodeSnapshotResponse } from "../../src/protocol/http.ts";
 import {
   createDiagnosticState,
   presentedLiveEdge,
   reduceDiagnosticState,
+  selectUsagePanelFacts,
 } from "../../src/state/reducer.ts";
 import { cacheQueryResult, queryDependsOnEvent } from "../../src/state/queries.ts";
+import {
+  ACT_USAGE_CAPACITY,
+  USAGE_SCOPE_AGGREGATE_CAPACITY,
+} from "../../src/state/model.ts";
 import {
   createPresentationState,
   eventReference,
@@ -22,6 +28,7 @@ import {
   scopeReference,
   spanReference,
 } from "../../src/state/selection.ts";
+import { loadHttpFixture } from "../support/diagnostic-fixtures.ts";
 
 
 const RUN_ID = decodeCanonicalUuid("12345678-1234-4234-9234-123456789abc");
@@ -57,6 +64,110 @@ function ingest(state: ReturnType<typeof createDiagnosticState>, events: readonl
 }
 
 describe("diagnostic state reducer", () => {
+  it("retains bounded validated usage snapshots and invalidates aggregates without recomputing", () => {
+    const response = decodeSnapshotResponse(loadHttpFixture("snapshot-v1.json"));
+    let state = createDiagnosticState(RUN_ID, response.watermark_sequence);
+    state = reduceDiagnosticState(state, {
+      type: "usage_snapshot_received",
+      snapshot: response.state.usage,
+    });
+
+    expect(selectUsagePanelFacts(state)).toMatchObject({
+      needs_server_refresh: false,
+      usages: [{ act_key: "act-1" }],
+      aggregates: [{ scope_kind: "run", scope_label: "Run" }],
+    });
+
+    state = reduceDiagnosticState(state, {
+      type: "select",
+      selection: hierarchyScopeReference(SCOPE, "actor_id"),
+    });
+    expect(selectUsagePanelFacts(state).aggregates.map((aggregate) => aggregate.scope_kind)).toEqual([
+      "run",
+      "scene",
+      "actor",
+    ]);
+
+    state = reduceDiagnosticState(state, {
+      type: "event_received",
+      event: event(3, {
+        kind: "act_token_usage_finalized",
+        scope: { ...SCOPE, cue_id: "cue-2", act_id: "act-2" },
+        availability: "partial",
+        source: "acp.prompt_response.usage",
+        unavailable_reason: null,
+        provider_total_tokens: null,
+        input_tokens: "9",
+        output_tokens: null,
+        thought_tokens: null,
+        cached_read_tokens: null,
+        cached_write_tokens: null,
+      }),
+    });
+    const afterLiveUsage = selectUsagePanelFacts(state);
+    expect(afterLiveUsage.usages.map((usage) => usage.act_key)).toEqual(["act-1", "act-2"]);
+    expect(afterLiveUsage.aggregates[0]?.aggregate.finalized_acts).toBe("1");
+    expect(afterLiveUsage.needs_server_refresh).toBe(true);
+
+    const beforeOldSnapshot = state;
+    state = reduceDiagnosticState(state, {
+      type: "usage_snapshot_received",
+      snapshot: response.state.usage,
+    });
+    expect(state).toBe(beforeOldSnapshot);
+
+    state = reduceDiagnosticState(state, {
+      type: "select",
+      selection: hierarchyScopeReference({ ...SCOPE, actor_id: "actor-other" }, "actor_id"),
+    });
+    expect(selectUsagePanelFacts(state).aggregates.map((aggregate) => aggregate.scope_kind)).toEqual([
+      "run",
+      "scene",
+    ]);
+    expect(selectUsagePanelFacts(state).usages).toEqual([]);
+  });
+
+  it("bounds retained usage records and scoped aggregates", () => {
+    const response = decodeSnapshotResponse(loadHttpFixture("snapshot-v1.json"));
+    const baseUsage = response.state.usage.usages[0]!;
+    const baseScoped = response.state.usage.scoped_aggregates[0]!;
+    const usageCount = ACT_USAGE_CAPACITY + 1;
+    const scopeCount = USAGE_SCOPE_AGGREGATE_CAPACITY + 1;
+    const snapshot: UsageSnapshot = {
+      ...response.state.usage,
+      through_sequence: decodeU64(String(usageCount)),
+      through_elapsed_ns: decodeU64(String(usageCount * 10)),
+      usages: Array.from({ length: usageCount }, (_, index) => {
+        const ordinal = index + 1;
+        const actId = `act-${ordinal}`;
+        return {
+          act_id: actId,
+          event: {
+            ...baseUsage.event,
+            sequence: decodeU64(String(ordinal)),
+            elapsed_ns: decodeU64(String(ordinal * 10)),
+            scope: { ...baseUsage.event.scope, act_id: actId },
+          },
+        };
+      }),
+      scoped_aggregates: Array.from({ length: scopeCount }, (_, index) => ({
+        scope: { ...baseScoped.scope, scene_id: `scene-${index + 1}` },
+        aggregate: baseScoped.aggregate,
+      })),
+    };
+    let state = createDiagnosticState(
+      RUN_ID,
+      snapshot.through_sequence,
+      snapshot.through_elapsed_ns,
+    );
+    state = reduceDiagnosticState(state, { type: "usage_snapshot_received", snapshot });
+
+    expect(state.usage_snapshot?.usages).toHaveLength(ACT_USAGE_CAPACITY);
+    expect(state.usage_snapshot?.scoped_aggregates).toHaveLength(USAGE_SCOPE_AGGREGATE_CAPACITY);
+    expect(state.usage_snapshot?.truncated).toBe(true);
+    expect(selectUsagePanelFacts(state).needs_server_refresh).toBe(true);
+  });
+
   it("shares one canonical event, span, message, and scope selection contract", () => {
     expect(eventReference(decodeU64("12"))).toEqual({ kind: "event", id: "12" });
     expect(spanReference(decodeU64("7"))).toEqual({ kind: "span", id: "7" });
