@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/fixtures/diagnostics/agent-observations.json",
+    "tests/integration/test_diagnostic_agent_observations.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_runtime/observation_bridge.rs"
+  ],
   "removed": [],
   "generated": []
 }

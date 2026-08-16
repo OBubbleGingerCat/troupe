@@ -1,0 +1,136 @@
+{
+  "session_lifecycle": [
+    {
+      "observation": "session_opening",
+      "facts": ["span_started:agent.session.lifecycle"],
+      "generation": null
+    },
+    {
+      "observation": "session_opening_attempt",
+      "facts": ["span_started:agent.session.opening"],
+      "generation": 1
+    },
+    {
+      "observation": "session_ready",
+      "facts": [
+        "instant_occurred:agent.session.ready",
+        "span_finished:agent.session.opening"
+      ],
+      "generation": 1
+    },
+    {
+      "observation": "session_broken",
+      "facts": ["instant_occurred:agent.session.broken"],
+      "generation": 1
+    },
+    {
+      "observation": "session_closing",
+      "facts": ["span_started:agent.session.closing"],
+      "generation": 1
+    },
+    {
+      "observation": "session_closed",
+      "facts": [
+        "span_finished:agent.session.closing",
+        "span_finished:agent.session.lifecycle"
+      ],
+      "generation": 1
+    }
+  ],
+  "candidate_mappings": [
+    {
+      "owner": "A01",
+      "input": "AgentMessageChunkObservation",
+      "normalizer": "AgentMessageNormalizer",
+      "canonical": [
+        "AgentMessageDelta",
+        "AgentMessageCompleted",
+        "ObservationGap"
+      ]
+    },
+    {
+      "owner": "A02",
+      "input": "AgentPlanSnapshotCandidate",
+      "normalizer": null,
+      "canonical": ["AgentPlanSnapshot"]
+    },
+    {
+      "owner": "A05",
+      "input": "AgentThinkingActivityObservation",
+      "normalizer": "AgentThinkingNormalizer",
+      "canonical": ["SpanStarted:agent.thinking", "SpanFinished:agent.thinking", "ObservationGap"]
+    },
+    {
+      "owner": "A06",
+      "input": "AgentContextOccupancyCandidate",
+      "normalizer": null,
+      "canonical": ["ContextUsageSampled:provider"]
+    },
+    {
+      "owner": "A07",
+      "input": "AgentCostCandidate",
+      "normalizer": null,
+      "canonical": ["ContextUsageSampled:carried_forward"]
+    },
+    {
+      "owner": "A03",
+      "input": "AgentToolObservation",
+      "normalizer": "AgentToolNormalizer",
+      "canonical": ["SpanStarted:tool.call", "InstantOccurred:tool.updated", "SpanFinished:tool.call", "ObservationGap"]
+    },
+    {
+      "owner": "A08",
+      "input": "AgentResultCandidate",
+      "normalizer": null,
+      "canonical": [
+        "InstantOccurred:result.submitted",
+        "InstantOccurred:result.rejected",
+        "CounterSampled:result.validation_rejections",
+        "InstantOccurred:result.repair_requested",
+        "InstantOccurred:result.accepted",
+        "InstantOccurred:result.missing"
+      ]
+    }
+  ],
+  "terminal_order": [
+    "AgentMessageNormalizer::turn_terminal",
+    "AgentThinkingNormalizer::turn_terminal",
+    "AgentToolNormalizer::turn_terminal",
+    "act_producer::observe_agent"
+  ],
+  "result_rejection_contract": {
+    "transition_before_counter": true,
+    "counter_starts_at": 1,
+    "counter_step": 1,
+    "scope": "act",
+    "candidate_after_sequence_is_immutable": true
+  },
+  "carried_context_contract": {
+    "origin": "carried_forward",
+    "links_original_sequence": true,
+    "retains_observed_elapsed_ns": true,
+    "requires_sink": false
+  },
+  "noncanonical_candidates": [
+    {
+      "owner": "A04",
+      "input": "AgentTurnUsageCandidate",
+      "disposition": "DeferredUsage"
+    },
+    {
+      "owner": "A09",
+      "input": "AgentToolPayloadCandidate",
+      "disposition": "SinkOnlyPayload"
+    }
+  ],
+  "forbidden_global_content": [
+    "ActTokenUsageFinalized",
+    "SinkOnlyJsonValue",
+    "captured_input",
+    "captured_output",
+    "script",
+    "result_value",
+    "raw_provider_payload",
+    "thought_text"
+  ]
+}
