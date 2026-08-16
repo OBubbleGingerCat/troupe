@@ -1,15 +1,15 @@
 # Production Diagnostics Plan Review Record
 
 - Plan: `docs/plan/production-diagnostics-implementation-plan.md`
-- Status: round 13 plus the user-authorized Perfetto ingestion correction are root-self-reviewed; implementation may continue
+- Status: round 13 plus the user-authorized Perfetto ingestion and Gate projection corrections are root-self-reviewed; implementation may continue
 - Actor Design SHA-256: `acb963576a100e98415418dbc6f68cb4b605c642d06f2c06620ffc4e29a19021`
 - Diagnostics Design SHA-256: `b06d3a8097780787fce3d73f7b623526ef0f4ec30b09c2c9277227b5c74a454d`
-- Plan SHA-256: `c646719643be1f3384fe97aec91e7eed960c6880a06ec9ab3b06a8f301252958`
+- Plan SHA-256: `d7e38ff23bf2bcbc7ad8c4e493d1a9a2365412e7338ab968618270d4a1151501`
 - Validator SHA-256: `7ea28f559a67f75459a3fc305304be4485ac5dfe1159de5ec46c876219b85ad4`
 - Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 46 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
 - Baseline: validator normal/mutation self-test, derived DAG/schedule, ownership closure, balanced planning diffs,
   conflict-marker scan, and whitespace checks passed; no product code changed, so product build/Gates were not rerun
-- Review round: current 13 (frozen by explicit user-authorized root self-review)
+- Review round: current 13 plus implementation-time corrections (frozen by explicit user-authorized root self-review)
 
 Round 13 supersedes Round 12 for implementation dispatch. Its explicit one-time review waiver does not carry to
 another planning hash and does not waive the independent final implementation reviews.
@@ -17,8 +17,17 @@ another planning hash and does not waive the independent final implementation re
 The implementation-time Perfetto correction was authorized for root self-review without four new independent
 votes. Official v57.2 Trace Processor evidence required fixed `trusted_packet_sequence_id=1`, an empty
 `CounterDescriptor` marker on counter tracks, and placement of non-exact numeric fallback instants on the
-enclosing timeline. The accepted design/plan hashes above include only those corrections; the validator, Actor
+enclosing timeline. The accepted design/plan hashes above include that correction; the validator, Actor
 design, 145-node DAG, node count, and final implementation-review obligation are unchanged.
+
+At 115/145 merged nodes, T02's realized ownership audit showed that three bootstrap assembly Gate sentences
+placed modifiers between `descriptor` and `执行`/`运行`. The frozen projector consequently treated the outer
+bootstrap runner as descriptor argv, which would recurse rather than execute the declared children. The user
+explicitly authorized a fast root-only repair and self-review without four new votes. T02, V01, and V12 now use
+the canonical `descriptor执行` boundary; their child argv and all acceptance behavior are unchanged. The normal
+validator, mutation self-test, plan-only ownership audit, and realized T02 ownership audit passed on the exact
+hash tuple above. The correction changes no design, validator, DAG, ownership, package, or product code and does
+not waive the final independent implementation reviews.
 
 ## Round 1
 

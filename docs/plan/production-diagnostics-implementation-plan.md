@@ -1384,7 +1384,7 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 
 - **产物**：`scripts/test_perfetto_compatibility.sh`；`tests/unit/test_perfetto_compatibility_assembly.py`。
 - **验收**：`--offline --all-layers --cache --browser-cache`按T05/T06/T07固定顺序执行且任一失败保留首个非零；`--decode|--sql|--ui`恰选layer，参数完整转发且不联网；summary列出tool/fixture/browser hashes与各层结果；wheel/source inventory断言cache/tool/UI/browser binary不被打包；current-public-UI canary另行显式调用且不属于release result。
-- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh T02`，descriptor以三个fake layer执行`pytest -q tests/unit/test_perfetto_compatibility_assembly.py tests/unit/test_artifact_layout.py`和`scripts/test_perfetto_compatibility.sh --offline --all-layers --cache "${TROUPE_PERFETTO_CACHE:?}" --browser-cache "${TROUPE_PLAYWRIGHT_CACHE:?}"`，fake Perfetto/browser cache由runner以explicit argv注入。
+- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh T02`，descriptor执行`pytest -q tests/unit/test_perfetto_compatibility_assembly.py tests/unit/test_artifact_layout.py`和`scripts/test_perfetto_compatibility.sh --offline --all-layers --cache "${TROUPE_PERFETTO_CACHE:?}" --browser-cache "${TROUPE_PLAYWRIGHT_CACHE:?}"`，三个fake layer及fake Perfetto/browser cache由runner以explicit argv注入。
 - **边界**：只组装已经独立通过的层，不实现新的decode/SQL/UI断言。
 
 #### H00 - HTTP listener/router、identity 与 security shell
@@ -1909,7 +1909,7 @@ HEAD修复并重跑该V节点；V节点只拥有harness、fixture、baseline和�
 
 - **产物**：`scripts/test_linux_release.sh`的diagnostics modes/all assembly；`tests/unit/test_release_script.py`增量exact argv/order/failure/cleanup cases。
 - **验收**：`diagnostics`按V00/V04/V13/V05/V07/V08/V09/V10/V14/V15的冻结runner顺序执行，其中V00/V04/V13/V05/V14调用各自F03 native gate，V07/V08调用各自self-contained wheel runner，V09/V10/V15调用各自bootstrap/release runner；普通node Gate为V05/V07各创建独立`TROUPE_GATE_TMP`，第8.3节final mode才把两个child report path指向fresh final-attempt root；`all`包含existing release gates与diagnostics且任一failure非零；每个child argv/env/cache/timeout/report path显式，不复制其assertion；owned temp安全清理、user path不删、tracked checkout clean；help列出modes；不上传artifact、不自动更新baseline或联网；已有quality/build/compatibility mode保持兼容。
-- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh V01`，descriptor用`pytest -q tests/unit/test_release_script.py`及fake child harness运行`scripts/test_linux_release.sh diagnostics`和`scripts/test_linux_release.sh all`验证dispatch，不在unit gate重复昂贵child suites。
+- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh V01`，descriptor执行`pytest -q tests/unit/test_release_script.py`以及由fake child harness驱动的`scripts/test_linux_release.sh diagnostics`和`scripts/test_linux_release.sh all`，验证dispatch且不在unit gate重复昂贵child suites。
 - **边界**：只做release runner join，不实现wheel/frontend/browser/Perfetto检查。
 
 #### V02 - Full-system happy-path E2E matrix
@@ -1930,7 +1930,7 @@ HEAD修复并重跑该V节点；V节点只拥有harness、fixture、baseline和�
 
 - **产物**：`scripts/test_diagnostics_e2e.sh`；`tests/unit/test_diagnostics_e2e_assembly.py`。
 - **验收**：`--happy-path`只exec`scripts/run_diagnostic_node_gate.sh V02`，`--failures`只exec`scripts/run_diagnostic_node_gate.sh V06`，`--all`固定两者顺序并保留首个failure；argv/exit/signal/temp root完整转发，unknown/multiple mode exit2；V02/V06各自只用OS-assigned isolated ports，`--all`串行只用于确定性聚合而不是声明node Gate间有共享端口资源；assembly不改matrix/oracle；fake child tests覆盖0/1/2/130与cleanup。
-- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh V12`，descriptor以`pytest -q tests/unit/test_diagnostics_e2e_assembly.py`和fake children运行`scripts/test_diagnostics_e2e.sh --all`。
+- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh V12`，descriptor执行`pytest -q tests/unit/test_diagnostics_e2e_assembly.py`和由fake children驱动的`scripts/test_diagnostics_e2e.sh --all`。
 - **边界**：只组装两个已通过runner，不增加E2E case或产品fix。
 
 #### O00 - Operator overview、state、failure 与 cleanup documentation
@@ -2292,6 +2292,10 @@ Round 13是在100/145节点已经merge后的实现阻塞修订。用户明确授
 运行完整validator/mutation self-test并做逐项自审后继续实现，豁免本轮四票独立复审；该一次性豁免只适用于
 review record中标明的Round-13 exact hashes，不改变最终产品实现必须接受独立correctness/design-drift/
 simplicity/scope review的要求，也不能沿用到后续未获用户明确授权的planning hash。
+
+在115/145节点已经merge后，T02实现审计暴露bootstrap assembly Gate的descriptor文字投影会误纳入外层runner。
+用户再次明确授权root快速修复、完成validator/mutation及ownership自审后继续开发，不要求四票独立复审；
+该一次性豁免只适用于review record标明的Gate投影修复exact hashes，最终实现审查义务仍不变。
 
 计划冻结后派出四个独立subagent角色；当前四槽环境先并行三名，任一结束后立即派第四名，root不充当其中
 任何一票：
