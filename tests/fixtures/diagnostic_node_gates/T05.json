@@ -1,6 +1,16 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_perfetto_decode_harness.py"
+    ],
+    [
+      "scripts/test_perfetto_decode_compatibility.sh",
+      "--offline"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
