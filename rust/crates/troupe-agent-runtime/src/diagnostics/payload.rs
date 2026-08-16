@@ -384,6 +384,37 @@ pub fn capture_tool_payload_for_test(
     capture_tool_payload(update, policy).map(CapturedToolPayloadForTest)
 }
 
+/// Runs a test projection against a real-capture input with an exact canonical byte size.
+///
+/// The higher-ranked callback keeps the payload borrow inside this call. The wrapped payload has
+/// no constructor, accessor, `Deref`, or other inner-value escape.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn with_sized_tool_input_for_test<R>(
+    tool_call_id: &str,
+    canonical_bytes: usize,
+    project: impl for<'payload> FnOnce(&'payload SinkOnlyToolPayload) -> R,
+) -> R {
+    assert!(
+        (2..=TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES).contains(&canonical_bytes),
+        "test payload size must fit the per-snapshot capture limit"
+    );
+    let update = SessionUpdate::ToolCall(
+        agent_client_protocol::schema::v1::ToolCall::new(tool_call_id.to_owned(), "test input")
+            .raw_input(Value::String("x".repeat(canonical_bytes - 2))),
+    );
+    let payload = capture_tool_payload(&update, ToolPayloadCapturePolicy::new(true, false))
+        .expect("the exact-size test input is captured");
+    assert_eq!(
+        payload
+            .input()
+            .expect("the exact-size fixture has input")
+            .canonical_bytes(),
+        canonical_bytes
+    );
+    project(&payload)
+}
+
 impl fmt::Debug for SinkOnlyToolPayload {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
