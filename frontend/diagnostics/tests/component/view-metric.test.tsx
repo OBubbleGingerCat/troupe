@@ -119,7 +119,8 @@ describe("C05 metric ViewSpec renderer", () => {
     const { container } = renderState({ status: "ready", response: RESPONSE });
     expect(screen.getByRole("heading", { name: "Active turns" })).toBeInTheDocument();
     const series = screen.getByTestId("metric-series-0");
-    expect(within(series).getByText("2")).toBeInTheDocument();
+    expect(within(series).getByText("2", { selector: ".metric-view__value code" }))
+      .toBeInTheDocument();
     expect(within(series).getByText("count")).toBeInTheDocument();
     expect(within(series).getByLabelText("Metric series 1 coverage"))
       .toHaveTextContent("Matched2Contributing2");
