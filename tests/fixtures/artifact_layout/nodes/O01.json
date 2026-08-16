@@ -1,6 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "docs/diagnostics/python.md",
+    "examples/diagnostics/custom.py",
+    "examples/diagnostics/sink.py",
+    "examples/diagnostics/views.py",
+    "tests/documentation/test_diagnostics_python.py",
+    "tests/typing/diagnostics_examples.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
