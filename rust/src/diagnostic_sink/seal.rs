@@ -5,7 +5,10 @@ use std::sync::{Arc, OnceLock};
 use troupe_diagnostics_core::event::DiagnosticEventKind;
 use troupe_diagnostics_core::id::{CanonicalUuid, RunLocalId};
 
-use super::dispatcher::{DispatchEvent, SinkDispatcher};
+use super::dispatcher::{
+    DispatchEvent, SinkDeliveryFailureObserver, SinkDeliveryFailureObserverInstallError,
+    SinkDispatcher,
+};
 use super::queue::{AdmissionClass, AdmissionOutcome, QueueAccessError, SinkTerminalReason};
 use super::summary::{ActOutcome, SinkCloseReason, SinkDeliverySummary};
 
@@ -115,6 +118,13 @@ impl SinkHandle {
 
     pub(crate) fn id(&self) -> u64 {
         self.inner.dispatcher.id()
+    }
+
+    pub(crate) fn install_failure_observer(
+        &self,
+        observer: Arc<dyn SinkDeliveryFailureObserver>,
+    ) -> Result<(), SinkDeliveryFailureObserverInstallError> {
+        self.inner.dispatcher.install_failure_observer(observer)
     }
 
     pub(crate) fn try_enqueue(

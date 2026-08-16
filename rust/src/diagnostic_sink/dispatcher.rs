@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, OnceLock};
@@ -101,6 +102,36 @@ pub(crate) struct UnexpectedDispatcherFailure {
     detail: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SinkDeliveryFailure {
+    Callback(CallbackFailure),
+    Unexpected(UnexpectedDispatcherFailure),
+}
+
+pub(crate) trait SinkDeliveryFailureObserver: Send + Sync + 'static {
+    fn delivery_failed(&self, failure: SinkDeliveryFailure);
+}
+
+impl<F> SinkDeliveryFailureObserver for F
+where
+    F: Fn(SinkDeliveryFailure) + Send + Sync + 'static,
+{
+    fn delivery_failed(&self, failure: SinkDeliveryFailure) {
+        self(failure);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SinkDeliveryFailureObserverInstallError;
+
+impl fmt::Display for SinkDeliveryFailureObserverInstallError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a diagnostic sink delivery failure observer is already installed")
+    }
+}
+
+impl std::error::Error for SinkDeliveryFailureObserverInstallError {}
+
 impl UnexpectedDispatcherFailure {
     pub(crate) const fn stage(&self) -> &'static str {
         self.stage
@@ -145,6 +176,9 @@ impl SinkDispatcher {
                 queue: SinkQueue::new(runtime_budget),
                 callback_failure: OnceLock::new(),
                 unexpected_failure: OnceLock::new(),
+                failure_observer: OnceLock::new(),
+                callback_failure_notified: AtomicBool::new(false),
+                unexpected_failure_notified: AtomicBool::new(false),
                 delivery_settling: AtomicBool::new(false),
                 runtime_cancel_requested: AtomicBool::new(false),
                 delivered_events: AtomicUsize::new(0),
@@ -187,6 +221,19 @@ impl SinkDispatcher {
 
     pub(crate) fn unexpected_failure(&self) -> Option<UnexpectedDispatcherFailure> {
         self.inner.unexpected_failure.get().cloned()
+    }
+
+    pub(crate) fn install_failure_observer(
+        &self,
+        observer: Arc<dyn SinkDeliveryFailureObserver>,
+    ) -> Result<(), SinkDeliveryFailureObserverInstallError> {
+        self.inner
+            .failure_observer
+            .set(observer)
+            .map_err(|_| SinkDeliveryFailureObserverInstallError)?;
+        self.inner.notify_callback_failure();
+        self.inner.notify_unexpected_failure();
+        Ok(())
     }
 
     pub(crate) fn delivery_settling(&self) -> bool {
@@ -232,13 +279,15 @@ impl SinkDispatcher {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct SinkDispatchState {
     id: u64,
     callback: Py<PyAny>,
     queue: SinkQueue<DispatchEvent>,
     callback_failure: OnceLock<CallbackFailure>,
     unexpected_failure: OnceLock<UnexpectedDispatcherFailure>,
+    failure_observer: OnceLock<Arc<dyn SinkDeliveryFailureObserver>>,
+    callback_failure_notified: AtomicBool,
+    unexpected_failure_notified: AtomicBool,
     delivery_settling: AtomicBool,
     runtime_cancel_requested: AtomicBool,
     delivered_events: AtomicUsize,
@@ -247,20 +296,75 @@ pub(crate) struct SinkDispatchState {
     last_enqueued_sequence: AtomicU64,
 }
 
+impl fmt::Debug for SinkDispatchState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SinkDispatchState")
+            .field("id", &self.id)
+            .field("callback_failure", &self.callback_failure.get())
+            .field("unexpected_failure", &self.unexpected_failure.get())
+            .finish_non_exhaustive()
+    }
+}
+
 impl SinkDispatchState {
     fn is_stopped(&self) -> bool {
         self.callback_failure.get().is_some() || self.unexpected_failure.get().is_some()
     }
 
     fn record_callback_failure(&self, failure: CallbackFailure) {
-        let _ = self.callback_failure.set(failure);
+        if self.callback_failure.set(failure).is_ok() {
+            self.notify_callback_failure();
+        }
     }
 
     fn record_unexpected_failure(&self, stage: &'static str, detail: impl fmt::Display) {
-        let _ = self.unexpected_failure.set(UnexpectedDispatcherFailure {
-            stage,
-            detail: detail.to_string(),
-        });
+        if self
+            .unexpected_failure
+            .set(UnexpectedDispatcherFailure {
+                stage,
+                detail: detail.to_string(),
+            })
+            .is_ok()
+        {
+            self.notify_unexpected_failure();
+        }
+    }
+
+    fn notify_callback_failure(&self) {
+        let Some(observer) = self.failure_observer.get() else {
+            return;
+        };
+        let Some(failure) = self.callback_failure.get().cloned() else {
+            return;
+        };
+        if self
+            .callback_failure_notified
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                observer.delivery_failed(SinkDeliveryFailure::Callback(failure));
+            }));
+        }
+    }
+
+    fn notify_unexpected_failure(&self) {
+        let Some(observer) = self.failure_observer.get() else {
+            return;
+        };
+        let Some(failure) = self.unexpected_failure.get().cloned() else {
+            return;
+        };
+        if self
+            .unexpected_failure_notified
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                observer.delivery_failed(SinkDeliveryFailure::Unexpected(failure));
+            }));
+        }
     }
 
     fn record_delivery(&self, sequence: u64) {
@@ -578,6 +682,7 @@ pub(crate) fn run_dispatcher(
 #[cfg(test)]
 mod tests {
     use std::ffi::CString;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -939,6 +1044,16 @@ class InvalidAsync:
         let raised = runtime
             .register_sink(callback(&module, "Raised", None))
             .expect("register raised sink");
+        let observed_failures = Arc::new(Mutex::new(Vec::new()));
+        let observed_failures_for_callback = Arc::clone(&observed_failures);
+        raised
+            .install_failure_observer(Arc::new(move |failure| {
+                observed_failures_for_callback
+                    .lock()
+                    .expect("failure observation mutex")
+                    .push(failure);
+            }))
+            .expect("install delivery failure observer");
         let cancelled = runtime
             .register_sink(callback(&module, "Cancelled", None))
             .expect("register cancelled sink");
@@ -967,7 +1082,45 @@ class InvalidAsync:
                 && cancelled.callback_failure().is_some()
                 && invalid_sync.callback_failure().is_some()
                 && invalid_async.callback_failure().is_some()
+                && observed_failures
+                    .lock()
+                    .expect("failure observation mutex")
+                    .len()
+                    == 1
         });
+
+        assert!(matches!(
+            observed_failures
+                .lock()
+                .expect("failure observation mutex")
+                .as_slice(),
+            [SinkDeliveryFailure::Callback(failure)] if failure.event_sequence() == 10
+        ));
+        raised
+            .inner
+            .record_callback_failure(CallbackFailure::invalid_return(99));
+
+        let late_failures = Arc::new(Mutex::new(Vec::new()));
+        let late_failures_for_callback = Arc::clone(&late_failures);
+        invalid_sync
+            .install_failure_observer(Arc::new(move |failure| {
+                late_failures_for_callback
+                    .lock()
+                    .expect("late failure observation mutex")
+                    .push(failure);
+            }))
+            .expect("install observer after the callback failure was latched");
+        assert!(matches!(
+            late_failures
+                .lock()
+                .expect("late failure observation mutex")
+                .as_slice(),
+            [SinkDeliveryFailure::Callback(failure)] if failure.event_sequence() == 30
+        ));
+        assert_eq!(
+            invalid_sync.install_failure_observer(Arc::new(|_| {})),
+            Err(SinkDeliveryFailureObserverInstallError)
+        );
 
         let raised_failure = raised.callback_failure().expect("raised failure");
         assert_eq!(raised_failure.kind(), CallbackFailureKind::Raised);
@@ -999,6 +1152,22 @@ class InvalidAsync:
             assert_eq!(sink.delivery_progress().delivered_events(), 0);
             assert_eq!(sink.unexpected_failure(), None);
         }
+        raised
+            .inner
+            .record_unexpected_failure("test", "first unexpected failure");
+        raised
+            .inner
+            .record_unexpected_failure("test", "duplicate unexpected failure");
+        assert!(matches!(
+            observed_failures
+                .lock()
+                .expect("failure observation mutex")
+                .as_slice(),
+            [
+                SinkDeliveryFailure::Callback(_),
+                SinkDeliveryFailure::Unexpected(failure),
+            ] if failure.stage() == "test" && failure.detail() == "first unexpected failure"
+        ));
 
         let _ = raised.try_enqueue(
             DispatchEvent::new(12, self::value(3)),
