@@ -1,6 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/inspector/EventInspector.tsx",
+    "frontend/diagnostics/src/inspector/EventTable.tsx",
+    "frontend/diagnostics/src/inspector/FilterBar.tsx",
+    "frontend/diagnostics/src/inspector/inspector.css",
+    "frontend/diagnostics/src/inspector/selection.ts",
+    "frontend/diagnostics/tests/component/inspector.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
