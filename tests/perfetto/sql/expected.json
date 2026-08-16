@@ -123,18 +123,19 @@
     },
     "open": {
       "schema": "troupe.perfetto.sql-result.v1",
-      "counts": {"tracks":2,"slices":1,"counters":0,"flows":0,"args":20,"metadata":3,"track_event_stats":21},
+      "counts": {"tracks":2,"slices":2,"counters":0,"flows":0,"args":24,"metadata":3,"track_event_stats":21},
       "tracks": [
         {"name":"Troupe Production 12345678-1234-4234-9234-123456789abc","type":"global_merged_track_event","parent":null},
         {"name":"production.start","type":"global_merged_track_event","parent":"Troupe Production 12345678-1234-4234-9234-123456789abc"}
       ],
       "slices": [
-        {"name":"production.start","ts":"10","dur":"-1","track":"production.start","depth":0}
+        {"name":"production.start","ts":"10","dur":"-1","track":"production.start","depth":0},
+        {"name":"troupe.capture_boundary","ts":"11","dur":"0","track":"Troupe Production 12345678-1234-4234-9234-123456789abc","depth":0}
       ],
       "counters": [],
       "flows": [],
-      "args": {"troupe_count":6,"keys":["debug.troupe_event_kind","debug.troupe_event_sequence","debug.troupe_scope_identity","debug.troupe_span_id","debug.troupe_span_kind","debug.troupe_track_identity"]},
-      "metadata": {"trace_type":"proto","trace_size_bytes":"701","production_roots":1},
+      "args": {"troupe_count":10,"keys":["debug.troupe_event_kind","debug.troupe_event_sequence","debug.troupe_scope_identity","debug.troupe_span_id","debug.troupe_span_kind","debug.troupe_track_identity"]},
+      "metadata": {"trace_type":"proto","trace_size_bytes":"875","production_roots":1},
       "stats": {"missing_sequence_id":0,"invalid_counter_track_uuid":0,"nonzero_errors":0},
       "facts": {"open_slices":1,"overlapping_cue_pairs":0,"non_exact_fallbacks":0,"fallback_counter_tracks":0,"i64_max_counters":0}
     },

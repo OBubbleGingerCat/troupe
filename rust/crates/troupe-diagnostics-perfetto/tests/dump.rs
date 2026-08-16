@@ -860,7 +860,14 @@ fn typed_captured_sources_match_the_checked_trace_fixture_set() {
         dump_bytes(source, None).0
     });
     let open = with_active_capture("fixture-open", open_events(), |source| {
-        dump_bytes(source, None).0
+        let (bytes, packets) = dump_bytes(source, None);
+        assert!(
+            bytes
+                .windows(b"troupe.capture_boundary".len())
+                .any(|window| { window == b"troupe.capture_boundary" })
+        );
+        assert_eq!(packets, 5);
+        bytes
     });
     let nested = with_active_capture("fixture-nested", nested_events(), |source| {
         dump_bytes(source, None).0

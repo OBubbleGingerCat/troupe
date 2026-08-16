@@ -147,6 +147,40 @@ impl ProjectionPlan {
             coverage: BTreeMap::new(),
         }
     }
+
+    pub(crate) fn capture_boundary_packet(
+        &self,
+        timestamp: u64,
+    ) -> Result<TracePacket, ProjectionError> {
+        Ok(TracePacket {
+            timestamp: Some(timestamp),
+            optional_trusted_packet_sequence_id: Some(
+                trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                    TRACK_EVENT_PACKET_SEQUENCE_ID,
+                ),
+            ),
+            data: Some(trace_packet::Data::TrackEvent(TrackEvent {
+                debug_annotations: vec![
+                    string_annotation("troupe.event.kind", "instant"),
+                    uint_annotation(
+                        "troupe.event.sequence",
+                        self.metadata.exported_through().get(),
+                    ),
+                    string_annotation("troupe.scope.identity", ROOT_TRACK_IDENTITY),
+                    string_annotation("troupe.track.identity", ROOT_TRACK_IDENTITY),
+                ],
+                r#type: Some(TrackEventType::Instant as i32),
+                track_uuid: Some(self.tracks.id(ROOT_TRACK_IDENTITY)?),
+                name_field: Some(track_event::NameField::Name(
+                    "troupe.capture_boundary".to_owned(),
+                )),
+                counter_value_field: None,
+                flow_ids: Vec::new(),
+                terminating_flow_ids: Vec::new(),
+            })),
+            timestamp_clock_id: Some(BuiltinClock::TraceFile as u32),
+        })
+    }
 }
 
 pub(crate) struct PacketProjector<'plan> {

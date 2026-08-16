@@ -7,7 +7,7 @@
     {"path":"multi-cue.pftrace","bytes":2775,"sha256":"688a7b632f8ec3161bc2e11ec90cbd65ff4d42afba425ed954913f1a4d5a9665"},
     {"path":"nested.pftrace","bytes":2453,"sha256":"8020b1b42b7bb0c9eb3b12891a84ad577343574181ae691c6c38615d68a90b77"},
     {"path":"numeric-boundary.pftrace","bytes":986,"sha256":"c5d2890e80e575359aee9734f86796bb84590a8c052e6812da85e81d2688eb32"},
-    {"path":"open.pftrace","bytes":701,"sha256":"d672b9535ce6b4e4903c93a671f3076d2bea28720a9c392d67dcda8bd6409168"},
+    {"path":"open.pftrace","bytes":875,"sha256":"0c85922d07903fb25db9d87468e05a45a5b495a08c61bd10de6d681bbb302034"},
     {"path":"overlap.pftrace","bytes":2775,"sha256":"a1618f648a6acfc8d215ce9eb195314c22ef906c11355b2f72e0252e81537395"},
     {"path":"repeated-dump.pftrace","bytes":2775,"sha256":"688a7b632f8ec3161bc2e11ec90cbd65ff4d42afba425ed954913f1a4d5a9665"}
   ]

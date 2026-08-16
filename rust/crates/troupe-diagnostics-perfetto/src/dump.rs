@@ -165,6 +165,75 @@ struct DumpMetrics {
     peak_packet_bytes: usize,
 }
 
+#[derive(Default)]
+struct TimestampBounds {
+    minimum: Option<u64>,
+    maximum: Option<u64>,
+    open_spans: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureBoundaryPosition {
+    BeforeEvents,
+    AfterEvents,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CaptureBoundary {
+    timestamp: u64,
+    position: CaptureBoundaryPosition,
+}
+
+impl TimestampBounds {
+    fn observe(&mut self, elapsed_ns: u64) {
+        self.minimum = Some(
+            self.minimum
+                .map_or(elapsed_ns, |value| value.min(elapsed_ns)),
+        );
+        self.maximum = Some(
+            self.maximum
+                .map_or(elapsed_ns, |value| value.max(elapsed_ns)),
+        );
+    }
+
+    fn observe_event(&mut self, event: &DiagnosticEvent) {
+        self.observe(event.header().elapsed_ns().get());
+        match event {
+            DiagnosticEvent::SpanStarted(_) | DiagnosticEvent::CustomSpanStarted(_) => {
+                self.open_spans += 1;
+            }
+            DiagnosticEvent::SpanFinished(_) | DiagnosticEvent::CustomSpanFinished(_) => {
+                debug_assert!(
+                    self.open_spans != 0,
+                    "projection validated the finished span"
+                );
+                self.open_spans -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn capture_boundary(&self) -> Option<CaptureBoundary> {
+        if self.open_spans == 0 {
+            return None;
+        }
+        let timestamp = self
+            .minimum
+            .filter(|minimum| Some(*minimum) == self.maximum)?;
+        Some(if timestamp < i64::MAX as u64 {
+            CaptureBoundary {
+                timestamp: timestamp + 1,
+                position: CaptureBoundaryPosition::AfterEvents,
+            }
+        } else {
+            CaptureBoundary {
+                timestamp: timestamp - 1,
+                position: CaptureBoundaryPosition::BeforeEvents,
+            }
+        })
+    }
+}
+
 impl DumpMetrics {
     fn observe_page(&mut self, event_count: usize) -> Result<(), DumpError> {
         self.source_page_reads = checked_increment(self.source_page_reads, "source_page_reads")?;
@@ -311,15 +380,27 @@ where
         structural_limits,
     )?;
     let mut metrics = DumpMetrics::default();
+    let mut timestamp_bounds = TimestampBounds::default();
     scan_prefix(
         source,
         exported_through,
         ScanPass::Preflight,
         &mut metrics,
-        |event| collector.observe(event),
+        |event| {
+            collector.observe(event)?;
+            timestamp_bounds.observe_event(event);
+            Ok(())
+        },
     )?;
     let plan = collector.finish()?;
     let structural_index_usage = plan.structural_index_usage();
+    let capture_boundary = timestamp_bounds
+        .capture_boundary()
+        .map(|boundary| {
+            plan.capture_boundary_packet(boundary.timestamp)
+                .map(|packet| (boundary.position, packet))
+        })
+        .transpose()?;
 
     let mut packet_buffer = Vec::new();
     for packet in plan.descriptor_packets() {
@@ -333,6 +414,18 @@ where
         )
         .await?;
         metrics.descriptor_count = checked_increment(metrics.descriptor_count, "descriptor_count")?;
+    }
+
+    if let Some((CaptureBoundaryPosition::BeforeEvents, packet)) = capture_boundary.as_ref() {
+        write_packet(
+            writer,
+            packet,
+            PacketPhase::Event,
+            encoder,
+            &mut packet_buffer,
+            &mut metrics,
+        )
+        .await?;
     }
 
     let mut projector = plan.packet_projector();
@@ -369,6 +462,17 @@ where
         }
     }
     projector.finish()?;
+    if let Some((CaptureBoundaryPosition::AfterEvents, packet)) = capture_boundary.as_ref() {
+        write_packet(
+            writer,
+            packet,
+            PacketPhase::Event,
+            encoder,
+            &mut packet_buffer,
+            &mut metrics,
+        )
+        .await?;
+    }
 
     Ok(DumpSummary {
         captured_watermark,
@@ -626,6 +730,37 @@ mod tests {
             SchemaU64::new(watermark),
             env!("CARGO_PKG_VERSION"),
         )
+    }
+
+    #[test]
+    fn capture_boundary_only_extends_an_open_zero_width_timeline() {
+        let mut empty = TimestampBounds::default();
+        assert_eq!(empty.capture_boundary(), None);
+
+        empty.observe(10);
+        assert_eq!(empty.capture_boundary(), None);
+        empty.open_spans = 1;
+        assert_eq!(
+            empty.capture_boundary(),
+            Some(CaptureBoundary {
+                timestamp: 11,
+                position: CaptureBoundaryPosition::AfterEvents,
+            })
+        );
+
+        empty.observe(12);
+        assert_eq!(empty.capture_boundary(), None);
+
+        let mut maximum = TimestampBounds::default();
+        maximum.observe(i64::MAX as u64);
+        maximum.open_spans = 1;
+        assert_eq!(
+            maximum.capture_boundary(),
+            Some(CaptureBoundary {
+                timestamp: i64::MAX as u64 - 1,
+                position: CaptureBoundaryPosition::BeforeEvents,
+            })
+        );
     }
 
     fn counter(sequence: u64) -> DiagnosticEvent {

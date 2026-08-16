@@ -7,7 +7,7 @@
     {"name":"multi-cue","path":"tests/fixtures/perfetto/traces/multi-cue.pftrace","sha256":"688a7b632f8ec3161bc2e11ec90cbd65ff4d42afba425ed954913f1a4d5a9665"},
     {"name":"nested","path":"tests/fixtures/perfetto/traces/nested.pftrace","sha256":"8020b1b42b7bb0c9eb3b12891a84ad577343574181ae691c6c38615d68a90b77"},
     {"name":"numeric-boundary","path":"tests/fixtures/perfetto/traces/numeric-boundary.pftrace","sha256":"c5d2890e80e575359aee9734f86796bb84590a8c052e6812da85e81d2688eb32"},
-    {"name":"open","path":"tests/fixtures/perfetto/traces/open.pftrace","sha256":"d672b9535ce6b4e4903c93a671f3076d2bea28720a9c392d67dcda8bd6409168"},
+    {"name":"open","path":"tests/fixtures/perfetto/traces/open.pftrace","sha256":"0c85922d07903fb25db9d87468e05a45a5b495a08c61bd10de6d681bbb302034"},
     {"name":"overlap","path":"tests/fixtures/perfetto/traces/overlap.pftrace","sha256":"a1618f648a6acfc8d215ce9eb195314c22ef906c11355b2f72e0252e81537395"},
     {"name":"repeated-dump","path":"tests/fixtures/perfetto/traces/repeated-dump.pftrace","sha256":"688a7b632f8ec3161bc2e11ec90cbd65ff4d42afba425ed954913f1a4d5a9665"}
   ]
