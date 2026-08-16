@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_artifact_layout.py"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
