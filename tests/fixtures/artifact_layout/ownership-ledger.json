@@ -2201,6 +2201,10 @@
         {
           "node": "T01",
           "role": "implement"
+        },
+        {
+          "node": "T03",
+          "role": "seam"
         }
       ]
     },
@@ -2285,6 +2289,10 @@
         {
           "node": "T01",
           "role": "implement"
+        },
+        {
+          "node": "T03",
+          "role": "seam"
         }
       ]
     },
@@ -4133,6 +4141,14 @@
         {
           "node": "B18",
           "role": "implement"
+        },
+        {
+          "node": "B16",
+          "role": "seam"
+        },
+        {
+          "node": "B14",
+          "role": "seam"
         }
       ]
     },
@@ -4255,6 +4271,10 @@
         {
           "node": "F05",
           "role": "create"
+        },
+        {
+          "node": "B16",
+          "role": "seam"
         }
       ]
     },
@@ -4439,6 +4459,10 @@
         {
           "node": "F05",
           "role": "seam"
+        },
+        {
+          "node": "B14",
+          "role": "seam"
         }
       ]
     },
@@ -4458,6 +4482,10 @@
       "writers": [
         {
           "node": "F05",
+          "role": "seam"
+        },
+        {
+          "node": "B14",
           "role": "seam"
         }
       ]
@@ -9725,6 +9753,26 @@
       ]
     },
     {
+      "path": "tests/fixtures/diagnostics/http/view-catalog-archive-v1.json",
+      "baseline_state": "planned",
+      "writers": [
+        {
+          "node": "H03",
+          "role": "create"
+        }
+      ]
+    },
+    {
+      "path": "tests/fixtures/diagnostics/http/view-catalog-v1.json",
+      "baseline_state": "planned",
+      "writers": [
+        {
+          "node": "H03",
+          "role": "create"
+        }
+      ]
+    },
+    {
       "path": "tests/fixtures/diagnostics/http/view-error-v1.json",
       "baseline_state": "planned",
       "writers": [
@@ -10211,6 +10259,10 @@
         {
           "node": "B18",
           "role": "create"
+        },
+        {
+          "node": "B14",
+          "role": "implement"
         }
       ]
     },

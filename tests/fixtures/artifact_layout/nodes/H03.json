@@ -2,6 +2,8 @@
   "state": "realized",
   "introduced": [
     "rust/crates/troupe-diagnostics-runtime/tests/server_views.rs",
+    "tests/fixtures/diagnostics/http/view-catalog-archive-v1.json",
+    "tests/fixtures/diagnostics/http/view-catalog-v1.json",
     "tests/fixtures/diagnostics/http/view-error-v1.json",
     "tests/fixtures/diagnostics/http/view-metric-v1.json",
     "tests/fixtures/diagnostics/http/view-table-v1.json",
