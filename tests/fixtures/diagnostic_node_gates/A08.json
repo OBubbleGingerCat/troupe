@@ -9,12 +9,16 @@
       "rust/Cargo.toml",
       "-p",
       "troupe-agent-runtime",
+      "--features",
+      "agent-test-support",
       "--test",
       "diagnostic_result"
     ]
   ],
   "env": {},
-  "maturin_features": [],
+  "maturin_features": [
+    "agent-test-support"
+  ],
   "cache_requirements": [],
   "exclusive_resources": []
 }
