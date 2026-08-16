@@ -14,3 +14,6 @@ pub(crate) mod snapshot;
 pub(crate) mod status;
 pub(crate) mod target;
 pub(crate) mod values;
+
+pub(crate) use args::{DiagnosticCommand, RuntimeDiagnosticArgs, TroupeInvocation};
+pub(crate) use dispatch::DiagnosticOutput;

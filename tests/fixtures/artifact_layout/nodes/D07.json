@@ -1,7 +1,18 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/fixtures/diagnostics/cli/help-diagnostic.txt",
+    "tests/fixtures/diagnostics/cli/help-run.txt",
+    "tests/fixtures/diagnostics/cli/help.txt",
+    "tests/integration/test_diagnostic_cli.py"
+  ],
+  "modified": [
+    "rust/src/application/cli.rs",
+    "rust/src/application/diagnostic_cli/dispatch.rs",
+    "rust/src/application/diagnostic_cli/mod.rs",
+    "rust/src/application/invocation.rs",
+    "rust/src/application/mod.rs"
+  ],
   "removed": [],
   "generated": []
 }

@@ -1,0 +1,4 @@
+Run a Production:
+  troupe --production <PACKAGE_DIR> [RUNTIME_OPTIONS] [-- <PRODUCTION_ARGS>...]
+
+Production arguments begin only after the first exact `--`; no `troupe run` subcommand is required.

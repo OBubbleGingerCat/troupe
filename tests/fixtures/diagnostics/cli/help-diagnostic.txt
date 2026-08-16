@@ -1,0 +1,15 @@
+Inspect active and archived Production diagnostics
+
+Usage: troupe diagnostic <COMMAND>
+
+Commands:
+  runs      List active, stale, and archived Runs
+  status    Show diagnostic and Production status
+  snapshot  Read the current diagnostic snapshot
+  events    Read or follow canonical diagnostic events
+  dump      Export a captured prefix as a Perfetto trace
+  serve     Serve an inactive archive on loopback
+  cleanup   Preview or apply archive retention cleanup
+
+Options:
+  -h, --help  Print help
