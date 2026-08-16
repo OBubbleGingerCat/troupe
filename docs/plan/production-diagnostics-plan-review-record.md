@@ -1,10 +1,10 @@
 # Production Diagnostics Plan Review Record
 
 - Plan: `docs/plan/production-diagnostics-implementation-plan.md`
-- Status: round 13 user-authorized root self-review accepted; implementation may continue
+- Status: round 13 plus the user-authorized Perfetto ingestion correction are root-self-reviewed; implementation may continue
 - Actor Design SHA-256: `acb963576a100e98415418dbc6f68cb4b605c642d06f2c06620ffc4e29a19021`
-- Diagnostics Design SHA-256: `c0e7afdc1b5661e21c5142860b8f83a397843e9d32391d209bf1a9cd4e54b46d`
-- Plan SHA-256: `b5d151e1326a2947ab82c2b8620dd15cf5a83f6d5ba403b4b3e957fd28a39020`
+- Diagnostics Design SHA-256: `b06d3a8097780787fce3d73f7b623526ef0f4ec30b09c2c9277227b5c74a454d`
+- Plan SHA-256: `c646719643be1f3384fe97aec91e7eed960c6880a06ec9ab3b06a8f301252958`
 - Validator SHA-256: `7ea28f559a67f75459a3fc305304be4485ac5dfe1159de5ec46c876219b85ad4`
 - Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 46 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
 - Baseline: validator normal/mutation self-test, derived DAG/schedule, ownership closure, balanced planning diffs,
@@ -13,6 +13,12 @@
 
 Round 13 supersedes Round 12 for implementation dispatch. Its explicit one-time review waiver does not carry to
 another planning hash and does not waive the independent final implementation reviews.
+
+The implementation-time Perfetto correction was authorized for root self-review without four new independent
+votes. Official v57.2 Trace Processor evidence required fixed `trusted_packet_sequence_id=1`, an empty
+`CounterDescriptor` marker on counter tracks, and placement of non-exact numeric fallback instants on the
+enclosing timeline. The accepted design/plan hashes above include only those corrections; the validator, Actor
+design, 145-node DAG, node count, and final implementation-review obligation are unchanged.
 
 ## Round 1
 
