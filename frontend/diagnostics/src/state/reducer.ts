@@ -7,6 +7,7 @@ import type {
   DiagnosticScope,
 } from "../protocol/event.ts";
 import type {
+  EventsResponse,
   ProjectedCounterSnapshot,
   ProjectedMessageSnapshot,
   ProjectedSpanSnapshot,
@@ -46,6 +47,7 @@ import {
   SPAN_CAPACITY,
   TOOL_FACT_CAPACITY,
   USAGE_SCOPE_AGGREGATE_CAPACITY,
+  VISIBLE_WINDOW_EVENT_CAPACITY,
 } from "./model.ts";
 import {
   cacheQueryResult,
@@ -916,6 +918,7 @@ function snapshotCounterEvent(
 function hydrateSnapshotSpans(
   projection: LiveProjection,
   rows: readonly ProjectedSpanSnapshot[],
+  instantEvents: readonly DiagnosticEvent[],
 ): Pick<LiveProjection, "spans" | "tools"> {
   const materialized = rows.map((row): ProjectedSpan => ({
     span_id: row.span_id,
@@ -941,9 +944,11 @@ function hydrateSnapshotSpans(
   };
   const spanEvents = materialized.flatMap((span): DiagnosticEvent[] => (
     span.finish === null ? [span.start!] : [span.start!, span.finish]
-  )).sort((left, right) => compareU64(left.sequence, right.sequence));
+  ));
+  const toolEvents = [...spanEvents, ...instantEvents]
+    .sort((left, right) => compareU64(left.sequence, right.sequence));
   let tools = projection.tools;
-  for (const event of spanEvents) {
+  for (const event of toolEvents) {
     tools = projectTool(tools, completeSpanInventory, event);
   }
   return { spans, tools };
@@ -1005,9 +1010,17 @@ function hydrateSnapshotMessages(
   return messages;
 }
 
-function hydrateSnapshotProjection(snapshot: SnapshotResponse): LiveProjection {
+function hydrateSnapshotProjection(
+  snapshot: SnapshotResponse,
+  suffixEvents: readonly DiagnosticEvent[] = [],
+): LiveProjection {
+  const instantEvents = suffixEvents.filter((event) => event.kind === "instant_occurred");
   let projection = createLiveProjection(snapshot.watermark_sequence);
-  const spanProjection = hydrateSnapshotSpans(projection, snapshot.state.spans.spans);
+  const spanProjection = hydrateSnapshotSpans(
+    projection,
+    snapshot.state.spans.spans,
+    instantEvents,
+  );
   projection = { ...projection, ...spanProjection };
   projection = {
     ...projection,
@@ -1030,15 +1043,22 @@ function hydrateSnapshotProjection(snapshot: SnapshotResponse): LiveProjection {
       context_usage: projectContextUsage(projection.context_usage, context),
     };
   }
+  for (const event of instantEvents) {
+    projection = {
+      ...projection,
+      results: projectResult(projection.results, event),
+    };
+  }
   for (const gap of snapshot.state.gaps) {
     projection = projectEvent(projection, gap);
   }
   return projection;
 }
 
-export function createDiagnosticStateFromSnapshot(
+function snapshotState(
   snapshot: SnapshotResponse,
-  previous: DiagnosticState | null = null,
+  previous: DiagnosticState | null,
+  suffixEvents: readonly DiagnosticEvent[],
 ): DiagnosticState {
   if (previous !== null && previous.run_id !== snapshot.run_id) {
     throw new RangeError("snapshot belongs to another Run");
@@ -1050,7 +1070,7 @@ export function createDiagnosticStateFromSnapshot(
   );
   const live: LiveEdgeState = {
     ...initial.live,
-    projection: hydrateSnapshotProjection(snapshot),
+    projection: hydrateSnapshotProjection(snapshot, suffixEvents),
   };
   let state = receiveUsageSnapshot({ ...initial, live }, snapshot.state.usage);
   if (previous === null) {
@@ -1069,6 +1089,103 @@ export function createDiagnosticStateFromSnapshot(
     ...state,
     presentation: previous.presentation,
     pause,
+  };
+  return state;
+}
+
+export function createDiagnosticStateFromSnapshot(
+  snapshot: SnapshotResponse,
+  previous: DiagnosticState | null = null,
+): DiagnosticState {
+  return snapshotState(snapshot, previous, []);
+}
+
+export interface DiagnosticStateHydration {
+  readonly snapshot: SnapshotResponse;
+  readonly suffix: EventsResponse;
+  readonly after: U64String;
+  readonly previous?: DiagnosticState | null;
+}
+
+function validateHydrationSuffix(
+  snapshot: SnapshotResponse,
+  suffix: EventsResponse,
+  after: U64String,
+): void {
+  if (suffix.run_id !== snapshot.run_id) {
+    throw new RangeError("event suffix belongs to another Run");
+  }
+  if (compareU64(suffix.captured_watermark, snapshot.watermark_sequence) < 0) {
+    throw new RangeError("event suffix was captured before the snapshot watermark");
+  }
+  if (suffix.next_after !== null) {
+    throw new RangeError("event suffix must be a complete finite response");
+  }
+
+  const afterValue = BigInt(after);
+  const throughValue = BigInt(snapshot.watermark_sequence);
+  if (afterValue > throughValue) {
+    throw new RangeError("event suffix starts after the snapshot watermark");
+  }
+  const expectedCount = throughValue - afterValue;
+  if (expectedCount > BigInt(VISIBLE_WINDOW_EVENT_CAPACITY)) {
+    throw new RangeError("event suffix exceeds the visible window capacity");
+  }
+  if (suffix.events.length !== Number(expectedCount)) {
+    throw new RangeError("event suffix does not cover the exact snapshot range");
+  }
+
+  let expectedSequence = afterValue + 1n;
+  let previousElapsed: U64String | null = null;
+  for (const event of suffix.events) {
+    if (event.run_id !== snapshot.run_id) {
+      throw new RangeError("event suffix contains an event from another Run");
+    }
+    if (BigInt(event.sequence) !== expectedSequence) {
+      throw new RangeError("event suffix is not a dense sequence range");
+    }
+    if (previousElapsed !== null && compareU64(event.elapsed_ns, previousElapsed) < 0) {
+      throw new RangeError("event suffix elapsed time is not monotonic");
+    }
+    if (compareU64(event.elapsed_ns, snapshot.state.through_elapsed_ns) > 0) {
+      throw new RangeError("event suffix is newer than the snapshot state");
+    }
+    previousElapsed = event.elapsed_ns;
+    expectedSequence += 1n;
+  }
+}
+
+export function hydrateDiagnosticStateFromSnapshot({
+  snapshot,
+  suffix,
+  after,
+  previous = null,
+}: DiagnosticStateHydration): DiagnosticState {
+  validateHydrationSuffix(snapshot, suffix, after);
+  let state = snapshotState(snapshot, previous, suffix.events);
+  let projection = state.live.projection;
+  if (after !== "0") {
+    projection = {
+      ...projection,
+      tools: markDropped(projection.tools, after),
+      results: markDropped(projection.results, after),
+    };
+  }
+
+  const first = suffix.events[0];
+  const last = suffix.events[suffix.events.length - 1];
+  const window: EventWindow = {
+    id: `bootstrap:${snapshot.run_id}:${after}:${snapshot.watermark_sequence}`,
+    run_id: snapshot.run_id,
+    start_ns: first?.elapsed_ns ?? snapshot.state.through_elapsed_ns,
+    end_ns: last?.elapsed_ns ?? snapshot.state.through_elapsed_ns,
+    captured_through: snapshot.watermark_sequence,
+    events: suffix.events,
+  };
+  state = {
+    ...state,
+    windows: activateWindow(state.windows, window),
+    live: { ...state.live, projection },
   };
   return state;
 }

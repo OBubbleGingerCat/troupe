@@ -7,6 +7,7 @@ import {
   decodeDiagnosticEvent,
 } from "../../src/protocol/event.ts";
 import {
+  type EventsResponse,
   type SnapshotResponse,
   type UsageSnapshot,
   decodeSnapshotResponse,
@@ -14,6 +15,7 @@ import {
 import {
   createDiagnosticState,
   createDiagnosticStateFromSnapshot,
+  hydrateDiagnosticStateFromSnapshot,
   presentedLiveEdge,
   reduceDiagnosticState,
   selectUsagePanelFacts,
@@ -27,6 +29,7 @@ import {
   MESSAGE_CAPACITY,
   SPAN_CAPACITY,
   USAGE_SCOPE_AGGREGATE_CAPACITY,
+  VISIBLE_WINDOW_EVENT_CAPACITY,
 } from "../../src/state/model.ts";
 import {
   createPresentationState,
@@ -188,6 +191,40 @@ function ingest(state: ReturnType<typeof createDiagnosticState>, events: readonl
     (current, item) => reduceDiagnosticState(current, { type: "event_received", event: item }),
     state,
   );
+}
+
+function finiteSuffix(
+  snapshot: SnapshotResponse,
+  after: number,
+  events: readonly DiagnosticEvent[],
+  capturedWatermark = snapshot.watermark_sequence,
+): EventsResponse {
+  return {
+    api_schema_version: 1,
+    run_id: snapshot.run_id,
+    captured_watermark: capturedWatermark,
+    events,
+    next_after: null,
+  };
+}
+
+function snapshotAtThrough(snapshot: SnapshotResponse, through: number): SnapshotResponse {
+  const throughSequence = decodeU64(String(through));
+  const throughElapsedNs = decodeU64(String(through * 10));
+  return {
+    ...snapshot,
+    watermark_sequence: throughSequence,
+    state: {
+      ...snapshot.state,
+      through_sequence: throughSequence,
+      through_elapsed_ns: throughElapsedNs,
+      spans: { ...snapshot.state.spans, through_sequence: throughSequence, through_elapsed_ns: throughElapsedNs },
+      messages: { ...snapshot.state.messages, through_sequence: throughSequence, through_elapsed_ns: throughElapsedNs },
+      plans: { ...snapshot.state.plans, through_sequence: throughSequence, through_elapsed_ns: throughElapsedNs },
+      counters: { ...snapshot.state.counters, through_sequence: throughSequence, through_elapsed_ns: throughElapsedNs },
+      usage: { ...snapshot.state.usage, through_sequence: throughSequence, through_elapsed_ns: throughElapsedNs },
+    },
+  };
 }
 
 describe("diagnostic state reducer", () => {
@@ -360,6 +397,166 @@ describe("diagnostic state reducer", () => {
     expect(state.live.projection.gaps.declared_dropped_count).toBe(2n);
     expect("plans" in state.live.projection).toBe(false);
     expect(presentedLiveEdge(state)).toBe(frozen);
+  });
+
+  it("atomically hydrates the EventTable and only missing instant projections", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const rawEvents = Array.from({ length: 9 }, (_, index) => {
+      const sequence = index + 1;
+      if (sequence === 2) {
+        return event(sequence, {
+          kind: "instant_occurred",
+          scope: TOOL_SCOPE,
+          instant_kind: "tool.updated",
+          detail: {
+            title: "Read updated source",
+            tool_kind: "read",
+            status: "in_progress",
+            error_code: null,
+          },
+          containing_span_id: "3",
+        });
+      }
+      if (sequence === 7) {
+        return event(sequence, {
+          kind: "instant_occurred",
+          instant_kind: "result.submitted",
+          detail: { issue: null, error_code: null },
+          containing_span_id: null,
+        });
+      }
+      return event(sequence, {
+        kind: "counter_sampled",
+        counter_kind: "cue.active",
+        value: String(100 + sequence),
+      });
+    });
+    const suffix = finiteSuffix(snapshot, 0, rawEvents, decodeU64("12"));
+
+    const state = hydrateDiagnosticStateFromSnapshot({
+      snapshot,
+      suffix,
+      after: decodeU64("0"),
+    });
+
+    expect(state.cursor).toEqual({ delivered_through: "9", committed_watermark: "9" });
+    expect(state.windows.visible).toMatchObject({
+      id: `bootstrap:${RUN_ID}:0:9`,
+      captured_through: "9",
+      events: rawEvents,
+    });
+    expect(state.live.events).toEqual([]);
+    expect(state.live.projection.spans.items).toHaveLength(1);
+    expect(state.live.projection.messages.items).toHaveLength(1);
+    expect(state.live.projection.counters.items[0]?.event.sequence).toBe("8");
+    expect(state.live.projection.gaps.items).toHaveLength(1);
+    expect(state.live.projection.tools.items.map((fact) => fact.sequence)).toEqual([
+      "2",
+      "3",
+      "4",
+    ]);
+    expect(state.live.projection.tools.needs_server_refresh).toBe(false);
+    expect(state.live.projection.results.items.map((fact) => fact.sequence)).toEqual(["7"]);
+    expect(state.live.projection.results.needs_server_refresh).toBe(false);
+  });
+
+  it("marks instant projections incomplete when bootstrap history starts after zero", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const rawEvents = [6, 7, 8, 9].map((sequence) => sequence === 7
+      ? event(sequence, {
+        kind: "instant_occurred",
+        instant_kind: "result.rejected",
+        detail: { issue: { code: "invalid", path: "/value" }, error_code: "invalid_result" },
+        containing_span_id: null,
+      })
+      : event(sequence, {
+        kind: "instant_occurred",
+        scope: TOOL_SCOPE,
+        instant_kind: "tool.updated",
+        detail: {
+          title: `Tool update ${sequence}`,
+          tool_kind: "read",
+          status: "in_progress",
+          error_code: null,
+        },
+        containing_span_id: "3",
+      }));
+
+    const state = hydrateDiagnosticStateFromSnapshot({
+      snapshot,
+      suffix: finiteSuffix(snapshot, 5, rawEvents),
+      after: decodeU64("5"),
+    });
+
+    expect(state.windows.visible?.events.map((candidate) => candidate.sequence)).toEqual([
+      "6",
+      "7",
+      "8",
+      "9",
+    ]);
+    expect(state.live.projection.tools).toMatchObject({
+      dropped_through: "5",
+      needs_server_refresh: true,
+    });
+    expect(state.live.projection.results).toMatchObject({
+      dropped_through: "5",
+      needs_server_refresh: true,
+    });
+  });
+
+  it("rejects malformed bootstrap suffixes before changing prior state", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const previous = ingest(createDiagnosticState(RUN_ID, decodeU64("0")), [
+      event(1, { kind: "counter_sampled", counter_kind: "cue.active", value: "1" }),
+    ]);
+    const exact = Array.from({ length: 9 }, (_, index) => event(index + 1, {
+      kind: "counter_sampled",
+      counter_kind: "cue.active",
+      value: String(index + 1),
+    }));
+    const malformed = [
+      finiteSuffix(snapshot, 0, exact.slice(0, 8)),
+      finiteSuffix(snapshot, 0, [...exact.slice(0, 4), exact[5]!, ...exact.slice(5)]),
+      finiteSuffix(snapshot, 0, exact, decodeU64("8")),
+      { ...finiteSuffix(snapshot, 0, exact), next_after: decodeU64("9") },
+    ];
+
+    for (const suffix of malformed) {
+      expect(() => hydrateDiagnosticStateFromSnapshot({
+        snapshot,
+        suffix,
+        after: decodeU64("0"),
+        previous,
+      })).toThrow(RangeError);
+    }
+    expect(previous.cursor.delivered_through).toBe("1");
+    expect(previous.live.events).toHaveLength(1);
+  });
+
+  it("accepts the exact visible suffix capacity and rejects a larger requested range", () => {
+    const base = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const snapshot = snapshotAtThrough(base, VISIBLE_WINDOW_EVENT_CAPACITY);
+    const rawEvents = Array.from(
+      { length: VISIBLE_WINDOW_EVENT_CAPACITY },
+      (_, index) => event(index + 1, {
+        kind: "counter_sampled",
+        counter_kind: "cue.active",
+        value: String(index + 1),
+      }),
+    );
+    const accepted = hydrateDiagnosticStateFromSnapshot({
+      snapshot,
+      suffix: finiteSuffix(snapshot, 0, rawEvents),
+      after: decodeU64("0"),
+    });
+    expect(accepted.windows.visible?.events).toHaveLength(VISIBLE_WINDOW_EVENT_CAPACITY);
+
+    const oversized = snapshotAtThrough(base, VISIBLE_WINDOW_EVENT_CAPACITY + 1);
+    expect(() => hydrateDiagnosticStateFromSnapshot({
+      snapshot: oversized,
+      suffix: finiteSuffix(oversized, 0, []),
+      after: decodeU64("0"),
+    })).toThrow("event suffix exceeds the visible window capacity");
   });
 
   it("records snapshot capacity loss while retaining complete gap totals", () => {
