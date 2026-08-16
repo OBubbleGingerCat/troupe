@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/views/table.tsx",
+    "frontend/diagnostics/tests/component/view-table.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
