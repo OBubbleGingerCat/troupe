@@ -1,0 +1,9 @@
+
+=â:6Troupe Production 12345678-1234-4234-9234-123456789abc
+ânumeric.not_exact(
+ânumeric.i64_max(
+Ââ¾·Troupe metadata | exporter_schema=1 | event_schema=1 | run_id=12345678-1234-4234-9234-123456789abc | captured_watermark=2 | exported_through=2 | troupe_version=0.1.0 | outcome=unavailable | clean_shutdown=unavailable | content_warning=trace may contain sensitive diagnostic metadata and user-provided attributes(
+’@ÿÿÿÿÿÿÿÿZ‚"2counterRtroupe.event.kind"Rtroupe.event.sequence"#2
+productionRtroupe.scope.identity"c2Jproduction/counter:52:custom:15:numeric.i64_max|unit:5:items|dimensions:0:Rtroupe.track.identity"2itemsRtroupe.counter.unitHXºnumeric.i64_maxðÿÿÿÿÿÿÿÿÐ
+·@ÿÿÿÿÿÿÿÿZ§"2instantRtroupe.event.kind"Rtroupe.event.sequence"#2
+productionRtroupe.scope.identity"b2Iproduction/counter:51:custom:17:numeric.not_exact|unit:none|dimensions:0:Rtroupe.track.identity"#20.1Rtroupe.counter.value_decimal"&2	not_exactRtroupe.counter_projectionHXºnumeric.not_exactÐ
