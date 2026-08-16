@@ -24,17 +24,18 @@ def test_act_identity_and_lifecycle_begin_only_after_real_actor_admission() -> N
         "control.install_admission(admission)"
     )
     assert driver.index("control.install_admission(admission)") < driver.index(
-        "act_producer::admitted(&binding, &cued, &control)"
-    )
-    assert driver.index("act_producer::admitted(&binding, &cued, &control)") < driver.index(
         "sink_binding::admit_act"
     )
-
-    prepare = _between(producer, "fn prepare(", "fn start(&self)")
-    assert prepare.index("diagnostic_session_metadata()") < prepare.index(
-        "next_act_identity()?"
+    binding = (ROOT / "rust/src/diagnostic_runtime/sink_binding.rs").read_text(
+        encoding="utf-8"
     )
-    assert prepare.index("next_act_identity()?") < prepare.index(
+    assert "act_producer::admitted(run, cued, control)" in binding
+
+    prepare = _between(producer, "impl ActLifecycleProducer {", "fn start(&self)")
+    assert prepare.index("diagnostic_session_metadata()") < prepare.index(
+        "next_act_identity()"
+    )
+    assert prepare.index("next_act_identity()") < prepare.index(
         "UsageFinalizationIdentity::new"
     )
     assert 'format!("act-{value}")' in producer
@@ -193,7 +194,7 @@ def test_act_finish_waits_for_linear_usage_ack_and_never_emits_usage() -> None:
 
 def test_usage_slot_handoff_covers_pre_submission_without_lock_reentry() -> None:
     source = PRODUCER.read_text(encoding="utf-8")
-    admitted = _between(source, "pub(super) fn admitted(", "pub(super) fn observe(")
+    commit = _between(source, "pub(crate) fn commit(self)", "impl ActLifecycleProducer")
     caller = _between(
         source,
         "pub(super) fn caller_finished(",
@@ -207,7 +208,7 @@ def test_usage_slot_handoff_covers_pre_submission_without_lock_reentry() -> None
     register = _between(source, "fn register_usage_slot(", "fn notify_settlement_ready(")
     notify = _between(source, "fn notify_settlement_ready(", "fn next_act_identity(")
 
-    assert admitted.index("producer.start()") < admitted.index("register_usage_slot(&producer)")
+    assert commit.index("producer.start()") < commit.index("register_usage_slot(&producer)")
     assert "producer.take_usage_slot()" in register
     assert "bridge.register_slot(slot)" in register
     assert caller.index("producer.caller_finished") < caller.index(

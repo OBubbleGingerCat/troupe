@@ -5,8 +5,10 @@ use std::sync::{Arc, OnceLock};
 use pyo3::class::gc::{PyTraverseError, PyVisit};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
-use troupe_agent_runtime::AgentTurnControl;
+use troupe_agent_runtime::{AgentTurnControl, diagnostics::payload::SinkOnlyToolPayload};
 use troupe_diagnostics_core::hub::{ActEventSubscriber, DeliveryFailure};
+
+use crate::orchestration::scene_context::{CuedScope, RunBinding};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DiagnosticAdmissionProfile {
@@ -117,6 +119,8 @@ pub(crate) trait DiagnosticAdmissionCapability: Any + Send + Sync {
     fn admit_act(
         &self,
         py: Python<'_>,
+        run: &RunBinding,
+        cued: &Arc<CuedScope>,
         control: &Arc<AgentTurnControl>,
         binding: DiagnosticActBinding,
     ) -> PyResult<()>;
@@ -124,6 +128,8 @@ pub(crate) trait DiagnosticAdmissionCapability: Any + Send + Sync {
 
 pub(crate) trait DiagnosticActSubscriberLookup: Send + Sync + 'static {
     fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>>;
+
+    fn deliver_tool_payload(&self, _act_id: &str, _payload: &SinkOnlyToolPayload) {}
 }
 
 #[derive(Debug, Default)]

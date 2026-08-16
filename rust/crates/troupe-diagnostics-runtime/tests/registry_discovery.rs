@@ -11,6 +11,7 @@ use std::{
 use serde_json::{Value, json};
 use troupe_diagnostics_core::id::CanonicalUuid;
 use troupe_diagnostics_runtime::{
+    archive::lease::ActiveArchiveLease,
     registry::{
         codec::encode_registry_entry,
         discover::{
@@ -85,6 +86,7 @@ fn other_process_identity(pid: u32) -> ProcessIdentity {
 fn create_archive(production: &TestProduction, run_id: CanonicalUuid, complete: bool) {
     let run_directory = production.run_directory(run_id);
     fs::create_dir(&run_directory).unwrap();
+    let _active_lease = ActiveArchiveLease::acquire(&run_directory).unwrap();
     let store = DiagnosticStore::create(
         &run_directory,
         &InitialStoreMetadata::new(run_id, "2026-08-16T00:00:00Z", "configuration-sha256:test"),
@@ -281,6 +283,8 @@ fn discovery_merges_instances_and_runs_into_the_complete_deterministic_state_mat
         create_archive(&production, entry.run_id(), false);
         publish_entry(&production, entry);
     }
+    let _active_archive_lease =
+        ActiveArchiveLease::acquire(&production.run_directory(active.run_id())).unwrap();
 
     processes.alive(&active);
     servers.matching(&active);

@@ -25,6 +25,13 @@ use troupe_diagnostics_core::{
     time::ElapsedNs,
 };
 
+mod orchestration {
+    pub(crate) mod scene_context {
+        pub(crate) struct CuedScope;
+        pub(crate) struct RunBinding;
+    }
+}
+
 #[allow(dead_code)]
 #[path = "../src/diagnostic_runtime/hooks.rs"]
 mod hooks;

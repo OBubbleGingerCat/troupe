@@ -54,7 +54,10 @@ mod active {
         time::{ElapsedNs, RunClock},
     };
 
-    use crate::diagnostic_runtime::{act_producer, hooks::DiagnosticActSubscriberLookup};
+    use crate::diagnostic_runtime::{
+        act_producer,
+        hooks::{DiagnosticActSubscriberLookup, NoopDiagnosticActSubscriber},
+    };
 
     const ADMISSION_FAILED: AgentDiagnosticErrorCode =
         AgentDiagnosticErrorCode::new("canonical_admission_failed");
@@ -109,7 +112,7 @@ mod active {
 
     struct SinkOnlyAdmission<R> {
         hub: Arc<SinkOnlyDiagnosticHub<R>>,
-        subscriber: Arc<dyn ActEventSubscriber>,
+        fallback_subscriber: Arc<dyn ActEventSubscriber>,
     }
 
     impl<R> CanonicalObservationAdmission for SinkOnlyAdmission<R>
@@ -119,10 +122,13 @@ mod active {
         fn admit(
             &self,
             candidate: CanonicalEventBuilder,
-            _subscriber: Option<&dyn ActEventSubscriber>,
+            subscriber: Option<&dyn ActEventSubscriber>,
         ) -> Result<SchemaU64, AgentDiagnosticErrorCode> {
             self.hub
-                .admit(candidate, self.subscriber.as_ref())
+                .admit(
+                    candidate,
+                    subscriber.unwrap_or(self.fallback_subscriber.as_ref()),
+                )
                 .map(|receipt| receipt.accepted().identity().sequence())
                 .map_err(|_| ADMISSION_FAILED)
         }
@@ -300,8 +306,35 @@ mod active {
             R: BoundedInMemoryReserver + 'static,
         {
             Arc::new(Self {
-                admission: Arc::new(SinkOnlyAdmission { hub, subscriber }),
+                admission: Arc::new(SinkOnlyAdmission {
+                    hub,
+                    fallback_subscriber: subscriber,
+                }),
                 subscribers: None,
+                clock,
+                state: Mutex::new(BridgeState {
+                    next_tool_id: 1,
+                    ..BridgeState::default()
+                }),
+            })
+        }
+
+        pub(crate) fn sink_only_with_subscribers<R>(
+            hub: Arc<SinkOnlyDiagnosticHub<R>>,
+            subscribers: Arc<dyn DiagnosticActSubscriberLookup>,
+            clock: RunClock,
+        ) -> Arc<Self>
+        where
+            R: BoundedInMemoryReserver + 'static,
+        {
+            let fallback_subscriber: Arc<dyn ActEventSubscriber> =
+                Arc::new(NoopDiagnosticActSubscriber);
+            Arc::new(Self {
+                admission: Arc::new(SinkOnlyAdmission {
+                    hub,
+                    fallback_subscriber,
+                }),
+                subscribers: Some(subscribers),
                 clock,
                 state: Mutex::new(BridgeState {
                     next_tool_id: 1,
@@ -588,11 +621,16 @@ mod active {
             {
                 return Ok(ObservationDisposition::DeferredUsage);
             }
-            if candidate
+            if let Some(candidate) = candidate
                 .as_any()
                 .downcast_ref::<AgentToolPayloadCandidate>()
-                .is_some()
             {
+                if let Some(subscribers) = &self.subscribers {
+                    subscribers.deliver_tool_payload(
+                        candidate.turn().identity().act_id(),
+                        candidate.payload(),
+                    );
+                }
                 return Ok(ObservationDisposition::SinkOnlyPayload);
             }
             if let Some(observation) = candidate

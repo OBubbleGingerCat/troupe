@@ -804,8 +804,8 @@ pub(crate) fn observe_update(
     thinking::observe_update(&context, update);
     context::observe_update(&context, update);
     cost::observe_update(&context, update);
-    tool::observe_update(&context, update);
     payload::observe_update(&context, update);
+    tool::observe_update(&context, update);
 }
 
 #[inline]

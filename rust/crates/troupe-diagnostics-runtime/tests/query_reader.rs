@@ -60,6 +60,13 @@ impl TestRunDirectory {
     fn database_path(&self) -> PathBuf {
         self.0.join(DIAGNOSTIC_DATABASE_FILENAME)
     }
+
+    fn sqlite_sidecars(&self) -> [PathBuf; 2] {
+        [
+            self.0.join(format!("{DIAGNOSTIC_DATABASE_FILENAME}-wal")),
+            self.0.join(format!("{DIAGNOSTIC_DATABASE_FILENAME}-shm")),
+        ]
+    }
 }
 
 impl Drop for TestRunDirectory {
@@ -194,6 +201,12 @@ fn archive_reader_holds_and_releases_its_request_owned_shared_lease() {
     let active_lease = ActiveArchiveLease::acquire(directory.path()).expect("active lease");
     drop(create_store(directory.path()));
     drop(active_lease);
+    assert!(
+        directory
+            .sqlite_sidecars()
+            .iter()
+            .all(|path| !path.exists())
+    );
 
     let mut reader = DiagnosticReader::open_archive(directory.path(), run_id())
         .expect("open inactive archive reader");
@@ -208,6 +221,12 @@ fn archive_reader_holds_and_releases_its_request_owned_shared_lease() {
     assert_eq!(captured.profile(), ReaderProfile::Archive);
     drop(captured);
     drop(reader);
+    assert!(
+        directory
+            .sqlite_sidecars()
+            .iter()
+            .all(|path| !path.exists())
+    );
 
     CleanupArchiveLease::acquire(directory.path())
         .expect("dropping archive reader releases its shared lease");

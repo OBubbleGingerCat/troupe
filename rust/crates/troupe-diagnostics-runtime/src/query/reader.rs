@@ -18,7 +18,9 @@ use crate::{
         ActiveArchiveLeaseGuard, ArchiveLeaseError, ArchiveLeaseErrorCode, SharedArchiveLease,
     },
     store::{
-        connection::{StoreOpenError, StoreOpenErrorCode, validate_store_state},
+        connection::{
+            StoreOpenError, StoreOpenErrorCode, open_immutable_read_only, validate_store_state,
+        },
         key::SortableU64Key,
         schema::{DIAGNOSTIC_DATABASE_FILENAME, STORE_SCHEMA_IDENTITY, STORE_SCHEMA_VERSION},
     },
@@ -272,10 +274,13 @@ impl<'lease> DiagnosticReader<'lease> {
     ) -> Result<Self, ReaderFailure> {
         let profile = lease.profile();
         let database_path = run_directory.join(DIAGNOSTIC_DATABASE_FILENAME);
-        let connection = Connection::open_with_flags(
-            &database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
+        let connection = match profile {
+            ReaderProfile::Active => Connection::open_with_flags(
+                &database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ),
+            ReaderProfile::Archive => open_immutable_read_only(&database_path),
+        }
         .map_err(|error| {
             ReaderFailure::sqlite(profile, ReaderErrorCode::SqliteOpen, &database_path, error)
         })?;
@@ -371,11 +376,7 @@ impl DiagnosticReader<'static> {
             SharedArchiveLease::acquire(run_directory).map_err(ReaderFailure::archive_lease)?;
         let profile = ReaderProfile::Archive;
         let database_path = run_directory.join(DIAGNOSTIC_DATABASE_FILENAME);
-        let connection = Connection::open_with_flags(
-            &database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| {
+        let connection = open_immutable_read_only(&database_path).map_err(|error| {
             ReaderFailure::sqlite(profile, ReaderErrorCode::SqliteOpen, &database_path, error)
         })?;
         configure_read_only(&connection, profile, &database_path)?;

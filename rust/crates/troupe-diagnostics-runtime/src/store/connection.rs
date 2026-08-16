@@ -25,6 +25,18 @@ use super::{
 pub const OWNER_DIRECTORY_MODE: u32 = 0o700;
 pub const OWNER_FILE_MODE: u32 = 0o600;
 
+pub(crate) fn open_immutable_read_only(path: &Path) -> rusqlite::Result<Connection> {
+    let mut uri = url::Url::from_file_path(path)
+        .map_err(|()| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    uri.query_pairs_mut().append_pair("immutable", "1");
+    Connection::open_with_flags(
+        uri.as_str(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreNodeKind {
     Directory,

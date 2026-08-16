@@ -324,7 +324,7 @@ mod active {
             self, UsageFinalizationAck, UsageFinalizationBridge, UsageFinalizationSettlement,
             UsageFinalizationSlot,
         },
-        hooks::DiagnosticActSubscriberLookup,
+        hooks::{DiagnosticActSubscriberLookup, NoopDiagnosticActSubscriber},
         observation_bridge::{CanonicalObservationBridge, ObservationDisposition},
     };
 
@@ -382,7 +382,7 @@ mod active {
 
     struct SinkOnlyUsageAdmission<R> {
         hub: Arc<SinkOnlyDiagnosticHub<R>>,
-        subscriber: Arc<dyn ActEventSubscriber>,
+        fallback_subscriber: Arc<dyn ActEventSubscriber>,
     }
 
     impl<R> UsageAdmission for SinkOnlyUsageAdmission<R>
@@ -392,10 +392,13 @@ mod active {
         fn admit(
             &self,
             candidate: CanonicalEventBuilder,
-            _subscriber: Option<&dyn ActEventSubscriber>,
+            subscriber: Option<&dyn ActEventSubscriber>,
         ) -> Result<SchemaU64, AgentDiagnosticErrorCode> {
             self.hub
-                .admit(candidate, self.subscriber.as_ref())
+                .admit(
+                    candidate,
+                    subscriber.unwrap_or(self.fallback_subscriber.as_ref()),
+                )
                 .map(|receipt| receipt.accepted().identity().sequence())
                 .map_err(|_| ADMISSION_FAILED)
         }
@@ -885,8 +888,42 @@ mod active {
             Ok(Arc::new(Self {
                 canonical,
                 context: Arc::new(UsageDestinationContext {
-                    admission: Arc::new(SinkOnlyUsageAdmission { hub, subscriber }),
+                    admission: Arc::new(SinkOnlyUsageAdmission {
+                        hub,
+                        fallback_subscriber: subscriber,
+                    }),
                     subscribers: None,
+                    clock,
+                    failure_owner,
+                }),
+            }))
+        }
+
+        pub(crate) fn sink_only_with_subscribers<R>(
+            hub: Arc<SinkOnlyDiagnosticHub<R>>,
+            subscribers: Arc<dyn DiagnosticActSubscriberLookup>,
+            clock: RunClock,
+            failure_owner: Arc<dyn UsageFinalizationFailureOwner>,
+        ) -> Result<Arc<Self>, AgentDiagnosticErrorCode>
+        where
+            R: BoundedInMemoryReserver + 'static,
+        {
+            ensure_slot_bridge()?;
+            let canonical = CanonicalObservationBridge::sink_only_with_subscribers(
+                Arc::clone(&hub),
+                Arc::clone(&subscribers),
+                clock,
+            );
+            let fallback_subscriber: Arc<dyn ActEventSubscriber> =
+                Arc::new(NoopDiagnosticActSubscriber);
+            Ok(Arc::new(Self {
+                canonical,
+                context: Arc::new(UsageDestinationContext {
+                    admission: Arc::new(SinkOnlyUsageAdmission {
+                        hub,
+                        fallback_subscriber,
+                    }),
+                    subscribers: Some(subscribers),
                     clock,
                     failure_owner,
                 }),

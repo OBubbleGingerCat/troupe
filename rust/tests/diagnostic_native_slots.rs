@@ -12,6 +12,7 @@ mod orchestration {
     }
 
     pub(crate) mod scene_context {
+        pub(crate) struct CuedScope;
         pub(crate) struct RunBinding;
         pub(crate) struct SceneScope;
     }
@@ -46,6 +47,8 @@ impl DiagnosticAdmissionCapability for FakeCapability {
     fn admit_act(
         &self,
         _py: Python<'_>,
+        _run: &orchestration::scene_context::RunBinding,
+        _cued: &Arc<orchestration::scene_context::CuedScope>,
         _control: &Arc<AgentTurnControl>,
         _binding: DiagnosticActBinding,
     ) -> PyResult<()> {
@@ -338,7 +341,7 @@ fn hook_slots_freeze_typed_identity_scope_outcome_and_error_inputs() {
     let act = read("src/diagnostic_runtime/act_producer.rs");
     for input in [
         "&RunBinding",
-        "&CuedScope",
+        "&Arc<CuedScope>",
         "&Arc<AgentTurnControl>",
         "ActCallerExit",
         "Option<&PyErr>",
@@ -633,8 +636,8 @@ fn act_admission_handoff_is_ordered_and_run_binding_owned() {
         "Production capability handoff",
         &[
             "run.diagnostic_admission().capability()",
-            "capability.admit_act(py, control, binding)",
-            "if !binding.is_active()",
+            "capability.admit_act(py, run, cued, control, binding)",
+            "act_producer::admitted(run, cued, control)",
         ],
     );
 }

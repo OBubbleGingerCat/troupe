@@ -381,10 +381,15 @@ impl ActCall {
         if !control.install_admission(admission) {
             return Err(cancelled_error(py));
         }
-        act_producer::admitted(&binding, &cued, &control);
         let diagnostics =
             std::mem::replace(&mut self.diagnostics, DiagnosticActBinding::inactive());
-        crate::diagnostic_runtime::sink_binding::admit_act(py, &binding, &control, diagnostics)?;
+        crate::diagnostic_runtime::sink_binding::admit_act(
+            py,
+            &binding,
+            &cued,
+            &control,
+            diagnostics,
+        )?;
         let validation_bridge = match schema.validation_mode() {
             SchemaValidationMode::NativeOnly => None,
             SchemaValidationMode::Hybrid => Some(PythonSchemaValidationBridge::new(py)?),

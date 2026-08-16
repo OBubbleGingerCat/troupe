@@ -1,9 +1,9 @@
 use std::{
     fs,
     process::Command,
-    sync::{Arc, Barrier, Mutex},
+    sync::{Arc, Barrier, Mutex, mpsc},
     thread,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use troupe_diagnostics_core::{
@@ -279,6 +279,29 @@ impl ActEventSubscriber for RecordingSubscriber {
     }
 }
 
+struct ReentrantSubscriber {
+    hub: Arc<ProductionDiagnosticHub<FakeDurableReserver>>,
+}
+
+impl ActEventSubscriber for ReentrantSubscriber {
+    fn deliver(&self, _event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure> {
+        let hub = Arc::clone(&self.hub);
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            let result = hub
+                .admit(counter_candidate(22), None)
+                .map(|receipt| receipt.accepted().identity().sequence());
+            let _ = send.send(result);
+        });
+        match receive.recv_timeout(Duration::from_secs(1)) {
+            Ok(Ok(sequence)) if sequence == SchemaU64::new(2) => Ok(()),
+            Ok(Ok(_)) => Err(DeliveryFailure::new("reentrant_sequence_mismatch")),
+            Ok(Err(_)) => Err(DeliveryFailure::new("reentrant_admission_failed")),
+            Err(_) => Err(DeliveryFailure::new("reentrant_admission_blocked")),
+        }
+    }
+}
+
 #[test]
 fn production_admission_reserves_exact_bytes_and_fans_out_one_immutable_fact() {
     let reserver = FakeReserver::default();
@@ -321,6 +344,35 @@ fn production_admission_reserves_exact_bytes_and_fans_out_one_immutable_fact() {
         live[0].canonical_bytes()
     );
     assert_eq!(live[0].canonical_bytes(), subscriber[0].canonical_bytes());
+}
+
+#[test]
+fn subscriber_delivery_can_reenter_the_hub_after_the_fact_is_committed() {
+    let reserver = FakeReserver::default();
+    let live = RecordingLiveNotifier::default();
+    let hub = Arc::new(ProductionDiagnosticHub::production(
+        run_id(),
+        FakeDurableReserver(reserver.clone()),
+        Box::new(live.clone()),
+    ));
+    let subscriber = ReentrantSubscriber {
+        hub: Arc::clone(&hub),
+    };
+
+    let receipt = hub.admit(counter_candidate(11), Some(&subscriber)).unwrap();
+
+    assert_eq!(receipt.accepted().identity().sequence(), SchemaU64::new(1));
+    assert_eq!(receipt.subscriber_delivery(), &DeliveryOutcome::Delivered);
+    assert_eq!(
+        reserver
+            .snapshot()
+            .committed
+            .iter()
+            .map(|event| event.identity().sequence().get())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(live.events().len(), 2);
 }
 
 #[test]

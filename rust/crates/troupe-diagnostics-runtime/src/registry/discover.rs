@@ -8,12 +8,15 @@ use std::{
 };
 
 use hyper::Uri;
-use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use troupe_diagnostics_core::{event::EVENT_SCHEMA_VERSION, id::CanonicalUuid, scalar::SchemaU64};
 
-use crate::store::schema::{
-    DIAGNOSTIC_DATABASE_FILENAME, STORE_SCHEMA_IDENTITY, STORE_SCHEMA_VERSION,
+use crate::{
+    archive::lease::{ArchiveLeaseErrorCode, SharedArchiveLease},
+    store::{
+        connection::open_immutable_read_only,
+        schema::{DIAGNOSTIC_DATABASE_FILENAME, STORE_SCHEMA_IDENTITY, STORE_SCHEMA_VERSION},
+    },
 };
 
 use super::{
@@ -839,10 +842,25 @@ fn classify_archive(
     };
     let database_identity = FileIdentity::from_metadata(&database_metadata);
 
-    let connection = match Connection::open_with_flags(
-        &database_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let _lease = match SharedArchiveLease::acquire(run_directory) {
+        Ok(lease) => lease,
+        Err(error) => {
+            let classification = if error.code() == ArchiveLeaseErrorCode::Contended {
+                CandidateClassification::Unhealthy
+            } else {
+                CandidateClassification::Invalid
+            };
+            return (
+                classification,
+                false,
+                Some(format!(
+                    "Run archive cannot be leased for read-only inspection: {error}"
+                )),
+            );
+        }
+    };
+
+    let connection = match open_immutable_read_only(&database_path) {
         Ok(connection) => connection,
         Err(error) => {
             return (

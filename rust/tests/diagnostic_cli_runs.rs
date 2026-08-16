@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -10,6 +10,7 @@ use std::{
 
 use troupe_diagnostics_core::id::CanonicalUuid;
 use troupe_diagnostics_runtime::{
+    archive::lease::ActiveArchiveLease,
     registry::{
         codec::encode_registry_entry,
         discover::{
@@ -102,6 +103,7 @@ fn create_archive(
 ) {
     let run_directory = production.run_directory(run_id);
     fs::create_dir(&run_directory).unwrap();
+    let _active_lease = ActiveArchiveLease::acquire(&run_directory).unwrap();
     let store = DiagnosticStore::create(
         &run_directory,
         &InitialStoreMetadata::new(run_id, "2026-08-16T00:00:00Z", "configuration-sha256:d08"),
@@ -240,24 +242,27 @@ impl ServerIdentityProbe for FakeServers {
     }
 }
 
-fn snapshot_files(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    fs::read_dir(directory)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.is_file())
-        .map(|path| {
-            let bytes = fs::read(&path).unwrap();
-            (path, bytes)
-        })
-        .collect()
-}
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn visit(root: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        let mut children = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        children.sort();
+        for child in children {
+            let relative = child.strip_prefix(root).unwrap().to_path_buf();
+            if child.is_dir() {
+                entries.insert(relative, None);
+                visit(root, &child, entries);
+            } else {
+                entries.insert(relative, Some(fs::read(&child).unwrap()));
+            }
+        }
+    }
 
-fn snapshot_directories(directory: &Path) -> BTreeSet<PathBuf> {
-    fs::read_dir(directory)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.is_dir())
-        .collect()
+    let mut entries = BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
 }
 
 fn complete_matrix() -> (TestProduction, FakeProcesses, FakeServers) {
@@ -316,8 +321,8 @@ fn normalized(document: String, production: &TestProduction) -> String {
 #[test]
 fn listing_projects_the_complete_discovery_matrix_without_selecting_or_mutating_candidates() {
     let (production, processes, servers) = complete_matrix();
-    let instance_files = snapshot_files(&production.instances());
-    let archive_directories = snapshot_directories(&production.runs());
+    let diagnostics = production.root().join(".troupe/diagnostics");
+    let before = snapshot_tree(&diagnostics);
 
     let listing = list_runs_with(production.root(), &processes, &servers).unwrap();
     let repeated = list_runs_with(production.root(), &processes, &servers).unwrap();
@@ -382,11 +387,7 @@ fn listing_projects_the_complete_discovery_matrix_without_selecting_or_mutating_
     );
     assert_eq!(servers.calls.load(Ordering::SeqCst), 6);
 
-    assert_eq!(snapshot_files(&production.instances()), instance_files);
-    assert_eq!(
-        snapshot_directories(&production.runs()),
-        archive_directories
-    );
+    assert_eq!(snapshot_tree(&diagnostics), before);
 }
 
 #[test]

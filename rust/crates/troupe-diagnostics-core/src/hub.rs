@@ -437,6 +437,7 @@ where
             },
             None => DeliveryOutcome::NotConfigured,
         };
+        drop(state);
         let subscriber_delivery = match subscriber {
             Some(subscriber) => match subscriber.deliver(accepted.clone()) {
                 Ok(()) => DeliveryOutcome::Delivered,

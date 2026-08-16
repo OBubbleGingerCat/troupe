@@ -2450,6 +2450,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "troupe-diagnostics-core",
+ "url",
  "uuid",
 ]
 
