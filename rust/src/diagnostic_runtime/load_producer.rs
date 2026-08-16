@@ -12,9 +12,10 @@ use troupe_diagnostics_core::{
         SpanStartDetail,
     },
     event::{
-        CausalLink, CounterSampled, CustomCounterSampled, CustomInstantOccurred,
-        CustomSpanFinished, CustomSpanStarted, DiagnosticEvent, DiagnosticEventHeader,
-        DiagnosticScope, EventValidationError, InstantOccurred, SpanFinished, SpanStarted,
+        AffectedElapsedInterval, CausalLink, CounterSampled, CustomCounterSampled,
+        CustomInstantOccurred, CustomSpanFinished, CustomSpanStarted, DiagnosticEvent,
+        DiagnosticEventHeader, DiagnosticEventKind, DiagnosticScope, EventValidationError,
+        InstantOccurred, ObservationGap, SpanFinished, SpanStarted,
     },
     hub::{EventIdentity, HubAdmissionError, MandatoryDurableReserver, ProductionDiagnosticHub},
     kinds::{CounterKind, CustomSeverity, SpanOutcome},
@@ -70,6 +71,21 @@ trait DiagnosticEventAdmission: Send + Sync {
         scope: DiagnosticScope,
         counter_kind: CounterKind,
         value: SchemaU64,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError>;
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_gap(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        producer: String,
+        component: Option<String>,
+        reason: String,
+        dropped_count: Option<SchemaU64>,
+        affected_elapsed: Option<AffectedElapsedInterval>,
+        affected_kind: Option<DiagnosticEventKind>,
+        affected_scope: Option<DiagnosticScope>,
         caused_by: Vec<CausalLink>,
     ) -> Result<SchemaU64, DiagnosticProducerError>;
 
@@ -226,6 +242,47 @@ where
                         header,
                         counter_kind,
                         value,
+                    ))
+                },
+                None,
+            )
+            .map_err(DiagnosticProducerError::admission)?;
+        Ok(receipt.accepted().identity().sequence())
+    }
+
+    fn admit_gap(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        producer: String,
+        component: Option<String>,
+        reason: String,
+        dropped_count: Option<SchemaU64>,
+        affected_elapsed: Option<AffectedElapsedInterval>,
+        affected_kind: Option<DiagnosticEventKind>,
+        affected_scope: Option<DiagnosticScope>,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let receipt = self
+            .admit(
+                move |identity: EventIdentity| {
+                    let header = DiagnosticEventHeader::new(
+                        identity.run_id(),
+                        identity.sequence(),
+                        elapsed_ns,
+                        scope,
+                        caused_by,
+                    )
+                    .expect("hub-assigned identity always has a nonzero sequence");
+                    DiagnosticEvent::ObservationGap(ObservationGap::new(
+                        header,
+                        producer,
+                        component,
+                        reason,
+                        dropped_count,
+                        affected_elapsed,
+                        affected_kind,
+                        affected_scope,
                     ))
                 },
                 None,
@@ -479,6 +536,37 @@ impl DiagnosticRunContext {
             .map_err(DiagnosticProducerError::clock)?;
         self.admission
             .admit_counter(elapsed_ns, scope, counter_kind, value, caused_by)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_observation_gap(
+        &self,
+        scope: DiagnosticScope,
+        producer: String,
+        component: Option<String>,
+        reason: String,
+        dropped_count: Option<SchemaU64>,
+        affected_elapsed: Option<AffectedElapsedInterval>,
+        affected_kind: Option<DiagnosticEventKind>,
+        affected_scope: Option<DiagnosticScope>,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admission.admit_gap(
+            elapsed_ns,
+            scope,
+            producer,
+            component,
+            reason,
+            dropped_count,
+            affected_elapsed,
+            affected_kind,
+            affected_scope,
+            caused_by,
+        )
     }
 
     pub(crate) fn start_custom_span(
