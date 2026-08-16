@@ -9,7 +9,10 @@ use troupe_diagnostics_core::scalar::SchemaU64;
 use crate::orchestration::scene_context::{CuedScope, RunBinding};
 
 #[cfg(not(test))]
-use crate::diagnostic_runtime::load_producer::DiagnosticRunContext;
+use crate::diagnostic_runtime::{
+    load_producer::{DiagnosticProducerError, DiagnosticRunContext},
+    runtime_producer::RuntimeLifecycleProducer,
+};
 #[cfg(not(test))]
 use troupe_diagnostics_core::event::DiagnosticScope;
 
@@ -234,6 +237,101 @@ impl ActLineageSnapshot {
     }
 }
 
+#[cfg(not(test))]
+pub(crate) trait ActDiagnosticFailureOwner: Send + Sync + 'static {
+    fn latch_diagnostic_failure(&self, error: DiagnosticProducerError);
+
+    fn latch_state_failure(&self, code: &'static str);
+}
+
+#[cfg(not(test))]
+impl ActDiagnosticFailureOwner for RuntimeLifecycleProducer {
+    fn latch_diagnostic_failure(&self, error: DiagnosticProducerError) {
+        RuntimeLifecycleProducer::latch_diagnostic_failure(self, error);
+    }
+
+    fn latch_state_failure(&self, code: &'static str) {
+        RuntimeLifecycleProducer::latch_state_failure(self, code);
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) struct StandaloneActAdmission {
+    context: DiagnosticRunContext,
+    cue_scope: DiagnosticScope,
+    session: Arc<troupe_agent_runtime::AgentSessionDiagnosticMetadata>,
+    failure_owner: Arc<dyn ActDiagnosticFailureOwner>,
+}
+
+#[cfg(not(test))]
+impl StandaloneActAdmission {
+    pub(crate) fn new(
+        context: DiagnosticRunContext,
+        cue_scope: DiagnosticScope,
+        session: Arc<troupe_agent_runtime::AgentSessionDiagnosticMetadata>,
+        failure_owner: Arc<dyn ActDiagnosticFailureOwner>,
+    ) -> Self {
+        Self {
+            context,
+            cue_scope,
+            session,
+            failure_owner,
+        }
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        DiagnosticRunContext,
+        DiagnosticScope,
+        Arc<troupe_agent_runtime::AgentSessionDiagnosticMetadata>,
+        Arc<dyn ActDiagnosticFailureOwner>,
+    ) {
+        (
+            self.context,
+            self.cue_scope,
+            self.session,
+            self.failure_owner,
+        )
+    }
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ActAdmissionPrepareError {
+    code: &'static str,
+}
+
+#[cfg(not(test))]
+impl ActAdmissionPrepareError {
+    pub(crate) const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+#[cfg(not(test))]
+impl std::fmt::Display for ActAdmissionPrepareError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Act diagnostic admission failed [{}]", self.code)
+    }
+}
+
+#[cfg(not(test))]
+impl std::error::Error for ActAdmissionPrepareError {}
+
+#[cfg(not(test))]
+pub(crate) use active::PreparedActAdmission;
+
+#[cfg(not(test))]
+pub(crate) fn prepare_admission(
+    binding: &RunBinding,
+    cued: &Arc<CuedScope>,
+    control: &Arc<AgentTurnControl>,
+    standalone: Option<StandaloneActAdmission>,
+) -> Result<Option<PreparedActAdmission>, ActAdmissionPrepareError> {
+    active::prepare_admission(binding, cued, control, standalone)
+}
+
 #[inline]
 pub(crate) fn admitted(
     binding: &RunBinding,
@@ -344,14 +442,15 @@ mod active {
     };
 
     use super::{
-        ActCallerExit, ActHook, ActLineageSnapshot, UsageFinalizationAck,
+        ActAdmissionPrepareError, ActCallerExit, ActDiagnosticFailureOwner, ActHook,
+        ActLineageSnapshot, StandaloneActAdmission, UsageFinalizationAck,
         UsageFinalizationIdentity, UsageFinalizationSettlement, UsageFinalizationSlot, lock,
     };
     use crate::{
         diagnostic_runtime::{
             cue_producer,
             load_producer::{DiagnosticProducerError, DiagnosticRunContext},
-            runtime_producer::{self, RuntimeLifecycleProducer},
+            runtime_producer,
         },
         orchestration::scene_context::{CuedScope, RunBinding},
     };
@@ -413,7 +512,7 @@ mod active {
     }
 
     struct ActLifecycleProducer {
-        runtime: Arc<RuntimeLifecycleProducer>,
+        failure_owner: Arc<dyn ActDiagnosticFailureOwner>,
         context: DiagnosticRunContext,
         control_key: usize,
         act_id: RunLocalId,
@@ -431,33 +530,97 @@ mod active {
         by_act_id: HashMap<String, Weak<ActLifecycleProducer>>,
     }
 
+    pub(crate) struct PreparedActAdmission {
+        producer: Arc<ActLifecycleProducer>,
+    }
+
+    impl PreparedActAdmission {
+        pub(crate) fn identity(&self) -> &AgentTurnDiagnosticIdentity {
+            &self.producer.identity
+        }
+
+        pub(crate) fn act_scope(&self) -> &DiagnosticScope {
+            &self.producer.act_scope
+        }
+
+        pub(crate) fn commit(self) {
+            let producer = self.producer;
+            {
+                let mut registry = lock(registry());
+                if registry.by_control.contains_key(&producer.control_key)
+                    || registry.by_act_id.contains_key(producer.act_id.as_str())
+                {
+                    producer
+                        .failure_owner
+                        .latch_state_failure("act.lifecycle-install-raced");
+                    return;
+                }
+                registry
+                    .by_control
+                    .insert(producer.control_key, Arc::clone(&producer));
+                registry.by_act_id.insert(
+                    producer.act_id.as_str().to_owned(),
+                    Arc::downgrade(&producer),
+                );
+            }
+            producer.start();
+            register_usage_slot(&producer);
+        }
+    }
+
     impl ActLifecycleProducer {
         fn prepare(
             binding: &RunBinding,
             cued: &Arc<CuedScope>,
             control: &Arc<AgentTurnControl>,
-        ) -> Result<Option<Self>, &'static str> {
-            let Some(runtime) = runtime_producer::producer_for_binding(binding) else {
-                return Ok(None);
+            standalone: Option<StandaloneActAdmission>,
+        ) -> Result<Option<Self>, ActAdmissionPrepareError> {
+            let (context, cue_scope, session, failure_owner) = if let Some(runtime) =
+                runtime_producer::producer_for_binding(binding)
+            {
+                let failure_owner: Arc<dyn ActDiagnosticFailureOwner> = runtime.clone();
+                if standalone.is_some() {
+                    return Err(prepare_error(
+                        &failure_owner,
+                        "act.standalone-admission-with-production",
+                    ));
+                }
+                let lineage = cue_producer::lineage_snapshot(cued)
+                    .ok_or_else(|| prepare_error(&failure_owner, "act.cue-lineage-unavailable"))?;
+                if !Arc::ptr_eq(&runtime, lineage.runtime()) {
+                    return Err(prepare_error(
+                        &failure_owner,
+                        "act.runtime-lineage-mismatch",
+                    ));
+                }
+                let session = control.diagnostic_session_metadata().ok_or_else(|| {
+                    prepare_error(&failure_owner, "act.session-metadata-unavailable")
+                })?;
+                (
+                    lineage.context(),
+                    lineage.cue_scope().clone(),
+                    session,
+                    failure_owner,
+                )
+            } else {
+                let Some(standalone) = standalone else {
+                    return Ok(None);
+                };
+                standalone.into_parts()
             };
-            let lineage =
-                cue_producer::lineage_snapshot(cued).ok_or("act.cue-lineage-unavailable")?;
-            if !Arc::ptr_eq(&runtime, lineage.runtime()) {
-                return Err("act.runtime-lineage-mismatch");
-            }
-            let session = control
-                .diagnostic_session_metadata()
-                .ok_or("act.session-metadata-unavailable")?;
-            let actor_id = lineage
-                .cue_scope()
+            let actor_id = cue_scope
                 .actor_id()
-                .ok_or("act.actor-identifier-unavailable")?;
+                .ok_or_else(|| prepare_error(&failure_owner, "act.actor-identifier-unavailable"))?;
             if actor_id.as_str() != session.context().actor_id() {
-                return Err("act.session-actor-identity-mismatch");
+                return Err(prepare_error(
+                    &failure_owner,
+                    "act.session-actor-identity-mismatch",
+                ));
             }
-            let (act_id, turn_id) = next_act_identity()?;
-            let act_scope =
-                scope_for_act(lineage.cue_scope(), act_id.clone(), session.generation())?;
+            let (act_id, turn_id) =
+                next_act_identity().map_err(|code| prepare_error(&failure_owner, code))?;
+            let act_scope = scope_for_act(&cue_scope, act_id.clone(), session.generation())
+                .map_err(|code| prepare_error(&failure_owner, code))?;
             let identity = AgentTurnDiagnosticIdentity::new(
                 session.context().clone(),
                 act_id.as_str(),
@@ -466,8 +629,8 @@ mod active {
             let (usage_identity, usage_slot) =
                 UsageFinalizationIdentity::new(Arc::<str>::from(act_id.as_str()));
             Ok(Some(Self {
-                runtime,
-                context: lineage.context(),
+                failure_owner,
+                context,
                 control_key: control_key(control),
                 act_id,
                 identity,
@@ -993,13 +1156,28 @@ mod active {
 
         fn fail_diagnostic(&self, state: &mut ActLifecycleState, error: DiagnosticProducerError) {
             state.producer_failed = true;
-            self.runtime.latch_diagnostic_failure(error);
+            self.failure_owner.latch_diagnostic_failure(error);
         }
 
         fn fail_state(&self, state: &mut ActLifecycleState, code: &'static str) {
             state.producer_failed = true;
-            self.runtime.latch_state_failure(code);
+            self.failure_owner.latch_state_failure(code);
         }
+    }
+
+    pub(super) fn prepare_admission(
+        binding: &RunBinding,
+        cued: &Arc<CuedScope>,
+        control: &Arc<AgentTurnControl>,
+        standalone: Option<StandaloneActAdmission>,
+    ) -> Result<Option<PreparedActAdmission>, ActAdmissionPrepareError> {
+        Ok(
+            ActLifecycleProducer::prepare(binding, cued, control, standalone)?.map(|producer| {
+                PreparedActAdmission {
+                    producer: Arc::new(producer),
+                }
+            }),
+        )
     }
 
     pub(super) fn admitted(
@@ -1007,37 +1185,12 @@ mod active {
         cued: &Arc<CuedScope>,
         control: &Arc<AgentTurnControl>,
     ) {
-        let Some(runtime) = runtime_producer::producer_for_binding(binding) else {
-            return;
-        };
-        let producer = match ActLifecycleProducer::prepare(binding, cued, control) {
-            Ok(Some(producer)) => Arc::new(producer),
+        let prepared = match prepare_admission(binding, cued, control, None) {
+            Ok(Some(prepared)) => prepared,
             Ok(None) => return,
-            Err(code) => {
-                runtime.latch_state_failure(code);
-                return;
-            }
+            Err(_) => return,
         };
-        {
-            let mut registry = lock(registry());
-            if registry.by_control.contains_key(&producer.control_key)
-                || registry.by_act_id.contains_key(producer.act_id.as_str())
-            {
-                producer
-                    .runtime
-                    .latch_state_failure("act.lifecycle-install-raced");
-                return;
-            }
-            registry
-                .by_control
-                .insert(producer.control_key, Arc::clone(&producer));
-            registry.by_act_id.insert(
-                producer.act_id.as_str().to_owned(),
-                Arc::downgrade(&producer),
-            );
-        }
-        producer.start();
-        register_usage_slot(&producer);
+        prepared.commit();
     }
 
     pub(super) fn observe(control: &Arc<AgentTurnControl>, hook: ActHook) {
@@ -1186,6 +1339,14 @@ mod active {
         if producer.take_settlement_notification() {
             bridge.settlement_ready(producer.act_id.as_str());
         }
+    }
+
+    fn prepare_error(
+        failure_owner: &Arc<dyn ActDiagnosticFailureOwner>,
+        code: &'static str,
+    ) -> ActAdmissionPrepareError {
+        failure_owner.latch_state_failure(code);
+        ActAdmissionPrepareError { code }
     }
 
     fn next_act_identity() -> Result<(RunLocalId, String), &'static str> {

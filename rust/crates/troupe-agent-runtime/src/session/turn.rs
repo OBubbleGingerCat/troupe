@@ -15,8 +15,9 @@ use crate::adapter::{AcpAgentAdapter, RemotePromptErrorSettlement, SupervisorRes
 use crate::diagnostics::observer::AgentDiagnosticObserver;
 use crate::diagnostics::payload::ToolPayloadCapturePolicy;
 use crate::diagnostics::session::{
-    self as diagnostic_session, AgentDiagnosticProvider, AgentSessionDiagnosticMetadata,
-    AgentTurnDiagnosticIdentity, TurnDiagnosticContext, TurnDiagnosticContextAttachError,
+    self as diagnostic_session, AgentDiagnosticProvider, AgentDiagnosticSnapshotError,
+    AgentSessionDiagnosticContext, AgentSessionDiagnosticMetadata, AgentTurnDiagnosticIdentity,
+    TurnDiagnosticContext, TurnDiagnosticContextAttachError,
 };
 use crate::diagnostics::usage::TurnTerminalObservation;
 use crate::error::AgentSessionFailure;
@@ -224,6 +225,13 @@ impl AgentTurnControl {
 
     pub fn diagnostic_session_metadata(&self) -> Option<Arc<AgentSessionDiagnosticMetadata>> {
         self.slot.diagnostic_metadata()
+    }
+
+    pub fn snapshot_standalone_diagnostic_metadata(
+        &self,
+        context: AgentSessionDiagnosticContext,
+    ) -> Result<Arc<AgentSessionDiagnosticMetadata>, AgentDiagnosticSnapshotError> {
+        self.slot.snapshot_standalone_diagnostic_metadata(context)
     }
 
     pub fn install_admission(&self, admission: ActAdmissionLease) -> bool {

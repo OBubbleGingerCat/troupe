@@ -136,6 +136,26 @@ impl AgentSessionDiagnosticMetadata {
         }
     }
 
+    pub(crate) fn snapshot(
+        context: AgentSessionDiagnosticContext,
+        provider: AgentDiagnosticProvider,
+        profile: &ResolvedAgentProfile,
+        ready: Option<&AgentReadySnapshot>,
+    ) -> Self {
+        let mut metadata = Self::opening(context, provider, profile);
+        if let Some(ready) = ready {
+            metadata.apply_ready(ready);
+        }
+        metadata
+    }
+
+    fn apply_ready(&mut self, snapshot: &AgentReadySnapshot) {
+        self.generation = Some(snapshot.generation);
+        self.provider_session_id = Some(Arc::from(snapshot.session_id.as_str()));
+        self.effective_model = Some(Arc::from(snapshot.effective_model.as_str()));
+        self.effective_effort = snapshot.effective_effort.as_deref().map(Arc::<str>::from);
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(context: AgentSessionDiagnosticContext) -> Self {
         Self {
@@ -369,10 +389,7 @@ impl SessionDiagnosticLifecycle {
             let observation = {
                 let mut metadata = lock(&self.metadata);
                 let mut next = (**metadata).clone();
-                next.generation = Some(snapshot.generation);
-                next.provider_session_id = Some(Arc::from(snapshot.session_id.as_str()));
-                next.effective_model = Some(Arc::from(snapshot.effective_model.as_str()));
-                next.effective_effort = snapshot.effective_effort.as_deref().map(Arc::<str>::from);
+                next.apply_ready(snapshot);
                 *metadata = Arc::new(next);
                 AgentDiagnosticObservation::SessionReady(Arc::clone(&metadata))
             };
@@ -446,6 +463,23 @@ impl SessionDiagnosticLifecycle {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentDiagnosticSnapshotError {
+    ProfileUnavailable,
+}
+
+impl fmt::Display for AgentDiagnosticSnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProfileUnavailable => {
+                formatter.write_str("agent session diagnostic profile is unavailable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentDiagnosticSnapshotError {}
 
 #[derive(Clone)]
 pub(crate) struct SessionDiagnosticCleanupHandle {

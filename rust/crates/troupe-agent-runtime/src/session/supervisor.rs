@@ -134,7 +134,11 @@ impl AgentSupervisor {
         };
         #[cfg(feature = "agent-test-support")]
         if matches!(launch.0, ResolvedLaunchKind::Inert) {
-            let slot = AgentSessionSlot::inert(&profile, diagnostic_observer, diagnostic_context);
+            let slot = AgentSessionSlot::inert(
+                Arc::clone(&profile),
+                diagnostic_observer,
+                diagnostic_context,
+            );
             return slot;
         }
         let command = match launch.0 {
@@ -150,7 +154,7 @@ impl AgentSupervisor {
         let slot = AgentSessionSlot::new_with_session_diagnostics(
             diagnostic_observer,
             diagnostic_context,
-            &profile,
+            Arc::clone(&profile),
         );
         slot.observe_opening();
         #[cfg(feature = "agent-test-support")]

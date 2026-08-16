@@ -29,9 +29,9 @@ pub use diagnostics::observer::{
 };
 pub use diagnostics::payload::ToolPayloadCapturePolicy;
 pub use diagnostics::session::{
-    AgentDiagnosticProvider, AgentSessionDiagnosticContext, AgentSessionDiagnosticMetadata,
-    AgentTurnDiagnosticIdentity, AgentTurnDiagnosticMetadata, TurnDiagnosticContext,
-    TurnDiagnosticContextAttachError,
+    AgentDiagnosticProvider, AgentDiagnosticSnapshotError, AgentSessionDiagnosticContext,
+    AgentSessionDiagnosticMetadata, AgentTurnDiagnosticIdentity, AgentTurnDiagnosticMetadata,
+    TurnDiagnosticContext, TurnDiagnosticContextAttachError,
 };
 pub use error::{
     AgentAuthenticationRequiredError, AgentError, AgentResultError, AgentResultIssue,

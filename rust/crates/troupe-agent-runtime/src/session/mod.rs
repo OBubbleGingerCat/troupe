@@ -32,8 +32,9 @@ pub(super) mod turn;
 use crate::adapter::{AcpAgentAdapter, agent_adapter};
 use crate::diagnostics::observer::AgentDiagnosticObserver;
 use crate::diagnostics::session::{
-    self as diagnostic_session, AgentDiagnosticProvider, AgentSessionDiagnosticContext,
-    AgentSessionDiagnosticMetadata, SessionDiagnosticCleanupHandle, SessionDiagnostics,
+    self as diagnostic_session, AgentDiagnosticProvider, AgentDiagnosticSnapshotError,
+    AgentSessionDiagnosticContext, AgentSessionDiagnosticMetadata, SessionDiagnosticCleanupHandle,
+    SessionDiagnostics,
 };
 use crate::error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
@@ -1317,6 +1318,7 @@ pub struct AgentSessionSlot {
     state: Mutex<AgentSessionState>,
     diagnostics: SessionDiagnostics,
     diagnostic_provider: Option<AgentDiagnosticProvider>,
+    diagnostic_profile: Option<Arc<ResolvedAgentProfile>>,
     changed: Notify,
     cancellation: CancellationToken,
     terminal_fault: CancellationToken,
@@ -1384,23 +1386,34 @@ impl AgentSessionSlot {
     pub(crate) fn new_with_session_diagnostics(
         diagnostic_observer: Option<AgentDiagnosticObserver>,
         diagnostic_context: Option<AgentSessionDiagnosticContext>,
-        profile: &ResolvedAgentProfile,
+        profile: Arc<ResolvedAgentProfile>,
     ) -> Arc<Self> {
         let provider = AgentDiagnosticProvider::from_agent_kind(profile.agent);
-        Self::new_with_diagnostics(
-            SessionDiagnostics::from_profile(diagnostic_observer, diagnostic_context, profile),
+        Self::new_with_profile(
+            SessionDiagnostics::from_profile(diagnostic_observer, diagnostic_context, &profile),
             Some(provider),
+            Some(profile),
         )
     }
 
+    #[cfg(test)]
     fn new_with_diagnostics(
         diagnostics: SessionDiagnostics,
         diagnostic_provider: Option<AgentDiagnosticProvider>,
+    ) -> Arc<Self> {
+        Self::new_with_profile(diagnostics, diagnostic_provider, None)
+    }
+
+    fn new_with_profile(
+        diagnostics: SessionDiagnostics,
+        diagnostic_provider: Option<AgentDiagnosticProvider>,
+        diagnostic_profile: Option<Arc<ResolvedAgentProfile>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(AgentSessionState::Opening),
             diagnostics,
             diagnostic_provider,
+            diagnostic_profile,
             changed: Notify::new(),
             cancellation: CancellationToken::new(),
             terminal_fault: CancellationToken::new(),
@@ -1426,12 +1439,15 @@ impl AgentSessionSlot {
 
     #[cfg(feature = "agent-test-support")]
     pub(crate) fn inert(
-        profile: &ResolvedAgentProfile,
+        profile: Arc<ResolvedAgentProfile>,
         diagnostic_observer: Option<AgentDiagnosticObserver>,
         diagnostic_context: Option<AgentSessionDiagnosticContext>,
     ) -> Arc<Self> {
-        let slot =
-            Self::new_with_session_diagnostics(diagnostic_observer, diagnostic_context, profile);
+        let slot = Self::new_with_session_diagnostics(
+            diagnostic_observer,
+            diagnostic_context,
+            Arc::clone(&profile),
+        );
         slot.observe_opening();
         slot.commit_ready(
             AgentReadySnapshot {
@@ -1462,6 +1478,38 @@ impl AgentSessionSlot {
 
     pub(crate) fn diagnostic_metadata(&self) -> Option<Arc<AgentSessionDiagnosticMetadata>> {
         self.diagnostics.metadata()
+    }
+
+    fn snapshot_standalone_diagnostic_metadata(
+        &self,
+        context: AgentSessionDiagnosticContext,
+    ) -> Result<Arc<AgentSessionDiagnosticMetadata>, AgentDiagnosticSnapshotError> {
+        let profile = self
+            .diagnostic_profile
+            .as_ref()
+            .ok_or(AgentDiagnosticSnapshotError::ProfileUnavailable)?;
+        let provider = AgentDiagnosticProvider::from_agent_kind(profile.agent);
+        let ready = {
+            let state = lock(&self.state);
+            match &*state {
+                AgentSessionState::Ready(session)
+                | AgentSessionState::Active(session)
+                | AgentSessionState::Cancelling(session) => Some(Arc::clone(&session.snapshot)),
+                AgentSessionState::Opening
+                | AgentSessionState::BackingOff
+                | AgentSessionState::AuthRequired(_)
+                | AgentSessionState::StartFailed(_)
+                | AgentSessionState::Broken(_)
+                | AgentSessionState::Closing
+                | AgentSessionState::Closed => None,
+            }
+        };
+        Ok(Arc::new(AgentSessionDiagnosticMetadata::snapshot(
+            context,
+            provider,
+            profile,
+            ready.as_deref(),
+        )))
     }
 
     pub(crate) fn diagnostic_cleanup_handle(&self) -> Option<SessionDiagnosticCleanupHandle> {
