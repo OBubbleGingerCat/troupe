@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_cli_args.rs",
+    "tests/integration/test_diagnostic_cli_parse.py"
+  ],
+  "modified": [
+    "rust/src/application/diagnostic_cli/args.rs",
+    "rust/src/application/diagnostic_cli/target.rs",
+    "rust/src/application/diagnostic_cli/values.rs"
+  ],
   "removed": [],
   "generated": []
 }
