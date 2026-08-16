@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/views/error_boundary.tsx",
+    "frontend/diagnostics/tests/component/view-error-boundary.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
