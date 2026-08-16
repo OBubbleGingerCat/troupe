@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/integration/test_diagnostic_archive_views.py"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/query/archive_views.rs",
+    "rust/src/diagnostic_runtime/archive_views.rs"
+  ],
   "removed": [],
   "generated": []
 }
