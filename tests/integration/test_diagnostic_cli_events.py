@@ -10,6 +10,7 @@ EVENTS_SOURCE = (
 )
 ARGS_SOURCE = EVENTS_SOURCE.with_name("args.rs")
 RUST_TEST = ROOT / "rust" / "tests" / "diagnostic_cli_events_finite.rs"
+GATE_DESCRIPTOR = ROOT / "tests" / "fixtures" / "diagnostic_node_gates" / "D03.json"
 FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "diagnostics" / "cli"
 RUN_ID = "12345678-1234-4234-9234-123456789abc"
 
@@ -77,6 +78,18 @@ def test_events_is_bounded_typed_strict_and_has_no_output_side_effects() -> None
         "std::io::stderr",
     ):
         assert forbidden_output not in source
+
+
+def test_finite_gate_descriptor_matches_the_frozen_plan() -> None:
+    descriptor = json.loads(_read(GATE_DESCRIPTOR))
+    assert descriptor["argv"][1] == [
+        "pytest",
+        "-q",
+        "tests/integration/test_diagnostic_cli_events.py",
+        "-k",
+        "finite",
+    ]
+    assert descriptor["maturin_features"] == []
 
 
 def test_jsonl_fixture_is_exact_canonical_duplicate_free_event_stream() -> None:

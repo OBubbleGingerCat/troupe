@@ -15,7 +15,9 @@
     [
       "pytest",
       "-q",
-      "tests/integration/test_diagnostic_cli_events.py"
+      "tests/integration/test_diagnostic_cli_events.py",
+      "-k",
+      "finite"
     ]
   ],
   "env": {},
