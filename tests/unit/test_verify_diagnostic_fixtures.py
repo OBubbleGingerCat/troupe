@@ -222,6 +222,7 @@ def test_view_decoder_enforces_group_caps_count_and_empty_series_contract() -> N
 
     metric = json.loads((VIEW_FIXTURES / "metric.json").read_text(encoding="utf-8"))
     metric_record = verifier.validate_view_record(metric["descriptor"])
+    assert metric["response"]["series"][0]["unit"] == "tokens"
     boundary = copy.deepcopy(metric["response"])
     boundary["series"] = []
     for index in range(64):
@@ -231,8 +232,35 @@ def test_view_decoder_enforces_group_caps_count_and_empty_series_contract() -> N
     verifier.validate_view_response(boundary, metric_record)
     duplicate = copy.deepcopy(metric["response"])
     duplicate["series"] = [duplicate["series"][0], copy.deepcopy(duplicate["series"][0])]
-    with pytest.raises(verifier.FixtureValidationError, match="group"):
+    with pytest.raises(verifier.FixtureValidationError, match="metric_identity"):
         verifier.validate_view_response(duplicate, metric_record)
+    custom_units = copy.deepcopy(metric)
+    custom_units["descriptor"]["query"]["source"] = {
+        "source": "counter_value",
+        "selector": {"selector": "custom", "name": "app.queue"},
+        "selection": "latest_before_reduce",
+    }
+    custom_units["response"]["series"] = [
+        copy.deepcopy(custom_units["response"]["series"][0]),
+        copy.deepcopy(custom_units["response"]["series"][0]),
+    ]
+    custom_units["response"]["series"][0]["unit"] = "items"
+    custom_units["response"]["series"][1]["unit"] = "bytes"
+    custom_record = verifier.validate_view_record(custom_units["descriptor"])
+    verifier.validate_view_response(custom_units["response"], custom_record)
+    for invalid_unit in (None, "count", ""):
+        wrong_unit = copy.deepcopy(metric["response"])
+        wrong_unit["series"][0]["unit"] = invalid_unit
+        with pytest.raises(verifier.FixtureValidationError, match="metric_unit"):
+            verifier.validate_view_response(wrong_unit, metric_record)
+    oversized_unit = copy.deepcopy(custom_units["response"])
+    oversized_unit["series"][0]["unit"] = "u" * 33
+    with pytest.raises(verifier.FixtureValidationError, match="metric_unit"):
+        verifier.validate_view_response(oversized_unit, custom_record)
+    missing_unit = copy.deepcopy(metric["response"])
+    del missing_unit["series"][0]["unit"]
+    with pytest.raises(verifier.FixtureValidationError, match="fields"):
+        verifier.validate_view_response(missing_unit, metric_record)
     invalid_group = copy.deepcopy(metric["response"])
     invalid_group["series"][0]["group"]["value"] = {"type": "null"}
     with pytest.raises(verifier.FixtureValidationError, match="group"):

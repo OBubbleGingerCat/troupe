@@ -12,8 +12,9 @@ use troupe_diagnostics_core::{
     kinds::{CounterKind, CustomSeverity, InstantKind, SpanKind, SpanOutcome, UsageAvailability},
     scalar::TokenCount,
     view_protocol::{
-        CounterSelector, GroupDimension, GroupKey, InstantSelector, MetricSource, QueryFilter,
-        SpanSelector, TableSource, TimelineSource, TokenMetric,
+        CounterSelector, GroupDimension, GroupKey, InstantSelector, METRIC_UNIT_COUNT,
+        METRIC_UNIT_NANOSECONDS, METRIC_UNIT_TOKENS, MetricSource, QueryFilter, SpanSelector,
+        TableSource, TimelineSource, TokenMetric,
     },
 };
 
@@ -71,6 +72,7 @@ pub(crate) struct Candidate {
     pub(crate) token_values: [Option<TokenCount>; 6],
     pub(crate) resource_truncated: bool,
     pub(crate) series_identity: Option<String>,
+    pub(crate) metric_unit: Option<String>,
 }
 
 impl Candidate {
@@ -297,6 +299,7 @@ impl EventIndex {
                 .filter_map(|event| instant_candidate(event, selector))
                 .map(|mut candidate| {
                     candidate.value = CandidateValue::Exact(ExactNumeric::integer(1_u8));
+                    candidate.metric_unit = Some(METRIC_UNIT_COUNT.to_owned());
                     candidate
                 })
                 .collect(),
@@ -524,12 +527,14 @@ fn span_candidate(span: &SpanFact) -> Candidate {
         token_values: std::array::from_fn(|_| None),
         resource_truncated: false,
         series_identity: None,
+        metric_unit: None,
     }
 }
 
 fn metric_span_candidate(span: &SpanFact) -> Candidate {
     let mut candidate = span_candidate(span);
     candidate.sequence = span.end_sequence.unwrap_or(span.sequence);
+    candidate.metric_unit = Some(METRIC_UNIT_NANOSECONDS.to_owned());
     candidate
 }
 
@@ -590,6 +595,7 @@ fn counter_candidate(event: &DiagnosticEvent, selector: &CounterSelector) -> Opt
             );
             candidate.counter_kind = Some(*kind);
             candidate.value = CandidateValue::Exact(ExactNumeric::integer(value.value().get()));
+            candidate.metric_unit = Some(METRIC_UNIT_COUNT.to_owned());
             candidate.series_identity = Some(series_identity(
                 value.header().scope(),
                 kind.as_str(),
@@ -612,6 +618,7 @@ fn counter_candidate(event: &DiagnosticEvent, selector: &CounterSelector) -> Opt
             );
             candidate.custom_name = Some(name.clone());
             candidate.value = custom_number(value.value());
+            candidate.metric_unit = value.unit().map(str::to_owned);
             candidate.series_identity = Some(series_identity(
                 value.header().scope(),
                 name,
@@ -639,6 +646,7 @@ fn token_candidate(event: &DiagnosticEvent, metric: TokenMetric) -> Option<Candi
     );
     fill_token_fields(&mut candidate, value);
     candidate.value = token_value(value, metric);
+    candidate.metric_unit = Some(METRIC_UNIT_TOKENS.to_owned());
     Some(candidate)
 }
 
@@ -716,6 +724,7 @@ fn empty_candidate(
         token_values: std::array::from_fn(|_| None),
         resource_truncated: false,
         series_identity: None,
+        metric_unit: None,
     }
 }
 

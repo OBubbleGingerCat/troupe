@@ -223,6 +223,7 @@ MAX_PAGE_ROWS: Final = 500
 MAX_METRIC_SERIES: Final = 64
 MAX_TIME_SERIES_POINTS: Final = 1024
 MAX_TIME_SERIES_SERIES: Final = 64
+MAX_CUSTOM_UNIT_BYTES: Final = 32
 VIEW_ID: Final = re.compile(r"[a-z][a-z0-9_]*\Z")
 HEX_SHA256: Final = re.compile(r"[0-9a-f]{64}\Z")
 NONNEGATIVE_INTEGER: Final = re.compile(r"(?:0|[1-9][0-9]*)\Z")
@@ -1688,16 +1689,43 @@ def validate_view_response(value: Any, record: dict[str, Any], path: str = "resp
             _fail("incompatible", f"{path}.series", "incompatible metric contains series")
         if len(series) > MAX_METRIC_SERIES:
             _fail("series_cap", f"{path}.series", "metric series count exceeds 64")
-        seen_groups: set[str] = set()
+        seen_identities: set[str] = set()
         for index, raw in enumerate(series):
             series_path = f"{path}.series[{index}]"
             item = _object(raw, series_path)
-            _closed(item, frozenset({"group", "value", "coverage"}), series_path)
+            _closed(item, frozenset({"group", "unit", "value", "coverage"}), series_path)
             group = _group_key(item["group"], f"{series_path}.group")
-            group_identity = json.dumps(group, sort_keys=True, separators=(",", ":"))
-            if group_identity in seen_groups:
-                _fail("group", f"{series_path}.group", "duplicate metric group")
-            seen_groups.add(group_identity)
+            unit = _optional(item["unit"], _string, f"{series_path}.unit")
+            if unit is not None and (
+                not unit or len(unit.encode("utf-8")) > MAX_CUSTOM_UNIT_BYTES
+            ):
+                _fail("metric_unit", f"{series_path}.unit", "metric unit is out of bounds")
+            source = record["query"]["source"]
+            source_kind = source["source"]
+            expected_unit = {
+                "instant_count": "count",
+                "completed_span_duration": "ns",
+                "act_token": "tokens",
+            }.get(source_kind)
+            if (
+                source_kind == "counter_value"
+                and source["selector"]["selector"] == "built_in"
+            ):
+                expected_unit = "count"
+            if expected_unit is not None and unit != expected_unit:
+                _fail(
+                    "metric_unit",
+                    f"{series_path}.unit",
+                    "metric unit differs from its query source",
+                )
+            identity = json.dumps([group, unit], sort_keys=True, separators=(",", ":"))
+            if identity in seen_identities:
+                _fail(
+                    "metric_identity",
+                    series_path,
+                    "duplicate unit-qualified metric identity",
+                )
+            seen_identities.add(identity)
             expected_group = record["query"]["group_by"]
             if (None if group is None else group["dimension"]) != expected_group:
                 _fail("group", f"{series_path}.group", "group key differs from descriptor")

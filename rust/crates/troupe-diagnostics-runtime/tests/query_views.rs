@@ -278,6 +278,7 @@ fn token_metrics_sum_arbitrary_integers_and_report_availability_coverage() {
         .unwrap();
     let metric = response.metric().unwrap();
     assert_eq!(metric.series().len(), 1);
+    assert_eq!(metric.series()[0].unit(), Some("tokens"));
     assert_eq!(
         exact_text(metric.series()[0].value().unwrap()),
         "12345678901234567890123456789012345678901234567897"
@@ -357,6 +358,7 @@ fn completed_span_duration_excludes_open_spans_while_timeline_keeps_them_open() 
         )
         .unwrap();
     let series = &duration.metric().unwrap().series()[0];
+    assert_eq!(series.unit(), Some("ns"));
     assert_eq!(exact_text(series.value().unwrap()), "10");
     assert_eq!(series.coverage().matched_count().get(), 2);
     assert_eq!(series.coverage().contributing_count().get(), 1);
@@ -764,6 +766,7 @@ fn custom_scalar_filters_and_single_dimension_grouping_are_exact() {
         .unwrap();
     let series = response.metric().unwrap().series();
     assert_eq!(series.len(), 1);
+    assert_eq!(series[0].unit(), Some("items"));
     assert_eq!(exact_text(series[0].value().unwrap()), "2.5");
     assert_eq!(series[0].coverage().matched_count().get(), 1);
 
@@ -805,6 +808,75 @@ fn custom_scalar_filters_and_single_dimension_grouping_are_exact() {
             assert_eq!(value.as_mean().unwrap().contributing_count().as_str(), "2");
         }
     }
+}
+
+#[test]
+fn custom_counter_units_remain_distinct_after_latest_before_reduce() {
+    use std::collections::BTreeMap;
+    use troupe_diagnostics_core::event::CustomCounterSampled;
+
+    let directory = TestRunDirectory::new("custom-units");
+    let lease = ActiveArchiveLease::acquire(directory.path()).unwrap();
+    let mut writer = TransactionalWriter::new(create_store(directory.path()), ()).unwrap();
+    let hub = diagnostic_hub();
+    let mut accepted = Vec::new();
+    for (elapsed, unit, value) in [(1, "items", "1"), (2, "bytes", "3"), (3, "items", "7")] {
+        admit(&hub, &mut accepted, move |identity| {
+            DiagnosticEvent::CustomCounterSampled(
+                CustomCounterSampled::new(
+                    header(identity, elapsed, run_scope()),
+                    "app.queue".to_owned(),
+                    troupe_diagnostics_core::detail::CustomNumber::Decimal(
+                        DecimalString::parse(value).unwrap(),
+                    ),
+                    Some(unit.to_owned()),
+                    BTreeMap::new(),
+                )
+                .unwrap(),
+            )
+        });
+    }
+    commit(&mut writer, accepted);
+
+    let mut reader = DiagnosticReader::open_active(run_id(), lease.guard()).unwrap();
+    let captured = reader.capture().unwrap();
+    let response = engine()
+        .query(
+            &captured,
+            &metric_record(
+                "queue_sum_by_unit",
+                MetricSource::CounterValue {
+                    selector: CounterSelector::Custom {
+                        name: "app.queue".to_owned(),
+                    },
+                    selection: CounterSelection::LatestBeforeReduce,
+                },
+                Reducer::Sum,
+            ),
+            &ViewQueryRequest::new(),
+        )
+        .unwrap();
+    let metric = response.metric().unwrap();
+    assert_eq!(metric.series().len(), 2);
+    let by_unit = metric
+        .series()
+        .iter()
+        .map(|series| {
+            (
+                series.unit().expect("custom unit"),
+                exact_text(series.value().expect("unit aggregate")),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(by_unit.get("bytes"), Some(&"3"));
+    assert_eq!(by_unit.get("items"), Some(&"7"));
+    assert!(
+        metric
+            .series()
+            .iter()
+            .all(|series| series.coverage().matched_count().get() == 1)
+    );
+    assert_eq!(response.metadata().coverage().matched_count().get(), 2);
 }
 
 #[test]

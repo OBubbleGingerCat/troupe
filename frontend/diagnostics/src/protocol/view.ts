@@ -165,6 +165,7 @@ export interface TimelineViewResponse extends ViewResponseBase<"timeline"> {
 export interface MetricViewResponse extends ViewResponseBase<"metric"> {
   readonly series: readonly {
     readonly group: JsonObject | null;
+    readonly unit: string | null;
     readonly value: JsonObject | null;
     readonly coverage: ViewCoverage;
   }[];
@@ -816,6 +817,31 @@ function validateAggregateForQuery(
   }
 }
 
+function validateMetricUnit(value: unknown, record: ViewRecord, path: string): string | null {
+  const unit = optional(value, expectString, path);
+  if (unit !== null && (unit.length === 0 || utf8ByteLength(unit) > 32)) {
+    failProtocol("metric_unit", path, "metric unit is out of bounds");
+  }
+  const query = record.query as Record<string, unknown>;
+  const source = expectObject(query.source, "view.query.source");
+  const sourceKind = expectString(source.source, "view.query.source.source");
+  const selector = source.selector === undefined
+    ? null
+    : expectObject(source.selector, "view.query.source.selector");
+  const expected = sourceKind === "instant_count"
+      || (sourceKind === "counter_value" && selector?.selector === "built_in")
+    ? "count"
+    : sourceKind === "completed_span_duration"
+      ? "ns"
+      : sourceKind === "act_token"
+        ? "tokens"
+        : null;
+  if (expected !== null && unit !== expected) {
+    failProtocol("metric_unit", path, "metric unit differs from its query source");
+  }
+  return unit;
+}
+
 export function decodeViewResponse(
   value: unknown,
   record: ViewRecord,
@@ -951,11 +977,12 @@ export function decodeViewResponse(
     series.forEach((raw, index) => {
       const seriesPath = `${path}.series[${index}]`;
       const item = expectObject(raw, seriesPath);
-      expectExactFields(item, ["group", "value", "coverage"], seriesPath);
+      expectExactFields(item, ["group", "unit", "value", "coverage"], seriesPath);
       const group = validateGroupKey(item.group, `${seriesPath}.group`);
-      const identity = JSON.stringify(group);
+      const unit = validateMetricUnit(item.unit, record, `${seriesPath}.unit`);
+      const identity = JSON.stringify([group, unit]);
       if (seen.has(identity)) {
-        failProtocol("group", `${seriesPath}.group`, "duplicate metric group");
+        failProtocol("metric_identity", seriesPath, "duplicate unit-qualified metric identity");
       }
       seen.add(identity);
       validateGroupMatches(group, record, `${seriesPath}.group`);

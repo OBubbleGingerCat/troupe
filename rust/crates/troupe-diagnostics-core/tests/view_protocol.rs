@@ -166,6 +166,7 @@ fn fixtures_freeze_empty_boundary_partial_and_exact_mean_semantics() {
     let metric = renderer_fixture("metric.json");
     let metric = metric.response.metric().unwrap();
     let mean = metric.series()[0].value().unwrap().as_mean().unwrap();
+    assert_eq!(metric.series()[0].unit(), Some("tokens"));
     assert_eq!(mean.numerator().as_str(), "123456789012345678901234567890");
     assert_eq!(mean.contributing_count().as_str(), "3");
     assert_eq!(metric.series()[0].coverage().excluded_count().get(), 2);
@@ -466,6 +467,46 @@ fn response_contract_closes_group_caps_count_coverage_and_incompatibility() {
     duplicate_metric["response"]["series"] =
         Value::Array(vec![duplicate_series.clone(), duplicate_series]);
     assert!(serde_json::from_value::<RendererFixture>(duplicate_metric).is_err());
+
+    let mut unit_qualified: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    unit_qualified["descriptor"]["query"]["source"] = serde_json::json!({
+        "source": "counter_value",
+        "selector": {"selector": "custom", "name": "app.queue"},
+        "selection": "latest_before_reduce"
+    });
+    let mut items = unit_qualified["response"]["series"][0].clone();
+    items["unit"] = Value::String("items".to_owned());
+    let mut bytes = items.clone();
+    bytes["unit"] = Value::String("bytes".to_owned());
+    unit_qualified["response"]["series"] = Value::Array(vec![items, bytes]);
+    let unit_qualified: RendererFixture = serde_json::from_value(unit_qualified).unwrap();
+    unit_qualified
+        .response
+        .validate_for(&unit_qualified.descriptor)
+        .unwrap();
+
+    let mut wrong_fixed_unit: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    wrong_fixed_unit["response"]["series"][0]["unit"] = Value::String("count".to_owned());
+    let wrong_fixed_unit: RendererFixture = serde_json::from_value(wrong_fixed_unit).unwrap();
+    assert!(
+        wrong_fixed_unit
+            .response
+            .validate_for(&wrong_fixed_unit.descriptor)
+            .is_err()
+    );
+
+    let mut missing_unit: Value = serde_json::from_slice(&metric_bytes).unwrap();
+    missing_unit["response"]["series"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("unit");
+    assert!(serde_json::from_value::<RendererFixture>(missing_unit).is_err());
+
+    for invalid_unit in [String::new(), "u".repeat(33)] {
+        let mut invalid: Value = serde_json::from_slice(&metric_bytes).unwrap();
+        invalid["response"]["series"][0]["unit"] = Value::String(invalid_unit);
+        assert!(serde_json::from_value::<RendererFixture>(invalid).is_err());
+    }
 
     let mut invalid_group_value: Value = serde_json::from_slice(&metric_bytes).unwrap();
     invalid_group_value["response"]["series"][0]["group"]["value"] =

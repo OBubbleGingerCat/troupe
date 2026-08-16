@@ -341,7 +341,8 @@ impl ViewQueryEngine {
             binding.selected_scope(),
             &relevant_kinds_for_metric(query.source()),
         );
-        let (grouped, group_exclusions) = group_candidates(candidates, query.group_by())?;
+        let (grouped, group_exclusions) =
+            group_metric_candidates(candidates, query.group_by(), query.source().fixed_unit())?;
         if grouped.len() > usize::from(MAX_METRIC_SERIES) {
             return Err(ViewQueryError::local(
                 ViewQueryErrorCode::ResourceLimit,
@@ -359,7 +360,7 @@ impl ViewQueryEngine {
             coverage.add_gaps(gaps)?;
             overall.merge_without_gaps(&coverage)?;
             series.push(
-                MetricSeries::new(group.group, value, coverage.into_coverage()?)
+                MetricSeries::new(group.group, group.unit, value, coverage.into_coverage()?)
                     .map_err(|_| ViewQueryError::protocol("metric series is invalid"))?,
             );
         }
@@ -705,20 +706,23 @@ fn metric_candidate_matches_binding(candidate: &Candidate, binding: &QueryBindin
 #[derive(Debug)]
 struct CandidateGroup {
     group: Option<GroupKey>,
+    unit: Option<String>,
     candidates: Vec<Candidate>,
 }
 
-fn group_candidates(
+fn group_metric_candidates(
     candidates: Vec<Candidate>,
     dimension: Option<&troupe_diagnostics_core::view_protocol::GroupDimension>,
+    empty_unit: Option<&str>,
 ) -> Result<(Vec<CandidateGroup>, Vec<Exclusion>), ViewQueryError> {
     let mut groups: BTreeMap<String, CandidateGroup> = BTreeMap::new();
     let mut exclusions = Vec::new();
-    if dimension.is_none() {
+    if candidates.is_empty() && dimension.is_none() {
         groups.insert(
             String::new(),
             CandidateGroup {
                 group: None,
+                unit: empty_unit.map(str::to_owned),
                 candidates: Vec::new(),
             },
         );
@@ -731,16 +735,14 @@ fn group_candidates(
                 continue;
             }
         };
-        let key = if dimension.is_none() {
-            String::new()
-        } else {
-            serde_json::to_string(&group)
-                .map_err(|_| ViewQueryError::protocol("group key is not serializable"))?
-        };
+        let unit = candidate.metric_unit.clone();
+        let key = serde_json::to_string(&(group.as_ref(), unit.as_deref()))
+            .map_err(|_| ViewQueryError::protocol("metric identity is not serializable"))?;
         groups
             .entry(key)
             .or_insert_with(|| CandidateGroup {
                 group,
+                unit,
                 candidates: Vec::new(),
             })
             .candidates

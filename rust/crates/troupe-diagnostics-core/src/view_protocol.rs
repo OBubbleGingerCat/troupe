@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 use crate::{
-    detail::{CanonicalInteger, DiagnosticScalar},
+    detail::{CanonicalInteger, DiagnosticScalar, MAX_CUSTOM_UNIT_BYTES},
     event::{DiagnosticEventKind, DiagnosticScope, EVENT_SCHEMA_VERSION},
     id::CanonicalUuid,
     kinds::{CounterKind, CustomSeverity, InstantKind, SpanKind, SpanOutcome},
@@ -21,6 +21,9 @@ pub const MAX_TIME_SERIES_SERIES: u16 = 64;
 pub const MAX_VIEW_ID_BYTES: usize = 64;
 pub const MAX_VIEW_TITLE_BYTES: usize = 128;
 pub const MAX_OPAQUE_CURSOR_BYTES: usize = 512;
+pub const METRIC_UNIT_COUNT: &str = "count";
+pub const METRIC_UNIT_NANOSECONDS: &str = "ns";
+pub const METRIC_UNIT_TOKENS: &str = "tokens";
 
 const TIME_SERIES_TARGET_INTERVALS: u64 = 1023;
 const MAX_QUERY_FILTERS: usize = 32;
@@ -315,6 +318,22 @@ impl MetricSource {
             Self::CounterValue { .. }
             | Self::CompletedSpanDuration { .. }
             | Self::ActToken { .. } => true,
+        }
+    }
+
+    pub const fn fixed_unit(&self) -> Option<&'static str> {
+        match self {
+            Self::CounterValue {
+                selector: CounterSelector::BuiltIn { .. },
+                ..
+            }
+            | Self::InstantCount { .. } => Some(METRIC_UNIT_COUNT),
+            Self::CompletedSpanDuration { .. } => Some(METRIC_UNIT_NANOSECONDS),
+            Self::ActToken { .. } => Some(METRIC_UNIT_TOKENS),
+            Self::CounterValue {
+                selector: CounterSelector::Custom { .. },
+                ..
+            } => None,
         }
     }
 }
@@ -1633,18 +1652,29 @@ impl TimelineRow {
 #[serde(deny_unknown_fields)]
 pub struct MetricSeries {
     group: Option<GroupKey>,
+    #[serde(deserialize_with = "deserialize_required_optional_string")]
+    unit: Option<String>,
     value: Option<AggregateValue>,
     coverage: Coverage,
+}
+
+fn deserialize_required_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
 }
 
 impl MetricSeries {
     pub fn new(
         group: Option<GroupKey>,
+        unit: Option<String>,
         value: Option<AggregateValue>,
         coverage: Coverage,
     ) -> Result<Self, ViewProtocolError> {
         let result = Self {
             group,
+            unit,
             value,
             coverage,
         };
@@ -1655,6 +1685,13 @@ impl MetricSeries {
     fn validate(&self) -> Result<(), ViewProtocolError> {
         if let Some(group) = &self.group {
             group.validate()?;
+        }
+        if self
+            .unit
+            .as_ref()
+            .is_some_and(|unit| unit.is_empty() || unit.len() > MAX_CUSTOM_UNIT_BYTES)
+        {
+            return Err(ViewProtocolError::new("metric unit is out of bounds"));
         }
         self.coverage.validate()?;
         if self.value.is_none() && self.coverage.contributing_count().get() != 0 {
@@ -1671,6 +1708,9 @@ impl MetricSeries {
     }
     pub const fn group(&self) -> Option<&GroupKey> {
         self.group.as_ref()
+    }
+    pub fn unit(&self) -> Option<&str> {
+        self.unit.as_deref()
     }
     pub const fn coverage(&self) -> &Coverage {
         &self.coverage
@@ -2010,7 +2050,7 @@ impl ViewResponse {
                         "incompatible metric result contains series",
                     ));
                 }
-                validate_unique_group_keys(result.series.iter().map(|item| item.group.as_ref()))?;
+                validate_unique_metric_series(&result.series)?;
                 for series in &result.series {
                     series.validate()?;
                 }
@@ -2120,11 +2160,27 @@ fn validate_aggregate_series(
     series: &[MetricSeries],
     query: &MetricQuery,
 ) -> Result<(), ViewProtocolError> {
-    validate_unique_group_keys(series.iter().map(|item| item.group.as_ref()))?;
+    validate_unique_metric_series(series)?;
     for item in series {
         validate_group_key(item.group.as_ref(), query.group_by())?;
+        validate_metric_unit(item.unit(), query.source())?;
         validate_aggregate_kind(item.value.as_ref(), query.reducer())?;
         validate_aggregate_source(item.value.as_ref(), query.source())?;
+    }
+    Ok(())
+}
+
+fn validate_metric_unit(
+    unit: Option<&str>,
+    source: &MetricSource,
+) -> Result<(), ViewProtocolError> {
+    if source
+        .fixed_unit()
+        .is_some_and(|expected| unit != Some(expected))
+    {
+        return Err(ViewProtocolError::new(
+            "metric unit differs from its query source",
+        ));
     }
     Ok(())
 }
@@ -2247,6 +2303,20 @@ fn validate_unique_group_keys<'a>(
             ));
         }
         seen.push(group);
+    }
+    Ok(())
+}
+
+fn validate_unique_metric_series(series: &[MetricSeries]) -> Result<(), ViewProtocolError> {
+    let mut seen = Vec::new();
+    for item in series {
+        let identity = (item.group.as_ref(), item.unit.as_deref());
+        if seen.contains(&identity) {
+            return Err(ViewProtocolError::new(
+                "metric result contains duplicate unit-qualified identities",
+            ));
+        }
+        seen.push(identity);
     }
     Ok(())
 }
