@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/transcript/MessageStream.tsx",
+    "frontend/diagnostics/src/transcript/ToolResultRows.tsx",
+    "frontend/diagnostics/src/transcript/TranscriptPanel.tsx",
+    "frontend/diagnostics/src/transcript/transcript.css",
+    "frontend/diagnostics/tests/component/transcript.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
