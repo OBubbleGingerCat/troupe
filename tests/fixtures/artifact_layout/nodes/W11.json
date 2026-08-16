@@ -1,6 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/usage/ContextMeter.tsx",
+    "frontend/diagnostics/src/usage/UsageCoverage.tsx",
+    "frontend/diagnostics/src/usage/UsagePanel.tsx",
+    "frontend/diagnostics/src/usage/format.ts",
+    "frontend/diagnostics/src/usage/usage.css",
+    "frontend/diagnostics/tests/component/usage.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
