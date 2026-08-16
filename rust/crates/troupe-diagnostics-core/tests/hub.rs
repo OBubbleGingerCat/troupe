@@ -7,9 +7,10 @@ use std::{
 };
 
 use troupe_diagnostics_core::{
+    detail::{EmptyDetail, SpanStartDetail},
     event::{
         CounterSampled, DiagnosticEvent, DiagnosticEventHeader, DiagnosticEventKind,
-        DiagnosticScope, ObservationGap, SpanFinished,
+        DiagnosticScope, ObservationGap, SpanFinished, SpanStarted,
     },
     hub::{
         AcceptedDiagnosticEvent, ActEventSubscriber, AdmissionReservation, AdmissionReserver,
@@ -19,7 +20,7 @@ use troupe_diagnostics_core::{
         SubscriberLocalGap,
     },
     id::CanonicalUuid,
-    kinds::{CounterKind, SpanOutcome},
+    kinds::{CounterKind, SpanKind, SpanOutcome},
     scalar::SchemaU64,
     time::ElapsedNs,
     validate::ReferenceValidationCode,
@@ -61,6 +62,27 @@ fn finish_before_start_candidate() -> impl DiagnosticEventCandidate {
         DiagnosticEvent::SpanFinished(SpanFinished::new(
             header(identity, 1),
             SchemaU64::new(2),
+            SpanOutcome::Completed,
+            None,
+        ))
+    }
+}
+
+fn span_start_candidate(elapsed_ns: u64) -> impl DiagnosticEventCandidate {
+    move |identity| {
+        DiagnosticEvent::SpanStarted(SpanStarted::new(
+            header(identity, elapsed_ns),
+            SpanStartDetail::RunLifecycle(EmptyDetail::new()),
+            None,
+        ))
+    }
+}
+
+fn span_finish_candidate(elapsed_ns: u64, span_id: u64) -> impl DiagnosticEventCandidate {
+    move |identity| {
+        DiagnosticEvent::SpanFinished(SpanFinished::new(
+            header(identity, elapsed_ns),
+            SchemaU64::new(span_id),
             SpanOutcome::Completed,
             None,
         ))
@@ -299,6 +321,36 @@ fn production_admission_reserves_exact_bytes_and_fans_out_one_immutable_fact() {
         live[0].canonical_bytes()
     );
     assert_eq!(live[0].canonical_bytes(), subscriber[0].canonical_bytes());
+}
+
+#[test]
+fn accepted_finish_resolves_span_kind_without_changing_canonical_bytes() {
+    let reserver = FakeReserver::default();
+    let hub = ProductionDiagnosticHub::production(
+        run_id(),
+        FakeDurableReserver(reserver),
+        Box::new(RecordingLiveNotifier::default()),
+    );
+
+    let started = hub.admit(span_start_candidate(10), None).unwrap();
+    let finished = hub.admit(span_finish_candidate(20, 1), None).unwrap();
+
+    assert_eq!(
+        started.accepted().built_in_span_kind(),
+        Some(SpanKind::RunLifecycle)
+    );
+    assert_eq!(
+        finished.accepted().built_in_span_kind(),
+        Some(SpanKind::RunLifecycle)
+    );
+    let canonical =
+        serde_json::from_slice::<serde_json::Value>(finished.accepted().canonical_bytes()).unwrap();
+    assert_eq!(canonical["kind"], "span_finished");
+    assert!(canonical.get("span_kind").is_none());
+    assert_eq!(
+        serde_json::from_slice::<DiagnosticEvent>(finished.accepted().canonical_bytes()).unwrap(),
+        *finished.accepted().event()
+    );
 }
 
 #[test]

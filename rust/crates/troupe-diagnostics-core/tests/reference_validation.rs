@@ -7,7 +7,7 @@ use troupe_diagnostics_core::{
         SpanStarted,
     },
     id::{CanonicalUuid, RunLocalId},
-    kinds::{CausalRelation, CounterKind, SpanOutcome},
+    kinds::{CausalRelation, CounterKind, SpanKind, SpanOutcome},
     scalar::SchemaU64,
     time::ElapsedNs,
     validate::{
@@ -222,6 +222,13 @@ fn open_nested_and_overlapping_spans_are_valid_without_event_mutation() {
             .map(|event| event.event().header().sequence().get())
             .collect::<Vec<_>>(),
         vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        validated
+            .iter()
+            .map(|event| event.built_in_span_kind())
+            .collect::<Vec<_>>(),
+        vec![Some(SpanKind::RunLifecycle); 5]
     );
     assert_eq!(events, original);
 }

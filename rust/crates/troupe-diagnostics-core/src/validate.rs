@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     event::{DiagnosticEvent, DiagnosticScope},
     id::CanonicalUuid,
+    kinds::SpanKind,
     scalar::SchemaU64,
     time::ElapsedNs,
 };
@@ -113,17 +114,24 @@ impl std::error::Error for ReferenceValidationError {}
 #[derive(Clone, Copy, Debug)]
 pub struct ValidatedEvent<'event> {
     event: &'event DiagnosticEvent,
+    built_in_span_kind: Option<SpanKind>,
 }
 
 impl<'event> ValidatedEvent<'event> {
     pub const fn event(&self) -> &'event DiagnosticEvent {
         self.event
     }
+
+    /// Returns the built-in kind carried by a start or resolved from its finish reference.
+    pub const fn built_in_span_kind(&self) -> Option<SpanKind> {
+        self.built_in_span_kind
+    }
 }
 
 #[derive(Debug)]
 pub struct ValidatedEventStream<'events> {
     events: &'events [DiagnosticEvent],
+    built_in_span_kinds: Vec<Option<SpanKind>>,
 }
 
 impl ValidatedEventStream<'_> {
@@ -136,7 +144,13 @@ impl ValidatedEventStream<'_> {
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = ValidatedEvent<'_>> {
-        self.events.iter().map(|event| ValidatedEvent { event })
+        self.events
+            .iter()
+            .zip(self.built_in_span_kinds.iter().copied())
+            .map(|(event, built_in_span_kind)| ValidatedEvent {
+                event,
+                built_in_span_kind,
+            })
     }
 }
 
@@ -144,10 +158,14 @@ pub fn validate_event_stream(
     events: &[DiagnosticEvent],
 ) -> Result<ValidatedEventStream<'_>, ReferenceValidationError> {
     let mut validator = ReferenceValidator::new();
+    let mut built_in_span_kinds = Vec::with_capacity(events.len());
     for event in events {
-        validator.validate(event)?;
+        built_in_span_kinds.push(validator.validate(event)?.built_in_span_kind());
     }
-    Ok(ValidatedEventStream { events })
+    Ok(ValidatedEventStream {
+        events,
+        built_in_span_kinds,
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -170,9 +188,12 @@ impl ReferenceValidator {
         &mut self,
         event: &'event DiagnosticEvent,
     ) -> Result<ValidatedEvent<'event>, ReferenceValidationError> {
-        let change = self.prepare(event)?;
+        let (change, built_in_span_kind) = self.prepare(event)?;
         self.commit(event, change);
-        Ok(ValidatedEvent { event })
+        Ok(ValidatedEvent {
+            event,
+            built_in_span_kind,
+        })
     }
 
     pub fn validate_then<'event, T, E>(
@@ -180,15 +201,21 @@ impl ReferenceValidator {
         event: &'event DiagnosticEvent,
         consumer: impl FnOnce(ValidatedEvent<'event>) -> Result<T, E>,
     ) -> Result<Result<T, E>, ReferenceValidationError> {
-        let change = self.prepare(event)?;
-        let result = consumer(ValidatedEvent { event });
+        let (change, built_in_span_kind) = self.prepare(event)?;
+        let result = consumer(ValidatedEvent {
+            event,
+            built_in_span_kind,
+        });
         if result.is_ok() {
             self.commit(event, change);
         }
         Ok(result)
     }
 
-    fn prepare(&self, event: &DiagnosticEvent) -> Result<StateChange, ReferenceValidationError> {
+    fn prepare(
+        &self,
+        event: &DiagnosticEvent,
+    ) -> Result<(StateChange, Option<SpanKind>), ReferenceValidationError> {
         let header = event.header();
         let run_id = header.run_id();
         let sequence = header.sequence();
@@ -206,25 +233,37 @@ impl ReferenceValidator {
         validate_scope(event)?;
         self.validate_causal_links(event)?;
 
-        let change = match event {
+        let prepared = match event {
             DiagnosticEvent::SpanStarted(start) => {
-                self.validate_span_start(event, SpanFamily::BuiltIn, start.parent_span_id())?
+                let span_kind = start.span_kind();
+                (
+                    self.validate_span_start(
+                        event,
+                        SpanFamily::BuiltIn,
+                        Some(span_kind),
+                        start.parent_span_id(),
+                    )?,
+                    Some(span_kind),
+                )
             }
-            DiagnosticEvent::CustomSpanStarted(start) => {
-                self.validate_span_start(event, SpanFamily::Custom, start.parent_span_id())?
-            }
+            DiagnosticEvent::CustomSpanStarted(start) => (
+                self.validate_span_start(event, SpanFamily::Custom, None, start.parent_span_id())?,
+                None,
+            ),
             DiagnosticEvent::SpanFinished(finish) => {
                 self.validate_span_finish(event, SpanFamily::BuiltIn, finish.span_id())?
             }
             DiagnosticEvent::CustomSpanFinished(finish) => {
                 self.validate_span_finish(event, SpanFamily::Custom, finish.span_id())?
             }
-            DiagnosticEvent::InstantOccurred(instant) => {
-                self.validate_containing_span(event, instant.containing_span_id())?
-            }
-            DiagnosticEvent::CustomInstantOccurred(instant) => {
-                self.validate_containing_span(event, instant.containing_span_id())?
-            }
+            DiagnosticEvent::InstantOccurred(instant) => (
+                self.validate_containing_span(event, instant.containing_span_id())?,
+                None,
+            ),
+            DiagnosticEvent::CustomInstantOccurred(instant) => (
+                self.validate_containing_span(event, instant.containing_span_id())?,
+                None,
+            ),
             DiagnosticEvent::CounterSampled(_)
             | DiagnosticEvent::AgentMessageDelta(_)
             | DiagnosticEvent::AgentMessageCompleted(_)
@@ -232,9 +271,9 @@ impl ReferenceValidator {
             | DiagnosticEvent::ContextUsageSampled(_)
             | DiagnosticEvent::ActTokenUsageFinalized(_)
             | DiagnosticEvent::ObservationGap(_)
-            | DiagnosticEvent::CustomCounterSampled(_) => StateChange::RecordEvent,
+            | DiagnosticEvent::CustomCounterSampled(_) => (StateChange::RecordEvent, None),
         };
-        Ok(change)
+        Ok(prepared)
     }
 
     fn commit(&mut self, event: &DiagnosticEvent, change: StateChange) {
@@ -325,8 +364,14 @@ impl ReferenceValidator {
         &self,
         event: &DiagnosticEvent,
         family: SpanFamily,
+        built_in_span_kind: Option<SpanKind>,
         parent_span_id: Option<SchemaU64>,
     ) -> Result<StateChange, ReferenceValidationError> {
+        debug_assert_eq!(
+            family == SpanFamily::BuiltIn,
+            built_in_span_kind.is_some(),
+            "only built-in spans carry a resolved built-in kind"
+        );
         if let Some(parent_span_id) = parent_span_id {
             let parent = self.validate_open_span_reference(event, parent_span_id)?;
             if !scope_contains(&parent.scope, event.header().scope()) {
@@ -347,6 +392,7 @@ impl ReferenceValidator {
 
         Ok(StateChange::StartSpan(Box::new(SpanRecord {
             family,
+            built_in_span_kind,
             scope: event.header().scope().clone(),
             started_at: event.header().elapsed_ns(),
             finished_at: None,
@@ -360,7 +406,7 @@ impl ReferenceValidator {
         event: &DiagnosticEvent,
         family: SpanFamily,
         span_id: SchemaU64,
-    ) -> Result<StateChange, ReferenceValidationError> {
+    ) -> Result<(StateChange, Option<SpanKind>), ReferenceValidationError> {
         let header = event.header();
         if span_id >= header.sequence() {
             return Err(error(
@@ -429,10 +475,13 @@ impl ReferenceValidator {
             ));
         }
 
-        Ok(StateChange::FinishSpan {
-            span_id,
-            elapsed_ns: header.elapsed_ns(),
-        })
+        Ok((
+            StateChange::FinishSpan {
+                span_id,
+                elapsed_ns: header.elapsed_ns(),
+            },
+            span.built_in_span_kind,
+        ))
     }
 
     fn validate_containing_span(
@@ -516,6 +565,7 @@ enum SpanFamily {
 #[derive(Clone, Debug)]
 struct SpanRecord {
     family: SpanFamily,
+    built_in_span_kind: Option<SpanKind>,
     scope: DiagnosticScope,
     started_at: ElapsedNs,
     finished_at: Option<ElapsedNs>,

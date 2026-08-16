@@ -7,6 +7,7 @@ use std::{
 use crate::{
     event::DiagnosticEvent,
     id::CanonicalUuid,
+    kinds::SpanKind,
     scalar::SchemaU64,
     validate::{ReferenceValidationError, ReferenceValidator},
 };
@@ -93,13 +94,19 @@ pub struct AcceptedDiagnosticEvent(Arc<AcceptedDiagnosticEventInner>);
 struct AcceptedDiagnosticEventInner {
     event: DiagnosticEvent,
     canonical_bytes: Box<[u8]>,
+    built_in_span_kind: Option<SpanKind>,
 }
 
 impl AcceptedDiagnosticEvent {
-    fn new(event: DiagnosticEvent, canonical_bytes: Vec<u8>) -> Self {
+    fn new(
+        event: DiagnosticEvent,
+        canonical_bytes: Vec<u8>,
+        built_in_span_kind: Option<SpanKind>,
+    ) -> Self {
         Self(Arc::new(AcceptedDiagnosticEventInner {
             event,
             canonical_bytes: canonical_bytes.into_boxed_slice(),
+            built_in_span_kind,
         }))
     }
 
@@ -109,6 +116,11 @@ impl AcceptedDiagnosticEvent {
 
     pub fn canonical_bytes(&self) -> &[u8] {
         &self.0.canonical_bytes
+    }
+
+    /// Returns the built-in kind carried by a start or resolved from its finish reference.
+    pub fn built_in_span_kind(&self) -> Option<SpanKind> {
+        self.0.built_in_span_kind
     }
 
     pub fn identity(&self) -> EventIdentity {
@@ -409,11 +421,12 @@ where
         }
         .map_err(HubAdmissionError::Reservation)?;
 
-        state
+        let validated = state
             .validator
             .validate(&event)
             .map_err(HubAdmissionError::Reference)?;
-        let accepted = AcceptedDiagnosticEvent::new(event, canonical_bytes);
+        let built_in_span_kind = validated.built_in_span_kind();
+        let accepted = AcceptedDiagnosticEvent::new(event, canonical_bytes, built_in_span_kind);
         state.next_sequence = next.checked_add(1);
         reservation.commit(accepted.clone());
 
