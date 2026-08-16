@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/server_sse.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/server/sse/cursor.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/sse/frame.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/sse/replay.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/server/sse/subscriber.rs"
+  ],
   "removed": [],
   "generated": []
 }
