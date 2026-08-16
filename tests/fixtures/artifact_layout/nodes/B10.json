@@ -1,7 +1,11 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/integration/test_diagnostic_scene_drain.py"
+  ],
+  "modified": [
+    "rust/src/diagnostic_runtime/scene_drain_producer.rs"
+  ],
   "removed": [],
   "generated": []
 }
