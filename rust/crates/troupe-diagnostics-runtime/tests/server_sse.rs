@@ -35,8 +35,9 @@ use troupe_diagnostics_runtime::{
         sse::{
             cursor::{CursorErrorKind, CursorSource, EffectiveCursor, resolve_effective_cursor},
             frame::{
-                CURSOR_INCONSISTENT_REASON, CommittedEvent, PRODUCTION_FINISHED_REASON, SseFrame,
-                SseFrameKind, sse_response_headers, sse_route_response,
+                CURSOR_INCONSISTENT_REASON, CommittedEvent, DecodedSseControl,
+                PRODUCTION_FINISHED_REASON, SseFrame, SseFrameKind, decode_control_payload,
+                sse_response_headers, sse_route_response,
             },
             replay::{
                 ActiveReplaySource, ReplayCoordinator, ReplayDriverConfig, ReplayErrorKind,
@@ -377,6 +378,80 @@ fn frame_bytes_are_canonical_one_event_frames_and_controls_never_have_ids() {
             "event: stream_ready\ndata: {{\"control_schema_version\":1,\"run_id\":\"{RUN_ID}\",\"resume_after\":\"1\",\"replay_through\":\"2\"}}\n\n"
         )
     );
+}
+
+#[test]
+fn control_payload_decoder_is_strict_and_preserves_typed_cursor_fields() {
+    let frames = [
+        SseFrame::stream_ready(run_id(), SchemaU64::new(1), SchemaU64::new(2)).unwrap(),
+        SseFrame::heartbeat(run_id(), SchemaU64::new(2)).unwrap(),
+        SseFrame::delivery_gap(
+            run_id(),
+            "subscriber_buffer_overflow",
+            SchemaU64::new(1),
+            SchemaU64::new(2),
+        )
+        .unwrap(),
+        SseFrame::resync_required(
+            run_id(),
+            "cursor_unavailable",
+            SchemaU64::new(2),
+            Some(SchemaU64::new(1)),
+        )
+        .unwrap(),
+        SseFrame::stream_closed(run_id(), PRODUCTION_FINISHED_REASON, SchemaU64::new(2)).unwrap(),
+    ];
+
+    for frame in frames {
+        assert_eq!(
+            SseFrameKind::from_event_name(frame.event_name()),
+            Some(frame.kind())
+        );
+        let text = std::str::from_utf8(frame.bytes()).unwrap();
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("control data line");
+        let decoded = decode_control_payload(frame.kind(), data.as_bytes()).unwrap();
+        assert_eq!(decoded.kind(), frame.kind());
+        assert_eq!(decoded.run_id(), run_id());
+        match decoded {
+            DecodedSseControl::StreamReady(control) => {
+                assert_eq!(control.resume_after(), SchemaU64::new(1));
+                assert_eq!(control.replay_through(), SchemaU64::new(2));
+            }
+            DecodedSseControl::Heartbeat(control) => {
+                assert_eq!(control.committed_watermark(), SchemaU64::new(2));
+            }
+            DecodedSseControl::DeliveryGap(control) => {
+                assert_eq!(control.reason(), "subscriber_buffer_overflow");
+                assert_eq!(control.last_delivered_sequence(), SchemaU64::new(1));
+                assert_eq!(control.committed_watermark(), SchemaU64::new(2));
+            }
+            DecodedSseControl::ResyncRequired(control) => {
+                assert_eq!(control.reason(), "cursor_unavailable");
+                assert_eq!(control.committed_watermark(), SchemaU64::new(2));
+                assert_eq!(
+                    control.earliest_available_sequence(),
+                    Some(SchemaU64::new(1))
+                );
+            }
+            DecodedSseControl::StreamClosed(control) => {
+                assert_eq!(control.reason(), PRODUCTION_FINISHED_REASON);
+                assert_eq!(control.committed_watermark(), SchemaU64::new(2));
+            }
+        }
+    }
+
+    assert_eq!(SseFrameKind::from_event_name("unknown"), None);
+    for invalid in [
+        br#"{"control_schema_version":2,"run_id":"12345678-1234-4234-9234-123456789abc","resume_after":"1","replay_through":"2"}"#.as_slice(),
+        br#"{"control_schema_version":1,"run_id":"12345678-1234-4234-9234-123456789abc","resume_after":"2","replay_through":"1"}"#.as_slice(),
+        br#"{"control_schema_version":1,"run_id":"12345678-1234-4234-9234-123456789abc","resume_after":"1","replay_through":"2","unknown":true}"#.as_slice(),
+    ] {
+        assert!(decode_control_payload(SseFrameKind::StreamReady, invalid).is_err());
+    }
+    assert!(decode_control_payload(SseFrameKind::DiagnosticEvent, br#"{}"#).is_err());
 }
 
 #[test]

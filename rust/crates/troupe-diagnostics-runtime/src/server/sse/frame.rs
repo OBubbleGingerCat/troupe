@@ -6,7 +6,7 @@ use hyper::{
     body::{Body, Frame},
     header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName, HeaderValue},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use troupe_diagnostics_core::{event::DiagnosticEvent, id::CanonicalUuid, scalar::SchemaU64};
 
 use crate::{
@@ -92,6 +92,18 @@ pub enum SseFrameKind {
 }
 
 impl SseFrameKind {
+    pub fn from_event_name(event_name: &str) -> Option<Self> {
+        match event_name {
+            "diagnostic_event" => Some(Self::DiagnosticEvent),
+            "stream_ready" => Some(Self::StreamReady),
+            "heartbeat" => Some(Self::Heartbeat),
+            "delivery_gap" => Some(Self::DeliveryGap),
+            "resync_required" => Some(Self::ResyncRequired),
+            "stream_closed" => Some(Self::StreamClosed),
+            _ => None,
+        }
+    }
+
     pub const fn event_name(self) -> &'static str {
         match self {
             Self::DiagnosticEvent => "diagnostic_event",
@@ -141,7 +153,7 @@ impl SseFrame {
         }
         control_frame(
             SseFrameKind::StreamReady,
-            &StreamReadyPayload {
+            &StreamReadyControl {
                 control_schema_version: CONTROL_SCHEMA_VERSION,
                 run_id,
                 resume_after,
@@ -156,7 +168,7 @@ impl SseFrame {
     ) -> Result<Self, FrameError> {
         control_frame(
             SseFrameKind::Heartbeat,
-            &HeartbeatPayload {
+            &HeartbeatControl {
                 control_schema_version: CONTROL_SCHEMA_VERSION,
                 run_id,
                 committed_watermark,
@@ -178,10 +190,10 @@ impl SseFrame {
         }
         control_frame(
             SseFrameKind::DeliveryGap,
-            &DeliveryGapPayload {
+            &DeliveryGapControl {
                 control_schema_version: CONTROL_SCHEMA_VERSION,
                 run_id,
-                reason,
+                reason: reason.to_owned(),
                 last_delivered_sequence,
                 committed_watermark,
             },
@@ -204,10 +216,10 @@ impl SseFrame {
         }
         control_frame(
             SseFrameKind::ResyncRequired,
-            &ResyncRequiredPayload {
+            &ResyncRequiredControl {
                 control_schema_version: CONTROL_SCHEMA_VERSION,
                 run_id,
-                reason,
+                reason: reason.to_owned(),
                 committed_watermark,
                 earliest_available_sequence,
             },
@@ -222,10 +234,10 @@ impl SseFrame {
         validate_reason(reason)?;
         control_frame(
             SseFrameKind::StreamClosed,
-            &StreamClosedPayload {
+            &StreamClosedControl {
                 control_schema_version: CONTROL_SCHEMA_VERSION,
                 run_id,
-                reason,
+                reason: reason.to_owned(),
                 committed_watermark,
             },
         )
@@ -268,6 +280,7 @@ impl SseFrame {
 pub enum FrameError {
     NonCanonicalEvent,
     InvalidControl(&'static str),
+    Deserialization(serde_json::Error),
     Serialization(serde_json::Error),
 }
 
@@ -278,6 +291,9 @@ impl fmt::Display for FrameError {
                 formatter.write_str("diagnostic event bytes are not canonical JSON")
             }
             Self::InvalidControl(message) => formatter.write_str(message),
+            Self::Deserialization(error) => {
+                write!(formatter, "could not decode SSE control payload: {error}")
+            }
             Self::Serialization(error) => {
                 write!(formatter, "could not encode SSE payload: {error}")
             }
@@ -288,7 +304,7 @@ impl fmt::Display for FrameError {
 impl std::error::Error for FrameError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Serialization(error) => Some(error),
+            Self::Deserialization(error) | Self::Serialization(error) => Some(error),
             Self::NonCanonicalEvent | Self::InvalidControl(_) => None,
         }
     }
@@ -319,45 +335,249 @@ where
         .with_cache_policy(CachePolicy::NoCacheNoTransform)
 }
 
-#[derive(Serialize)]
-struct StreamReadyPayload {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamReadyControl {
     control_schema_version: u8,
     run_id: CanonicalUuid,
     resume_after: SchemaU64,
     replay_through: SchemaU64,
 }
 
-#[derive(Serialize)]
-struct HeartbeatPayload {
+impl StreamReadyControl {
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub const fn resume_after(&self) -> SchemaU64 {
+        self.resume_after
+    }
+
+    pub const fn replay_through(&self) -> SchemaU64 {
+        self.replay_through
+    }
+
+    fn validate(&self) -> Result<(), FrameError> {
+        validate_control_schema(self.control_schema_version)?;
+        if self.resume_after.get() > self.replay_through.get() {
+            return Err(FrameError::InvalidControl(
+                "resume cursor is ahead of replay watermark",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeartbeatControl {
     control_schema_version: u8,
     run_id: CanonicalUuid,
     committed_watermark: SchemaU64,
 }
 
-#[derive(Serialize)]
-struct DeliveryGapPayload<'reason> {
+impl HeartbeatControl {
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub const fn committed_watermark(&self) -> SchemaU64 {
+        self.committed_watermark
+    }
+
+    fn validate(&self) -> Result<(), FrameError> {
+        validate_control_schema(self.control_schema_version)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryGapControl {
     control_schema_version: u8,
     run_id: CanonicalUuid,
-    reason: &'reason str,
+    reason: String,
     last_delivered_sequence: SchemaU64,
     committed_watermark: SchemaU64,
 }
 
-#[derive(Serialize)]
-struct ResyncRequiredPayload<'reason> {
+impl DeliveryGapControl {
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub const fn last_delivered_sequence(&self) -> SchemaU64 {
+        self.last_delivered_sequence
+    }
+
+    pub const fn committed_watermark(&self) -> SchemaU64 {
+        self.committed_watermark
+    }
+
+    fn validate(&self) -> Result<(), FrameError> {
+        validate_control_schema(self.control_schema_version)?;
+        validate_reason(&self.reason)?;
+        if self.last_delivered_sequence.get() > self.committed_watermark.get() {
+            return Err(FrameError::InvalidControl(
+                "last delivered sequence exceeds committed watermark",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResyncRequiredControl {
     control_schema_version: u8,
     run_id: CanonicalUuid,
-    reason: &'reason str,
+    reason: String,
     committed_watermark: SchemaU64,
     earliest_available_sequence: Option<SchemaU64>,
 }
 
-#[derive(Serialize)]
-struct StreamClosedPayload<'reason> {
+impl ResyncRequiredControl {
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub const fn committed_watermark(&self) -> SchemaU64 {
+        self.committed_watermark
+    }
+
+    pub const fn earliest_available_sequence(&self) -> Option<SchemaU64> {
+        self.earliest_available_sequence
+    }
+
+    fn validate(&self) -> Result<(), FrameError> {
+        validate_control_schema(self.control_schema_version)?;
+        validate_reason(&self.reason)?;
+        if self.earliest_available_sequence.is_some_and(|earliest| {
+            earliest.get() == 0 || earliest.get() > self.committed_watermark.get()
+        }) {
+            return Err(FrameError::InvalidControl(
+                "earliest available sequence is outside retained history",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamClosedControl {
     control_schema_version: u8,
     run_id: CanonicalUuid,
-    reason: &'reason str,
+    reason: String,
     committed_watermark: SchemaU64,
+}
+
+impl StreamClosedControl {
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub const fn committed_watermark(&self) -> SchemaU64 {
+        self.committed_watermark
+    }
+
+    fn validate(&self) -> Result<(), FrameError> {
+        validate_control_schema(self.control_schema_version)?;
+        validate_reason(&self.reason)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DecodedSseControl {
+    StreamReady(StreamReadyControl),
+    Heartbeat(HeartbeatControl),
+    DeliveryGap(DeliveryGapControl),
+    ResyncRequired(ResyncRequiredControl),
+    StreamClosed(StreamClosedControl),
+}
+
+impl DecodedSseControl {
+    pub const fn kind(&self) -> SseFrameKind {
+        match self {
+            Self::StreamReady(_) => SseFrameKind::StreamReady,
+            Self::Heartbeat(_) => SseFrameKind::Heartbeat,
+            Self::DeliveryGap(_) => SseFrameKind::DeliveryGap,
+            Self::ResyncRequired(_) => SseFrameKind::ResyncRequired,
+            Self::StreamClosed(_) => SseFrameKind::StreamClosed,
+        }
+    }
+
+    pub const fn run_id(&self) -> CanonicalUuid {
+        match self {
+            Self::StreamReady(control) => control.run_id(),
+            Self::Heartbeat(control) => control.run_id(),
+            Self::DeliveryGap(control) => control.run_id(),
+            Self::ResyncRequired(control) => control.run_id(),
+            Self::StreamClosed(control) => control.run_id(),
+        }
+    }
+}
+
+pub fn decode_control_payload(
+    kind: SseFrameKind,
+    data: &[u8],
+) -> Result<DecodedSseControl, FrameError> {
+    match kind {
+        SseFrameKind::DiagnosticEvent => Err(FrameError::InvalidControl(
+            "diagnostic event is not an SSE control",
+        )),
+        SseFrameKind::StreamReady => {
+            let control: StreamReadyControl =
+                serde_json::from_slice(data).map_err(FrameError::Deserialization)?;
+            control.validate()?;
+            Ok(DecodedSseControl::StreamReady(control))
+        }
+        SseFrameKind::Heartbeat => {
+            let control: HeartbeatControl =
+                serde_json::from_slice(data).map_err(FrameError::Deserialization)?;
+            control.validate()?;
+            Ok(DecodedSseControl::Heartbeat(control))
+        }
+        SseFrameKind::DeliveryGap => {
+            let control: DeliveryGapControl =
+                serde_json::from_slice(data).map_err(FrameError::Deserialization)?;
+            control.validate()?;
+            Ok(DecodedSseControl::DeliveryGap(control))
+        }
+        SseFrameKind::ResyncRequired => {
+            let control: ResyncRequiredControl =
+                serde_json::from_slice(data).map_err(FrameError::Deserialization)?;
+            control.validate()?;
+            Ok(DecodedSseControl::ResyncRequired(control))
+        }
+        SseFrameKind::StreamClosed => {
+            let control: StreamClosedControl =
+                serde_json::from_slice(data).map_err(FrameError::Deserialization)?;
+            control.validate()?;
+            Ok(DecodedSseControl::StreamClosed(control))
+        }
+    }
+}
+
+fn validate_control_schema(version: u8) -> Result<(), FrameError> {
+    if version == CONTROL_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(FrameError::InvalidControl(
+            "SSE control schema version is incompatible",
+        ))
+    }
 }
 
 fn validate_reason(reason: &str) -> Result<(), FrameError> {
