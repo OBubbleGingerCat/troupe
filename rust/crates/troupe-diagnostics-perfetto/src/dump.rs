@@ -1,11 +1,17 @@
 use std::{fmt, future::poll_fn, io, pin::Pin};
 
 use tokio::io::AsyncWrite;
+use troupe_diagnostics_core::event::DiagnosticEvent;
 use troupe_diagnostics_core::scalar::SchemaU64;
-use troupe_diagnostics_runtime::query::reader::{CapturedEventSource, ReaderFailure};
+use troupe_diagnostics_runtime::query::reader::{
+    CapturedEventPage, CapturedEventSource, ReaderFailure,
+};
 
 use crate::{
-    collect::{ProjectionCollector, ProjectionError, ProjectionLimits, ProjectionMetadata},
+    collect::{
+        ProjectionCollector, ProjectionError, ProjectionLimits, ProjectionMetadata,
+        StructuralIndexLimits,
+    },
     schema::{TracePacket, encode_trace_packet_fragment},
 };
 
@@ -14,7 +20,11 @@ pub enum DumpError {
     Source(ReaderFailure),
     Projection(ProjectionError),
     Writer(io::Error),
-    ResourceOverflow { metric: &'static str },
+    ResourceOverflow {
+        metric: &'static str,
+    },
+    #[cfg(test)]
+    TestFault(&'static str),
 }
 
 impl DumpError {
@@ -49,6 +59,8 @@ impl fmt::Display for DumpError {
             Self::ResourceOverflow { metric } => {
                 write!(formatter, "Perfetto dump metric overflow: {metric}")
             }
+            #[cfg(test)]
+            Self::TestFault(detail) => write!(formatter, "injected Perfetto dump fault: {detail}"),
         }
     }
 }
@@ -60,6 +72,8 @@ impl std::error::Error for DumpError {
             Self::Projection(error) => Some(error),
             Self::Writer(error) => Some(error),
             Self::ResourceOverflow { .. } => None,
+            #[cfg(test)]
+            Self::TestFault(_) => None,
         }
     }
 }
@@ -87,6 +101,8 @@ pub struct DumpSummary {
     source_page_reads: u64,
     peak_page_events: usize,
     peak_packet_bytes: usize,
+    structural_index_entries: u64,
+    structural_index_owned_payload_bytes: u64,
 }
 
 impl DumpSummary {
@@ -129,6 +145,14 @@ impl DumpSummary {
     pub const fn peak_packet_bytes(self) -> usize {
         self.peak_packet_bytes
     }
+
+    pub const fn structural_index_entries(self) -> u64 {
+        self.structural_index_entries
+    }
+
+    pub const fn structural_index_owned_payload_bytes(self) -> u64 {
+        self.structural_index_owned_payload_bytes
+    }
 }
 
 #[derive(Default)]
@@ -152,6 +176,77 @@ impl DumpMetrics {
         self.packet_count = checked_increment(self.packet_count, "packet_count")?;
         self.peak_packet_bytes = self.peak_packet_bytes.max(encoded_bytes);
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScanPass {
+    Preflight,
+    Emit,
+}
+
+trait PrefixPage {
+    fn len(&self) -> usize;
+    fn sequence(&self, index: usize) -> SchemaU64;
+    fn event(&self, index: usize) -> &DiagnosticEvent;
+}
+
+impl PrefixPage for CapturedEventPage {
+    fn len(&self) -> usize {
+        self.events().len()
+    }
+
+    fn sequence(&self, index: usize) -> SchemaU64 {
+        self.events()[index].sequence()
+    }
+
+    fn event(&self, index: usize) -> &DiagnosticEvent {
+        self.events()[index].event()
+    }
+}
+
+trait PrefixSource {
+    type Page: PrefixPage;
+
+    fn read_event_page(&self, after: SchemaU64, pass: ScanPass) -> Result<Self::Page, DumpError>;
+}
+
+struct RuntimeCapturedSource<'source, 'connection>(&'source CapturedEventSource<'connection>);
+
+impl PrefixSource for RuntimeCapturedSource<'_, '_> {
+    type Page = CapturedEventPage;
+
+    fn read_event_page(&self, after: SchemaU64, _pass: ScanPass) -> Result<Self::Page, DumpError> {
+        self.0.read_event_page(after).map_err(DumpError::Source)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PacketPhase {
+    Descriptor,
+    Event,
+}
+
+trait PacketEncoder {
+    fn encode(
+        &mut self,
+        phase: PacketPhase,
+        packet: &TracePacket,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), ProjectionError>;
+}
+
+struct ProstPacketEncoder;
+
+impl PacketEncoder for ProstPacketEncoder {
+    fn encode(
+        &mut self,
+        _phase: PacketPhase,
+        packet: &TracePacket,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), ProjectionError> {
+        encode_trace_packet_fragment(packet, buffer)
+            .map_err(|error| ProjectionError::ProtobufEncode(error.to_string()))
     }
 }
 
@@ -180,35 +275,88 @@ where
             .then_some(store_metadata.clean_shutdown()),
     );
 
+    let source = RuntimeCapturedSource(source);
+    let mut encoder = ProstPacketEncoder;
+    dump_captured_prefix_core(
+        &source,
+        writer,
+        captured_watermark,
+        exported_through,
+        projection_metadata,
+        StructuralIndexLimits::FIXED,
+        &mut encoder,
+    )
+    .await
+}
+
+async fn dump_captured_prefix_core<S, W, E>(
+    source: &S,
+    writer: &mut W,
+    captured_watermark: SchemaU64,
+    exported_through: SchemaU64,
+    projection_metadata: ProjectionMetadata,
+    structural_limits: StructuralIndexLimits,
+    encoder: &mut E,
+) -> Result<DumpSummary, DumpError>
+where
+    S: PrefixSource,
+    W: AsyncWrite + Unpin + ?Sized,
+    E: PacketEncoder,
+{
     // The collection pass fixes every export-local identity before any bytes are
     // emitted. The captured SQLite transaction makes both paged scans identical.
-    let mut collector = ProjectionCollector::new(projection_metadata, ProjectionLimits::default())?;
+    let mut collector = ProjectionCollector::new_with_structural_limits(
+        projection_metadata,
+        ProjectionLimits::default(),
+        structural_limits,
+    )?;
     let mut metrics = DumpMetrics::default();
-    scan_prefix(source, exported_through, &mut metrics, |event| {
-        collector.observe(event)
-    })?;
+    scan_prefix(
+        source,
+        exported_through,
+        ScanPass::Preflight,
+        &mut metrics,
+        |event| collector.observe(event),
+    )?;
     let plan = collector.finish()?;
+    let structural_index_usage = plan.structural_index_usage();
 
     let mut packet_buffer = Vec::new();
     for packet in plan.descriptor_packets() {
-        write_packet(writer, &packet, &mut packet_buffer, &mut metrics).await?;
+        write_packet(
+            writer,
+            &packet,
+            PacketPhase::Descriptor,
+            encoder,
+            &mut packet_buffer,
+            &mut metrics,
+        )
+        .await?;
         metrics.descriptor_count = checked_increment(metrics.descriptor_count, "descriptor_count")?;
     }
 
     let mut projector = plan.packet_projector();
     let mut after = SchemaU64::new(0);
     while after.get() < exported_through.get() {
-        let page = source.read_event_page(after)?;
-        metrics.observe_page(page.events().len())?;
+        let page = source.read_event_page(after, ScanPass::Emit)?;
+        metrics.observe_page(page.len())?;
         let mut reached_through = false;
-        for captured in page.events() {
-            let sequence = captured.sequence();
+        for index in 0..page.len() {
+            let sequence = page.sequence(index);
             if sequence.get() > exported_through.get() {
                 reached_through = true;
                 break;
             }
-            for packet in projector.project_event(captured.event())? {
-                write_packet(writer, &packet, &mut packet_buffer, &mut metrics).await?;
+            for packet in projector.project_event(page.event(index))? {
+                write_packet(
+                    writer,
+                    &packet,
+                    PacketPhase::Event,
+                    encoder,
+                    &mut packet_buffer,
+                    &mut metrics,
+                )
+                .await?;
             }
             after = sequence;
             if sequence == exported_through {
@@ -216,7 +364,7 @@ where
                 break;
             }
         }
-        if reached_through || page.events().is_empty() {
+        if reached_through || page.len() == 0 {
             break;
         }
     }
@@ -232,54 +380,60 @@ where
         source_page_reads: metrics.source_page_reads,
         peak_page_events: metrics.peak_page_events,
         peak_packet_bytes: metrics.peak_packet_bytes,
+        structural_index_entries: structural_index_usage.entries(),
+        structural_index_owned_payload_bytes: structural_index_usage.owned_payload_bytes(),
     })
 }
 
-fn scan_prefix(
-    source: &CapturedEventSource<'_>,
+fn scan_prefix<S>(
+    source: &S,
     through: SchemaU64,
+    pass: ScanPass,
     metrics: &mut DumpMetrics,
-    mut observe: impl FnMut(
-        &troupe_diagnostics_core::event::DiagnosticEvent,
-    ) -> Result<(), ProjectionError>,
-) -> Result<(), DumpError> {
+    mut observe: impl FnMut(&DiagnosticEvent) -> Result<(), ProjectionError>,
+) -> Result<(), DumpError>
+where
+    S: PrefixSource,
+{
     let mut after = SchemaU64::new(0);
     while after.get() < through.get() {
-        let page = source.read_event_page(after)?;
-        metrics.observe_page(page.events().len())?;
+        let page = source.read_event_page(after, pass)?;
+        metrics.observe_page(page.len())?;
         let mut reached_through = false;
-        for captured in page.events() {
-            let sequence = captured.sequence();
+        for index in 0..page.len() {
+            let sequence = page.sequence(index);
             if sequence.get() > through.get() {
                 reached_through = true;
                 break;
             }
-            observe(captured.event())?;
+            observe(page.event(index))?;
             after = sequence;
             if sequence == through {
                 reached_through = true;
                 break;
             }
         }
-        if reached_through || page.events().is_empty() {
+        if reached_through || page.len() == 0 {
             break;
         }
     }
     Ok(())
 }
 
-async fn write_packet<W>(
+async fn write_packet<W, E>(
     writer: &mut W,
     packet: &TracePacket,
+    phase: PacketPhase,
+    encoder: &mut E,
     buffer: &mut Vec<u8>,
     metrics: &mut DumpMetrics,
 ) -> Result<(), DumpError>
 where
     W: AsyncWrite + Unpin + ?Sized,
+    E: PacketEncoder,
 {
     buffer.clear();
-    encode_trace_packet_fragment(packet, buffer)
-        .map_err(|error| ProjectionError::ProtobufEncode(error.to_string()))?;
+    encoder.encode(phase, packet, buffer)?;
     metrics.observe_packet(buffer.len())?;
     write_all_without_error_retry(writer, buffer, &mut metrics.bytes_written).await
 }
@@ -326,4 +480,341 @@ fn checked_increment(value: u64, metric: &'static str) -> Result<u64, DumpError>
     value
         .checked_add(1)
         .ok_or(DumpError::ResourceOverflow { metric })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::Cell,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use futures::executor::block_on;
+    use troupe_diagnostics_core::{
+        event::{CausalLink, CounterSampled, DiagnosticEventHeader, DiagnosticScope},
+        id::CanonicalUuid,
+        kinds::{CausalRelation, CounterKind},
+        time::ElapsedNs,
+    };
+
+    use super::*;
+    use crate::collect::{
+        STRUCTURAL_INDEX_ENTRY_LIMIT, STRUCTURAL_INDEX_OWNED_PAYLOAD_LIMIT,
+        StructuralIndexDimension,
+    };
+
+    const RUN_ID: &str = "12345678-1234-4234-9234-123456789abc";
+
+    struct FakePage(Vec<DiagnosticEvent>);
+
+    impl PrefixPage for FakePage {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn sequence(&self, index: usize) -> SchemaU64 {
+            self.0[index].header().sequence()
+        }
+
+        fn event(&self, index: usize) -> &DiagnosticEvent {
+            &self.0[index]
+        }
+    }
+
+    struct FakeSource {
+        events: Vec<DiagnosticEvent>,
+        page_size: usize,
+        emit_reads: Cell<u64>,
+        fail_emit_read: Option<u64>,
+    }
+
+    impl FakeSource {
+        fn new(events: Vec<DiagnosticEvent>) -> Self {
+            Self {
+                events,
+                page_size: 2,
+                emit_reads: Cell::new(0),
+                fail_emit_read: None,
+            }
+        }
+
+        fn failing_emit_read(mut self, read: u64) -> Self {
+            self.fail_emit_read = Some(read);
+            self
+        }
+    }
+
+    impl PrefixSource for FakeSource {
+        type Page = FakePage;
+
+        fn read_event_page(
+            &self,
+            after: SchemaU64,
+            pass: ScanPass,
+        ) -> Result<Self::Page, DumpError> {
+            if pass == ScanPass::Emit {
+                let read = self.emit_reads.get() + 1;
+                self.emit_reads.set(read);
+                if self.fail_emit_read == Some(read) {
+                    return Err(DumpError::TestFault("second-pass source"));
+                }
+            }
+            let start = usize::try_from(after.get())
+                .map_err(|_| DumpError::TestFault("fake source cursor"))?;
+            let end = start.saturating_add(self.page_size).min(self.events.len());
+            Ok(FakePage(self.events[start..end].to_vec()))
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingWriter {
+        polls: u64,
+        bytes: Vec<u8>,
+    }
+
+    impl AsyncWrite for CountingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.polls += 1;
+            self.bytes.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct FailOnFirstEventEncoder {
+        inner: ProstPacketEncoder,
+        event_attempts: u64,
+    }
+
+    impl PacketEncoder for FailOnFirstEventEncoder {
+        fn encode(
+            &mut self,
+            phase: PacketPhase,
+            packet: &TracePacket,
+            buffer: &mut Vec<u8>,
+        ) -> Result<(), ProjectionError> {
+            if phase == PacketPhase::Event {
+                self.event_attempts += 1;
+                return Err(ProjectionError::ProtobufEncode(
+                    "injected second-pass encode failure".to_owned(),
+                ));
+            }
+            self.inner.encode(phase, packet, buffer)
+        }
+    }
+
+    fn run_id() -> CanonicalUuid {
+        CanonicalUuid::parse(RUN_ID).expect("canonical test Run UUID")
+    }
+
+    fn metadata(watermark: u64) -> ProjectionMetadata {
+        ProjectionMetadata::new(
+            run_id(),
+            SchemaU64::new(watermark),
+            SchemaU64::new(watermark),
+            env!("CARGO_PKG_VERSION"),
+        )
+    }
+
+    fn counter(sequence: u64) -> DiagnosticEvent {
+        counter_with_causes(sequence, Vec::new())
+    }
+
+    fn counter_with_causes(sequence: u64, caused_by: Vec<CausalLink>) -> DiagnosticEvent {
+        let header = DiagnosticEventHeader::new(
+            run_id(),
+            SchemaU64::new(sequence),
+            ElapsedNs::new(sequence),
+            DiagnosticScope::new(None, None, None, None, None, None, None),
+            caused_by,
+        )
+        .expect("valid diagnostic event header");
+        DiagnosticEvent::CounterSampled(CounterSampled::new(
+            header,
+            CounterKind::DiagnosticDroppedEvents,
+            SchemaU64::new(sequence),
+        ))
+    }
+
+    #[test]
+    fn deterministic_reference_failure_precedes_the_first_writer_poll() {
+        let source = FakeSource::new(vec![counter_with_causes(
+            1,
+            vec![CausalLink::new(
+                SchemaU64::new(2),
+                CausalRelation::FollowsFrom,
+            )],
+        )]);
+        let mut writer = CountingWriter::default();
+        let mut encoder = ProstPacketEncoder;
+        let error = block_on(dump_captured_prefix_core(
+            &source,
+            &mut writer,
+            SchemaU64::new(1),
+            SchemaU64::new(1),
+            metadata(1),
+            StructuralIndexLimits::new(128, 64 * 1024),
+            &mut encoder,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error.projection_error(),
+            Some(ProjectionError::InvalidReference {
+                code: "forward_link",
+                sequence: 1,
+                referenced_sequence: Some(2),
+            })
+        ));
+        assert_eq!(writer.polls, 0);
+    }
+
+    #[test]
+    fn fixed_structural_limits_accept_equal_and_reject_the_next_reservation_before_writer_poll() {
+        assert_eq!(STRUCTURAL_INDEX_ENTRY_LIMIT, 1_000_000);
+        assert_eq!(STRUCTURAL_INDEX_OWNED_PAYLOAD_LIMIT, 64 * 1024 * 1024);
+
+        let source = FakeSource::new(Vec::new());
+        let mut baseline_writer = CountingWriter::default();
+        let mut baseline_encoder = ProstPacketEncoder;
+        let baseline = block_on(dump_captured_prefix_core(
+            &source,
+            &mut baseline_writer,
+            SchemaU64::new(0),
+            SchemaU64::new(0),
+            metadata(0),
+            StructuralIndexLimits::new(128, 64 * 1024),
+            &mut baseline_encoder,
+        ))
+        .expect("measure descriptor-only structural index");
+        assert_eq!(baseline.structural_index_entries(), 6);
+        assert!(baseline.structural_index_owned_payload_bytes() > 0);
+
+        let exact_limits = StructuralIndexLimits::new(
+            baseline.structural_index_entries(),
+            baseline.structural_index_owned_payload_bytes(),
+        );
+        let mut exact_writer = CountingWriter::default();
+        let mut exact_encoder = ProstPacketEncoder;
+        block_on(dump_captured_prefix_core(
+            &source,
+            &mut exact_writer,
+            SchemaU64::new(0),
+            SchemaU64::new(0),
+            metadata(0),
+            exact_limits,
+            &mut exact_encoder,
+        ))
+        .expect("equal structural limits are accepted");
+        assert!(exact_writer.polls > 0);
+
+        let entry_limit = baseline.structural_index_entries() - 1;
+        let mut entry_writer = CountingWriter::default();
+        let mut entry_encoder = ProstPacketEncoder;
+        let error = block_on(dump_captured_prefix_core(
+            &source,
+            &mut entry_writer,
+            SchemaU64::new(0),
+            SchemaU64::new(0),
+            metadata(0),
+            StructuralIndexLimits::new(entry_limit, u64::MAX),
+            &mut entry_encoder,
+        ))
+        .unwrap_err();
+        let Some(ProjectionError::StructuralIndexLimitExceeded {
+            dimension,
+            limit,
+            required,
+        }) = error.projection_error()
+        else {
+            panic!("unexpected entry-limit error: {error}");
+        };
+        assert_eq!(*dimension, StructuralIndexDimension::Entries);
+        assert_eq!(*limit, entry_limit);
+        assert!(*required > *limit);
+        assert_eq!(entry_writer.polls, 0);
+
+        let payload_limit = baseline.structural_index_owned_payload_bytes() - 1;
+        let mut payload_writer = CountingWriter::default();
+        let mut payload_encoder = ProstPacketEncoder;
+        let error = block_on(dump_captured_prefix_core(
+            &source,
+            &mut payload_writer,
+            SchemaU64::new(0),
+            SchemaU64::new(0),
+            metadata(0),
+            StructuralIndexLimits::new(u64::MAX, payload_limit),
+            &mut payload_encoder,
+        ))
+        .unwrap_err();
+        let Some(ProjectionError::StructuralIndexLimitExceeded {
+            dimension,
+            limit,
+            required,
+        }) = error.projection_error()
+        else {
+            panic!("unexpected payload-limit error: {error}");
+        };
+        assert_eq!(*dimension, StructuralIndexDimension::OwnedPayloadBytes);
+        assert_eq!(*limit, payload_limit);
+        assert!(*required > *limit);
+        assert_eq!(payload_writer.polls, 0);
+    }
+
+    #[test]
+    fn second_pass_source_and_encode_faults_preserve_partial_streams() {
+        let source = FakeSource::new(vec![counter(1)]).failing_emit_read(1);
+        let mut source_writer = CountingWriter::default();
+        let mut source_encoder = ProstPacketEncoder;
+        let error = block_on(dump_captured_prefix_core(
+            &source,
+            &mut source_writer,
+            SchemaU64::new(1),
+            SchemaU64::new(1),
+            metadata(1),
+            StructuralIndexLimits::new(128, 64 * 1024),
+            &mut source_encoder,
+        ))
+        .unwrap_err();
+        assert!(matches!(error, DumpError::TestFault("second-pass source")));
+        assert_eq!(source.emit_reads.get(), 1);
+        assert!(source_writer.polls > 0);
+        assert!(!source_writer.bytes.is_empty());
+
+        let source = FakeSource::new(vec![counter(1)]);
+        let mut encode_writer = CountingWriter::default();
+        let mut encode_encoder = FailOnFirstEventEncoder {
+            inner: ProstPacketEncoder,
+            event_attempts: 0,
+        };
+        let error = block_on(dump_captured_prefix_core(
+            &source,
+            &mut encode_writer,
+            SchemaU64::new(1),
+            SchemaU64::new(1),
+            metadata(1),
+            StructuralIndexLimits::new(128, 64 * 1024),
+            &mut encode_encoder,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error.projection_error(),
+            Some(ProjectionError::ProtobufEncode(detail))
+                if detail == "injected second-pass encode failure"
+        ));
+        assert_eq!(encode_encoder.event_attempts, 1);
+        assert!(encode_writer.polls > 0);
+        assert!(!encode_writer.bytes.is_empty());
+    }
 }

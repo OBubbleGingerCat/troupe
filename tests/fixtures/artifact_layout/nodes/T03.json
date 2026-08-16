@@ -1,7 +1,23 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-perfetto/tests/dump.rs",
+    "tests/fixtures/perfetto/traces/active-watermark.pftrace",
+    "tests/fixtures/perfetto/traces/archive-watermark.pftrace",
+    "tests/fixtures/perfetto/traces/empty.pftrace",
+    "tests/fixtures/perfetto/traces/manifest.json",
+    "tests/fixtures/perfetto/traces/multi-cue.pftrace",
+    "tests/fixtures/perfetto/traces/nested.pftrace",
+    "tests/fixtures/perfetto/traces/numeric-boundary.pftrace",
+    "tests/fixtures/perfetto/traces/open.pftrace",
+    "tests/fixtures/perfetto/traces/overlap.pftrace",
+    "tests/fixtures/perfetto/traces/repeated-dump.pftrace"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-perfetto/src/collect.rs",
+    "rust/crates/troupe-diagnostics-perfetto/src/dump.rs",
+    "rust/crates/troupe-diagnostics-perfetto/src/tracks.rs"
+  ],
   "removed": [],
   "generated": []
 }

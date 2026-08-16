@@ -14,14 +14,184 @@ use troupe_diagnostics_core::{
 use crate::{
     identity::{DenseIdentityMap, IdentitySpace, component},
     tracks::{
-        ROOT_TRACK_IDENTITY, SpanInterval, TrackCatalog, TrackCatalogBuilder,
-        allocate_span_lanes, scope_track_identity,
+        ROOT_TRACK_IDENTITY, SpanInterval, TrackCatalog, TrackCatalogBuilder, allocate_span_lanes,
+        scope_track_identity,
     },
 };
 
 pub const PERFETTO_EXPORTER_SCHEMA_VERSION: u8 = 1;
 pub const TRACE_CONTENT_WARNING: &str =
     "trace may contain sensitive diagnostic metadata and user-provided attributes";
+pub const STRUCTURAL_INDEX_ENTRY_LIMIT: u64 = 1_000_000;
+pub const STRUCTURAL_INDEX_OWNED_PAYLOAD_LIMIT: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructuralIndexDimension {
+    Entries,
+    OwnedPayloadBytes,
+}
+
+impl StructuralIndexDimension {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Entries => "entries",
+            Self::OwnedPayloadBytes => "owned_payload_bytes",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StructuralIndexLimits {
+    entries: u64,
+    owned_payload_bytes: u64,
+}
+
+impl StructuralIndexLimits {
+    pub(crate) const FIXED: Self = Self {
+        entries: STRUCTURAL_INDEX_ENTRY_LIMIT,
+        owned_payload_bytes: STRUCTURAL_INDEX_OWNED_PAYLOAD_LIMIT,
+    };
+
+    #[cfg(test)]
+    pub(crate) const fn new(entries: u64, owned_payload_bytes: u64) -> Self {
+        Self {
+            entries,
+            owned_payload_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StructuralIndexUsage {
+    entries: u64,
+    owned_payload_bytes: u64,
+}
+
+impl StructuralIndexUsage {
+    pub(crate) const fn entries(self) -> u64 {
+        self.entries
+    }
+
+    pub(crate) const fn owned_payload_bytes(self) -> u64 {
+        self.owned_payload_bytes
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StructuralIndexBudget {
+    limits: StructuralIndexLimits,
+    usage: StructuralIndexUsage,
+}
+
+impl StructuralIndexBudget {
+    const fn new(limits: StructuralIndexLimits) -> Self {
+        Self {
+            limits,
+            usage: StructuralIndexUsage {
+                entries: 0,
+                owned_payload_bytes: 0,
+            },
+        }
+    }
+
+    pub(crate) fn reserve(
+        &mut self,
+        entries: u64,
+        owned_payload_bytes: u64,
+    ) -> Result<(), ProjectionError> {
+        let required_entries = match self.usage.entries.checked_add(entries) {
+            Some(required) => required,
+            None => {
+                return Err(self.limit_exceeded(
+                    StructuralIndexDimension::Entries,
+                    self.limits.entries,
+                    u64::MAX,
+                ));
+            }
+        };
+        if required_entries > self.limits.entries {
+            return Err(self.limit_exceeded(
+                StructuralIndexDimension::Entries,
+                self.limits.entries,
+                required_entries,
+            ));
+        }
+
+        let required_payload = match self
+            .usage
+            .owned_payload_bytes
+            .checked_add(owned_payload_bytes)
+        {
+            Some(required) => required,
+            None => {
+                return Err(self.limit_exceeded(
+                    StructuralIndexDimension::OwnedPayloadBytes,
+                    self.limits.owned_payload_bytes,
+                    u64::MAX,
+                ));
+            }
+        };
+        if required_payload > self.limits.owned_payload_bytes {
+            return Err(self.limit_exceeded(
+                StructuralIndexDimension::OwnedPayloadBytes,
+                self.limits.owned_payload_bytes,
+                required_payload,
+            ));
+        }
+
+        self.usage.entries = required_entries;
+        self.usage.owned_payload_bytes = required_payload;
+        Ok(())
+    }
+
+    pub(crate) fn reserve_owned<'value>(
+        &mut self,
+        entries: u64,
+        values: impl IntoIterator<Item = &'value str>,
+    ) -> Result<(), ProjectionError> {
+        let mut owned_payload_bytes = 0_u64;
+        for value in values {
+            let value_bytes = match u64::try_from(value.len()) {
+                Ok(value_bytes) => value_bytes,
+                Err(_) => {
+                    return Err(self.limit_exceeded(
+                        StructuralIndexDimension::OwnedPayloadBytes,
+                        self.limits.owned_payload_bytes,
+                        u64::MAX,
+                    ));
+                }
+            };
+            owned_payload_bytes = match owned_payload_bytes.checked_add(value_bytes) {
+                Some(required) => required,
+                None => {
+                    return Err(self.limit_exceeded(
+                        StructuralIndexDimension::OwnedPayloadBytes,
+                        self.limits.owned_payload_bytes,
+                        u64::MAX,
+                    ));
+                }
+            };
+        }
+        self.reserve(entries, owned_payload_bytes)
+    }
+
+    const fn limit_exceeded(
+        self,
+        dimension: StructuralIndexDimension,
+        limit: u64,
+        required: u64,
+    ) -> ProjectionError {
+        ProjectionError::StructuralIndexLimitExceeded {
+            dimension,
+            limit,
+            required,
+        }
+    }
+
+    const fn usage(self) -> StructuralIndexUsage {
+        self.usage
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionMetadata {
@@ -144,6 +314,11 @@ pub enum ProjectionError {
         required: u64,
         maximum: u64,
     },
+    StructuralIndexLimitExceeded {
+        dimension: StructuralIndexDimension,
+        limit: u64,
+        required: u64,
+    },
     UnknownIdentity(String),
     ConflictingTrack(String),
     MissingSpan(u64),
@@ -193,7 +368,10 @@ impl fmt::Display for ProjectionError {
                 sequence,
                 referenced_sequence,
             } => {
-                write!(formatter, "invalid diagnostic reference {code} at event {sequence}")?;
+                write!(
+                    formatter,
+                    "invalid diagnostic reference {code} at event {sequence}"
+                )?;
                 if let Some(reference) = referenced_sequence {
                     write!(formatter, " referencing {reference}")?;
                 }
@@ -227,8 +405,20 @@ impl fmt::Display for ProjectionError {
                 formatter,
                 "Perfetto {space} identity space exhausted: need {required}, maximum {maximum}"
             ),
+            Self::StructuralIndexLimitExceeded {
+                dimension,
+                limit,
+                required,
+            } => write!(
+                formatter,
+                "Perfetto structural index {} limit exceeded: limit {limit}, required {required}",
+                dimension.as_str()
+            ),
             Self::UnknownIdentity(identity) => {
-                write!(formatter, "unknown canonical projection identity {identity}")
+                write!(
+                    formatter,
+                    "unknown canonical projection identity {identity}"
+                )
             }
             Self::ConflictingTrack(identity) => {
                 write!(formatter, "conflicting canonical track identity {identity}")
@@ -350,6 +540,7 @@ impl UsageSummary {
 pub(crate) struct ProjectionCollector {
     metadata: ProjectionMetadata,
     limits: ProjectionLimits,
+    structural_budget: StructuralIndexBudget,
     validator: ReferenceValidator,
     next_sequence: u64,
     tracks: TrackCatalogBuilder,
@@ -363,6 +554,14 @@ impl ProjectionCollector {
         metadata: ProjectionMetadata,
         limits: ProjectionLimits,
     ) -> Result<Self, ProjectionError> {
+        Self::new_with_structural_limits(metadata, limits, StructuralIndexLimits::FIXED)
+    }
+
+    pub(crate) fn new_with_structural_limits(
+        metadata: ProjectionMetadata,
+        limits: ProjectionLimits,
+        structural_limits: StructuralIndexLimits,
+    ) -> Result<Self, ProjectionError> {
         if metadata.exported_through().get() > metadata.captured_watermark().get() {
             return Err(ProjectionError::WatermarkMismatch {
                 captured: metadata.captured_watermark().get(),
@@ -370,11 +569,14 @@ impl ProjectionCollector {
                 observed: 0,
             });
         }
-        let mut tracks = TrackCatalogBuilder::new(metadata.root_track_name());
-        tracks.register_metadata(metadata.metadata_track_name())?;
+        let mut structural_budget = StructuralIndexBudget::new(structural_limits);
+        let mut tracks =
+            TrackCatalogBuilder::new(metadata.root_track_name(), &mut structural_budget)?;
+        tracks.register_metadata(metadata.metadata_track_name(), &mut structural_budget)?;
         Ok(Self {
             metadata,
             limits,
+            structural_budget,
             validator: ReferenceValidator::new(),
             next_sequence: 1,
             tracks,
@@ -401,20 +603,45 @@ impl ProjectionCollector {
                 elapsed_ns: header.elapsed_ns().get(),
             });
         }
+
+        let validator_retains_span = matches!(
+            event,
+            DiagnosticEvent::SpanStarted(_) | DiagnosticEvent::CustomSpanStarted(_)
+        );
+        if validator_retains_span {
+            self.structural_budget.reserve_owned(
+                2,
+                [
+                    header.scope().scene_id(),
+                    header.scope().actor_id(),
+                    header.scope().cue_id(),
+                    header.scope().effect_id(),
+                    header.scope().act_id(),
+                    header.scope().tool_call_id(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|value| value.as_str()),
+            )?;
+        } else {
+            self.structural_budget.reserve(1, 0)?;
+        }
         self.validator
             .validate(event)
             .map_err(ProjectionError::invalid_reference)?;
 
-        let parent_track = self.tracks.register_scope(header.scope())?;
+        let parent_track = self
+            .tracks
+            .register_scope(header.scope(), &mut self.structural_budget)?;
         self.collect_event_tracks(event, &parent_track)?;
-        self.collect_flows(event);
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .ok_or(ProjectionError::SequenceMismatch {
-                expected: u64::MAX,
-                actual: u64::MAX,
-            })?;
+        self.collect_flows(event)?;
+        self.next_sequence =
+            self.next_sequence
+                .checked_add(1)
+                .ok_or(ProjectionError::SequenceMismatch {
+                    expected: u64::MAX,
+                    actual: u64::MAX,
+                })?;
         Ok(())
     }
 
@@ -425,30 +652,36 @@ impl ProjectionCollector {
     ) -> Result<(), ProjectionError> {
         match event {
             DiagnosticEvent::SpanStarted(start) => {
-                let role = start.span_kind().as_str().to_owned();
-                self.spans.insert(
+                let role = start.span_kind().as_str();
+                self.structural_budget
+                    .reserve_owned(1, [parent_track, role, role])?;
+                let previous = self.spans.insert(
                     start.header().sequence(),
                     CollectedSpan {
                         start_sequence: start.header().sequence(),
                         finish_sequence: None,
                         parent_track_identity: parent_track.to_owned(),
-                        role: role.clone(),
-                        display_name: role,
+                        role: role.to_owned(),
+                        display_name: role.to_owned(),
                     },
                 );
+                debug_assert!(previous.is_none(), "span start sequences are unique");
             }
             DiagnosticEvent::CustomSpanStarted(start) => {
                 let role = format!("custom:{}", start.name());
-                self.spans.insert(
+                self.structural_budget
+                    .reserve_owned(1, [parent_track, role.as_str(), start.name()])?;
+                let previous = self.spans.insert(
                     start.header().sequence(),
                     CollectedSpan {
                         start_sequence: start.header().sequence(),
                         finish_sequence: None,
                         parent_track_identity: parent_track.to_owned(),
-                        role,
+                        role: role.to_owned(),
                         display_name: start.name().to_owned(),
                     },
                 );
+                debug_assert!(previous.is_none(), "span start sequences are unique");
             }
             DiagnosticEvent::SpanFinished(finish) => {
                 self.spans
@@ -464,17 +697,22 @@ impl ProjectionCollector {
             }
             DiagnosticEvent::CounterSampled(counter) => {
                 let series = builtin_counter_series(counter.counter_kind().as_str());
-                self.tracks
-                    .register_counter(parent_track, &series, counter.counter_kind().as_str())?;
+                self.tracks.register_counter(
+                    parent_track,
+                    &series,
+                    counter.counter_kind().as_str(),
+                    &mut self.structural_budget,
+                )?;
             }
             DiagnosticEvent::CustomCounterSampled(counter) => {
-                let series = custom_counter_series(
+                let series =
+                    custom_counter_series(counter.name(), counter.unit(), counter.dimensions());
+                self.tracks.register_counter(
+                    parent_track,
+                    &series,
                     counter.name(),
-                    counter.unit(),
-                    counter.dimensions(),
-                );
-                self.tracks
-                    .register_counter(parent_track, &series, counter.name())?;
+                    &mut self.structural_budget,
+                )?;
             }
             DiagnosticEvent::ContextUsageSampled(usage) => {
                 if usage.context_used_tokens().is_some() {
@@ -482,6 +720,7 @@ impl ProjectionCollector {
                         parent_track,
                         context_counter_series("used_tokens"),
                         "context used tokens",
+                        &mut self.structural_budget,
                     )?;
                 }
                 if usage.context_window_tokens().is_some() {
@@ -489,6 +728,7 @@ impl ProjectionCollector {
                         parent_track,
                         context_counter_series("window_tokens"),
                         "context window tokens",
+                        &mut self.structural_budget,
                     )?;
                 }
                 if let Some(currency) = usage.cumulative_cost_currency() {
@@ -497,24 +737,32 @@ impl ProjectionCollector {
                         parent_track,
                         &series,
                         &format!("cumulative cost {}", currency.as_str()),
+                        &mut self.structural_budget,
                     )?;
                 }
             }
             DiagnosticEvent::ActTokenUsageFinalized(usage) => {
                 let act_identity = scope_track_identity(usage.header().scope());
-                if self
-                    .act_usage
-                    .insert(act_identity.clone(), UsageSummary::from_event(usage))
-                    .is_some()
-                {
+                if self.act_usage.contains_key(&act_identity) {
                     return Err(ProjectionError::DuplicateActUsage(act_identity));
                 }
+                self.structural_budget.reserve_owned(
+                    1,
+                    std::iter::once(act_identity.as_str()).chain(
+                        UsageField::ALL
+                            .into_iter()
+                            .filter_map(|field| field.value(usage).map(TokenCount::as_str)),
+                    ),
+                )?;
+                self.act_usage
+                    .insert(act_identity.to_owned(), UsageSummary::from_event(usage));
                 for field in UsageField::ALL {
                     if field.value(usage).is_some() {
                         self.tracks.register_counter(
                             ROOT_TRACK_IDENTITY,
                             usage_counter_series(field.as_str()),
                             &format!("known {}", field.as_str()),
+                            &mut self.structural_budget,
                         )?;
                     }
                 }
@@ -523,6 +771,7 @@ impl ProjectionCollector {
                         ROOT_TRACK_IDENTITY,
                         usage_coverage_series(coverage),
                         &format!("Act usage {coverage}"),
+                        &mut self.structural_budget,
                     )?;
                 }
             }
@@ -536,7 +785,7 @@ impl ProjectionCollector {
         Ok(())
     }
 
-    fn collect_flows(&mut self, event: &DiagnosticEvent) {
+    fn collect_flows(&mut self, event: &DiagnosticEvent) -> Result<(), ProjectionError> {
         let target = event.header().sequence();
         for link in event.header().caused_by() {
             let canonical_identity = format!(
@@ -545,15 +794,23 @@ impl ProjectionCollector {
                 link.source_sequence().get(),
                 target.get()
             );
+            if self.flows.contains_key(&canonical_identity) {
+                continue;
+            }
+            self.structural_budget.reserve_owned(
+                1,
+                [canonical_identity.as_str(), canonical_identity.as_str()],
+            )?;
             self.flows.insert(
-                canonical_identity.clone(),
+                canonical_identity.to_owned(),
                 CollectedFlow {
-                    canonical_identity,
+                    canonical_identity: canonical_identity.to_owned(),
                     source_sequence: link.source_sequence(),
                     target_sequence: target,
                 },
             );
         }
+        Ok(())
     }
 
     pub(crate) fn finish(mut self) -> Result<ProjectionPlan, ProjectionError> {
@@ -566,25 +823,26 @@ impl ProjectionCollector {
             });
         }
 
-        let intervals = self.spans.values().map(|span| SpanInterval {
-            start_sequence: span.start_sequence,
-            finish_sequence: span.finish_sequence,
-            parent_track_identity: span.parent_track_identity.clone(),
-            base_identity: format!(
-                "{}/span:{}",
-                span.parent_track_identity,
-                component(&span.role)
-            ),
-            display_name: span.display_name.clone(),
-        });
-        let span_tracks = allocate_span_lanes(&mut self.tracks, intervals)?;
-        let tracks = self.tracks.finish(self.limits.max_track_ids)?;
+        let intervals = std::mem::take(&mut self.spans)
+            .into_values()
+            .map(|span| SpanInterval {
+                start_sequence: span.start_sequence,
+                finish_sequence: span.finish_sequence,
+                parent_track_identity: span.parent_track_identity,
+                role: span.role,
+                display_name: span.display_name,
+            });
+        let span_tracks =
+            allocate_span_lanes(&mut self.tracks, intervals, &mut self.structural_budget)?;
+        let tracks = self
+            .tracks
+            .finish(self.limits.max_track_ids, &mut self.structural_budget)?;
 
-        let flow_identities = self
-            .flows
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<String>>();
+        for identity in self.flows.keys() {
+            self.structural_budget
+                .reserve_owned(1, [identity.as_str()])?;
+        }
+        let flow_identities = self.flows.keys().cloned().collect::<BTreeSet<String>>();
         let flow_ids = DenseIdentityMap::assign(
             flow_identities,
             IdentitySpace::Flow,
@@ -593,6 +851,10 @@ impl ProjectionCollector {
         let mut starting_flows = BTreeMap::<SchemaU64, Vec<FlowAttachment>>::new();
         let mut terminating_flows = BTreeMap::<SchemaU64, Vec<FlowAttachment>>::new();
         for flow in self.flows.values() {
+            self.structural_budget
+                .reserve_owned(1, [flow.canonical_identity.as_str()])?;
+            self.structural_budget
+                .reserve_owned(1, [flow.canonical_identity.as_str()])?;
             let attachment = FlowAttachment {
                 id: flow_ids.id(&flow.canonical_identity)?,
                 canonical_identity: flow.canonical_identity.clone(),
@@ -606,6 +868,7 @@ impl ProjectionCollector {
                 .or_default()
                 .push(attachment);
         }
+        let structural_index_usage = self.structural_budget.usage();
 
         Ok(ProjectionPlan {
             metadata: self.metadata,
@@ -615,6 +878,7 @@ impl ProjectionCollector {
             terminating_flows,
             act_usage: self.act_usage,
             event_count: observed,
+            structural_index_usage,
         })
     }
 }
@@ -627,6 +891,13 @@ pub(crate) struct ProjectionPlan {
     pub(crate) terminating_flows: BTreeMap<SchemaU64, Vec<FlowAttachment>>,
     pub(crate) act_usage: BTreeMap<String, UsageSummary>,
     pub(crate) event_count: u64,
+    structural_index_usage: StructuralIndexUsage,
+}
+
+impl ProjectionPlan {
+    pub(crate) const fn structural_index_usage(&self) -> StructuralIndexUsage {
+        self.structural_index_usage
+    }
 }
 
 pub(crate) const USAGE_COVERAGE_COUNTERS: [&str; 5] = [
@@ -649,9 +920,7 @@ pub(crate) fn custom_counter_series(
     let unit = unit.map_or_else(|| "none".to_owned(), component);
     let dimensions = dimensions
         .iter()
-        .map(|(key, value)| {
-            format!("{}={}", component(key), component(&dimension_value(value)))
-        })
+        .map(|(key, value)| format!("{}={}", component(key), component(&dimension_value(value))))
         .collect::<Vec<_>>()
         .join(",");
     format!(

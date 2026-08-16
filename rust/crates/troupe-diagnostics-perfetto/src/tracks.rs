@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use troupe_diagnostics_core::{event::DiagnosticScope, scalar::SchemaU64};
 
 use crate::{
-    collect::ProjectionError,
+    collect::{ProjectionError, StructuralIndexBudget},
     identity::{DenseIdentityMap, IdentitySpace, component},
 };
 
@@ -23,20 +23,26 @@ pub(crate) struct TrackCatalogBuilder {
 }
 
 impl TrackCatalogBuilder {
-    pub(crate) fn new(root_name: String) -> Self {
+    pub(crate) fn new(
+        root_name: String,
+        structural_budget: &mut StructuralIndexBudget,
+    ) -> Result<Self, ProjectionError> {
         let mut builder = Self::default();
-        builder
-            .register(ROOT_TRACK_IDENTITY.to_owned(), None, root_name)
-            .expect("the initial root track is unique");
-        builder
+        builder.register(ROOT_TRACK_IDENTITY, None, &root_name, structural_budget)?;
+        Ok(builder)
     }
 
-    pub(crate) fn register_metadata(&mut self, name: String) -> Result<String, ProjectionError> {
+    pub(crate) fn register_metadata(
+        &mut self,
+        name: String,
+        structural_budget: &mut StructuralIndexBudget,
+    ) -> Result<String, ProjectionError> {
         let identity = format!("{ROOT_TRACK_IDENTITY}/metadata");
         self.register(
-            identity.clone(),
-            Some(ROOT_TRACK_IDENTITY.to_owned()),
-            name,
+            &identity,
+            Some(ROOT_TRACK_IDENTITY),
+            &name,
+            structural_budget,
         )?;
         Ok(identity)
     }
@@ -44,12 +50,13 @@ impl TrackCatalogBuilder {
     pub(crate) fn register_scope(
         &mut self,
         scope: &DiagnosticScope,
+        structural_budget: &mut StructuralIndexBudget,
     ) -> Result<String, ProjectionError> {
         let mut parent = ROOT_TRACK_IDENTITY.to_owned();
         for (tag, value, label) in scope_segments(scope) {
             let identity = format!("{parent}/{tag}:{}", component(&value));
             let name = format!("{label} {value}");
-            self.register(identity.clone(), Some(parent), name)?;
+            self.register(&identity, Some(&parent), &name, structural_budget)?;
             parent = identity;
         }
         Ok(parent)
@@ -60,19 +67,21 @@ impl TrackCatalogBuilder {
         parent: &str,
         series_identity: &str,
         name: &str,
+        structural_budget: &mut StructuralIndexBudget,
     ) -> Result<String, ProjectionError> {
         let identity = counter_track_identity(parent, series_identity);
-        self.register(identity.clone(), Some(parent.to_owned()), name.to_owned())?;
+        self.register(&identity, Some(parent), name, structural_budget)?;
         Ok(identity)
     }
 
     fn register(
         &mut self,
-        canonical_identity: String,
-        parent_identity: Option<String>,
-        name: String,
+        canonical_identity: &str,
+        parent_identity: Option<&str>,
+        name: &str,
+        structural_budget: &mut StructuralIndexBudget,
     ) -> Result<(), ProjectionError> {
-        let depth = match parent_identity.as_deref() {
+        let depth = match parent_identity {
             Some(parent) => self
                 .definitions
                 .get(parent)
@@ -80,23 +89,46 @@ impl TrackCatalogBuilder {
                 .ok_or_else(|| ProjectionError::unknown_identity(parent))?,
             None => 0,
         };
-        let definition = TrackDefinition {
-            canonical_identity: canonical_identity.clone(),
-            parent_identity,
-            name,
-            depth,
-        };
-        if let Some(existing) = self.definitions.get(&canonical_identity) {
-            if existing != &definition {
-                return Err(ProjectionError::conflicting_track(&canonical_identity));
+        if let Some(existing) = self.definitions.get(canonical_identity) {
+            if existing.parent_identity.as_deref() != parent_identity
+                || existing.name != name
+                || existing.depth != depth
+            {
+                return Err(ProjectionError::conflicting_track(canonical_identity));
             }
             return Ok(());
         }
-        self.definitions.insert(canonical_identity, definition);
+        structural_budget.reserve_owned(
+            1,
+            [
+                Some(canonical_identity),
+                Some(canonical_identity),
+                parent_identity,
+                Some(name),
+            ]
+            .into_iter()
+            .flatten(),
+        )?;
+        let definition = TrackDefinition {
+            canonical_identity: canonical_identity.to_owned(),
+            parent_identity: parent_identity.map(str::to_owned),
+            name: name.to_owned(),
+            depth,
+        };
+        self.definitions
+            .insert(canonical_identity.to_owned(), definition);
         Ok(())
     }
 
-    pub(crate) fn finish(self, maximum_ids: u64) -> Result<TrackCatalog, ProjectionError> {
+    pub(crate) fn finish(
+        self,
+        maximum_ids: u64,
+        structural_budget: &mut StructuralIndexBudget,
+    ) -> Result<TrackCatalog, ProjectionError> {
+        for identity in self.definitions.keys() {
+            structural_budget.reserve_owned(1, [identity.as_str()])?;
+            structural_budget.reserve_owned(1, [identity.as_str()])?;
+        }
         let identities = self.definitions.keys().cloned().collect::<BTreeSet<_>>();
         let ids = DenseIdentityMap::assign(identities, IdentitySpace::Track, maximum_ids)?;
         let mut descriptor_order = self.definitions.keys().cloned().collect::<Vec<_>>();
@@ -200,27 +232,35 @@ pub(crate) struct SpanInterval {
     pub(crate) start_sequence: SchemaU64,
     pub(crate) finish_sequence: Option<SchemaU64>,
     pub(crate) parent_track_identity: String,
-    pub(crate) base_identity: String,
+    pub(crate) role: String,
     pub(crate) display_name: String,
 }
 
 pub(crate) fn allocate_span_lanes(
     builder: &mut TrackCatalogBuilder,
     intervals: impl IntoIterator<Item = SpanInterval>,
+    structural_budget: &mut StructuralIndexBudget,
 ) -> Result<BTreeMap<SchemaU64, String>, ProjectionError> {
-    let mut groups = BTreeMap::<String, Vec<SpanInterval>>::new();
-    for interval in intervals {
-        groups
-            .entry(interval.base_identity.clone())
-            .or_default()
-            .push(interval);
-    }
-
+    let mut intervals = intervals.into_iter().collect::<Vec<_>>();
+    intervals.sort_by(|left, right| {
+        left.parent_track_identity
+            .cmp(&right.parent_track_identity)
+            .then_with(|| left.role.cmp(&right.role))
+            .then_with(|| left.start_sequence.cmp(&right.start_sequence))
+    });
     let mut assignments = BTreeMap::new();
-    for intervals in groups.values_mut() {
-        intervals.sort_by_key(|interval| interval.start_sequence);
+    let mut group_start = 0;
+    while group_start < intervals.len() {
+        let mut group_end = group_start + 1;
+        while group_end < intervals.len()
+            && intervals[group_end].parent_track_identity
+                == intervals[group_start].parent_track_identity
+            && intervals[group_end].role == intervals[group_start].role
+        {
+            group_end += 1;
+        }
         let mut lanes = Vec::<Vec<Option<SchemaU64>>>::new();
-        for interval in intervals {
+        for interval in &intervals[group_start..group_end] {
             let lane = lanes
                 .iter_mut()
                 .enumerate()
@@ -239,25 +279,31 @@ pub(crate) fn allocate_span_lanes(
                     };
                     fits.then_some(index)
                 })
-                .unwrap_or_else(|| {
-                    lanes.push(Vec::new());
-                    lanes.len() - 1
-                });
-            lanes[lane].push(interval.finish_sequence);
+                .unwrap_or(lanes.len());
 
-            let track_identity = format!("{}/lane:{lane:020}", interval.base_identity);
-            let display_name = if lane == 0 {
-                interval.display_name.clone()
-            } else {
-                format!("{} [lane {}]", interval.display_name, lane + 1)
-            };
+            let base_identity = format!(
+                "{}/span:{}",
+                interval.parent_track_identity,
+                component(&interval.role)
+            );
+            let track_identity = format!("{base_identity}/lane:{lane:020}");
+            let sibling_name =
+                (lane != 0).then(|| format!("{} [lane {}]", interval.display_name, lane + 1));
+            let display_name = sibling_name.as_deref().unwrap_or(&interval.display_name);
             builder.register(
-                track_identity.clone(),
-                Some(interval.parent_track_identity.clone()),
+                &track_identity,
+                Some(&interval.parent_track_identity),
                 display_name,
+                structural_budget,
             )?;
-            assignments.insert(interval.start_sequence, track_identity);
+            structural_budget.reserve_owned(1, [track_identity.as_str()])?;
+            if lane == lanes.len() {
+                lanes.push(Vec::new());
+            }
+            lanes[lane].push(interval.finish_sequence);
+            assignments.insert(interval.start_sequence, track_identity.to_owned());
         }
+        group_start = group_end;
     }
     Ok(assignments)
 }
