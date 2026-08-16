@@ -2381,6 +2381,8 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "troupe-agent-runtime",
