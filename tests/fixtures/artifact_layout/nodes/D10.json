@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_cli_events_follow.rs",
+    "tests/integration/test_diagnostic_cli_events_follow.py"
+  ],
+  "modified": [
+    "rust/src/application/diagnostic_cli/events_follow.rs"
+  ],
   "removed": [],
   "generated": []
 }
