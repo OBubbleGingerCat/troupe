@@ -12,7 +12,14 @@ import {
   reduceDiagnosticState,
 } from "../../src/state/reducer.ts";
 import { cacheQueryResult, queryDependsOnEvent } from "../../src/state/queries.ts";
-import { createPresentationState } from "../../src/state/selection.ts";
+import {
+  createPresentationState,
+  eventReference,
+  messageReference,
+  scopeFromReference,
+  scopeReference,
+  spanReference,
+} from "../../src/state/selection.ts";
 
 
 const RUN_ID = decodeCanonicalUuid("12345678-1234-4234-9234-123456789abc");
@@ -47,6 +54,15 @@ function ingest(state: ReturnType<typeof createDiagnosticState>, events: readonl
 }
 
 describe("diagnostic state reducer", () => {
+  it("shares one canonical event, span, message, and scope selection contract", () => {
+    expect(eventReference(decodeU64("12"))).toEqual({ kind: "event", id: "12" });
+    expect(spanReference(decodeU64("7"))).toEqual({ kind: "span", id: "7" });
+    expect(messageReference("message-1")).toEqual({ kind: "message", id: "message-1" });
+    expect(scopeFromReference(scopeReference(SCOPE))).toEqual(SCOPE);
+    expect(scopeFromReference({ kind: "scope", id: "not-json" })).toBeNull();
+    expect(scopeFromReference({ kind: "scope", id: "[null]" })).toBeNull();
+  });
+
   it("projects span, message, counter, usage, and gap facts from a contiguous stream", () => {
     const events = [
       event(1, {

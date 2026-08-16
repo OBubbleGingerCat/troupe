@@ -1,4 +1,9 @@
-import { compareU64 } from "../protocol/decimal.ts";
+import {
+  type U64String,
+  compareU64,
+  decodeU64,
+} from "../protocol/decimal.ts";
+import type { DiagnosticScope } from "../protocol/event.ts";
 import type {
   PresentationFilters,
   PresentationState,
@@ -6,6 +11,78 @@ import type {
 } from "./model.ts";
 import { EXPANDED_ITEM_CAPACITY } from "./model.ts";
 
+
+const SCOPE_REFERENCE_FIELDS = [
+  "scene_id",
+  "actor_id",
+  "cue_id",
+  "effect_id",
+  "act_id",
+  "tool_call_id",
+  "session_generation",
+] as const;
+
+export function eventReference(sequence: U64String): SelectionReference {
+  return { kind: "event", id: sequence };
+}
+
+export function spanReference(spanId: U64String): SelectionReference {
+  return { kind: "span", id: spanId };
+}
+
+export function messageReference(messageId: string): SelectionReference {
+  if (messageId.length === 0) {
+    throw new RangeError("message selection identity must not be empty");
+  }
+  return { kind: "message", id: messageId };
+}
+
+export function scopeReference(scope: DiagnosticScope): SelectionReference {
+  return {
+    kind: "scope",
+    id: JSON.stringify(SCOPE_REFERENCE_FIELDS.map((field) => scope[field])),
+  };
+}
+
+export function scopeFromReference(reference: SelectionReference): DiagnosticScope | null {
+  if (reference.kind !== "scope") {
+    return null;
+  }
+  try {
+    const values = JSON.parse(reference.id) as unknown;
+    if (!Array.isArray(values) || values.length !== SCOPE_REFERENCE_FIELDS.length) {
+      return null;
+    }
+    const [sceneId, actorId, cueId, effectId, actId, toolCallId, sessionGeneration] = values;
+    if (
+      ![sceneId, actorId, cueId, effectId, actId, toolCallId]
+        .every((value) => value === null || typeof value === "string")
+      || (sessionGeneration !== null && typeof sessionGeneration !== "string")
+    ) {
+      return null;
+    }
+    return {
+      scene_id: sceneId as string | null,
+      actor_id: actorId as string | null,
+      cue_id: cueId as string | null,
+      effect_id: effectId as string | null,
+      act_id: actId as string | null,
+      tool_call_id: toolCallId as string | null,
+      session_generation: sessionGeneration === null
+        ? null
+        : decodeU64(sessionGeneration, "selection.scope.session_generation"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function sameSelectionReference(
+  left: SelectionReference | null,
+  right: SelectionReference | null,
+): boolean {
+  return left?.kind === right?.kind && left?.id === right?.id;
+}
 
 export function createPresentationState(): PresentationState {
   return {
@@ -23,7 +100,7 @@ export function select(
   state: PresentationState,
   selection: SelectionReference | null,
 ): PresentationState {
-  if (state.selection?.kind === selection?.kind && state.selection?.id === selection?.id) {
+  if (sameSelectionReference(state.selection, selection)) {
     return state;
   }
   return { ...state, selection };
@@ -33,7 +110,7 @@ export function pinDetail(
   state: PresentationState,
   selection: SelectionReference | null,
 ): PresentationState {
-  if (state.pinned_detail?.kind === selection?.kind && state.pinned_detail?.id === selection?.id) {
+  if (sameSelectionReference(state.pinned_detail, selection)) {
     return state;
   }
   return { ...state, pinned_detail: selection };
