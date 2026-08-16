@@ -158,7 +158,7 @@ function Binding({ response }: { readonly response: TimeSeriesViewResponse }): J
   );
 }
 
-function jsonObject(value: JsonValue): JsonObject | null {
+function jsonObject(value: JsonValue | undefined): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as JsonObject
     : null;
