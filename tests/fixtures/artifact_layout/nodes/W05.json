@@ -1,6 +1,15 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/live/bootstrap.ts",
+    "frontend/diagnostics/src/live/pause.ts",
+    "frontend/diagnostics/src/live/reconnect.ts",
+    "frontend/diagnostics/src/live/snapshot.ts",
+    "frontend/diagnostics/src/live/sse.ts",
+    "frontend/diagnostics/tests/integration/live-bootstrap.test.tsx",
+    "frontend/diagnostics/tests/integration/live-pause.test.tsx",
+    "frontend/diagnostics/tests/integration/live-reconnect.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []

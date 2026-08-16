@@ -1,8 +1,20 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "node",
+      "frontend/diagnostics/scripts/maintain.mjs",
+      "--npm-cache",
+      "${TROUPE_NPM_CACHE:?}",
+      "--typecheck",
+      "--unit",
+      "tests/integration/live-bootstrap.test.tsx,tests/integration/live-reconnect.test.tsx,tests/integration/live-pause.test.tsx"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm"
+  ],
   "exclusive_resources": []
 }
