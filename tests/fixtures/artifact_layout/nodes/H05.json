@@ -1,7 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/server_dump.rs",
+    "tests/fixtures/diagnostics/http/dump-error-v1.json",
+    "tests/fixtures/diagnostics/http/dump-metadata-v1.json"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/server/dump.rs"
+  ],
   "removed": [],
   "generated": []
 }
