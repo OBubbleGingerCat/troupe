@@ -395,6 +395,19 @@ fn context_occupancy_is_not_terminal_accounting() {
 
     assert_eq!(model.through_sequence().get(), 2);
     assert_eq!(model.through_elapsed_ns().get(), 20);
+    assert_eq!(model.contexts().len(), 1);
+    let context = model
+        .context_for_scope(&scope("scene-1", "actor-1", "cue-1", Some("act-1")))
+        .expect("latest context sample for exact scope");
+    assert_eq!(context.header().sequence().get(), 1);
+    assert_eq!(
+        context.context_used_tokens().map(SchemaU64::get),
+        Some(u64::MAX - 1)
+    );
+    assert_eq!(
+        context.context_window_tokens().map(SchemaU64::get),
+        Some(u64::MAX)
+    );
     assert_eq!(model.aggregate().finalized_acts().get(), 1);
     assert_eq!(model.aggregate().reported_acts().get(), 0);
     assert!(
@@ -404,6 +417,47 @@ fn context_occupancy_is_not_terminal_accounting() {
             .known_sum()
             .is_none()
     );
+}
+
+#[test]
+fn latest_context_sample_replaces_only_the_same_exact_scope() {
+    let first_scope = scope("scene-1", "actor-1", "cue-1", Some("act-1"));
+    let second_scope = scope("scene-1", "actor-1", "cue-2", Some("act-2"));
+    let events = vec![
+        context_usage(1, first_scope.clone()),
+        context_usage(2, second_scope.clone()),
+        context_usage(3, first_scope.clone()),
+    ];
+    let model = project_usage(run_id(), &events).expect("project latest context samples");
+
+    assert_eq!(model.contexts().len(), 2);
+    assert_eq!(
+        model
+            .contexts()
+            .iter()
+            .map(|context| context.header().sequence().get())
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(
+        model
+            .context_for_scope(&first_scope)
+            .expect("replacement context")
+            .header()
+            .sequence()
+            .get(),
+        3
+    );
+    assert_eq!(
+        model
+            .context_for_scope(&second_scope)
+            .expect("independent context")
+            .header()
+            .sequence()
+            .get(),
+        2
+    );
+    assert_eq!(model.aggregate().finalized_acts().get(), 0);
 }
 
 #[test]
@@ -468,6 +522,26 @@ fn illegal_availability_and_corrupt_aggregate_fail_closed() {
             .expect_err("scoped aggregate order")
             .code(),
         "usage_aggregate_mismatch"
+    );
+
+    let contexts = project_usage(
+        run_id(),
+        &[
+            context_usage(1, scope("scene-1", "actor-1", "cue-1", Some("act-1"))),
+            context_usage(2, scope("scene-1", "actor-1", "cue-2", Some("act-2"))),
+        ],
+    )
+    .expect("valid contexts");
+    let mut duplicate_scope = serde_json::to_value(contexts).expect("encode contexts");
+    duplicate_scope["contexts"][1]["scope"] = duplicate_scope["contexts"][0]["scope"].clone();
+    let duplicate_scope: UsageReadModel =
+        serde_json::from_value(duplicate_scope).expect("decode duplicate context scope");
+    assert_eq!(
+        duplicate_scope
+            .validate()
+            .expect_err("duplicate context scope")
+            .code(),
+        "context_record_mismatch"
     );
 }
 

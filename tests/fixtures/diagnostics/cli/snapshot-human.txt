@@ -36,6 +36,7 @@ state:
     run_id: 12345678-1234-4234-9234-123456789abc
     through_sequence: 0
     through_elapsed_ns: 0
+    contexts: []
     usages: []
     aggregate:
       finalized_acts: 0

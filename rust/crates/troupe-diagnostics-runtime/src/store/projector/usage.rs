@@ -1,9 +1,15 @@
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    str::FromStr,
+};
 
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use troupe_diagnostics_core::{
-    event::{ActTokenUsageFinalized, CausalLink, DiagnosticEvent, DiagnosticScope},
+    event::{
+        ActTokenUsageFinalized, CausalLink, ContextUsageSampled, DiagnosticEvent, DiagnosticScope,
+    },
     id::{CanonicalUuid, RunLocalId},
     kinds::{UsageAvailability, UsageSource, UsageUnavailableReason},
     scalar::{SchemaU64, TokenCount},
@@ -20,6 +26,7 @@ pub struct UsageReadModel {
     run_id: CanonicalUuid,
     through_sequence: SchemaU64,
     through_elapsed_ns: ElapsedNs,
+    contexts: Vec<ContextUsageSampled>,
     usages: Vec<ProjectedActUsage>,
     aggregate: UsageAggregate,
     scoped_aggregates: Vec<ScopedUsageAggregate>,
@@ -32,6 +39,7 @@ impl UsageReadModel {
             run_id,
             through_sequence: SchemaU64::new(0),
             through_elapsed_ns: ElapsedNs::new(0),
+            contexts: Vec::new(),
             usages: Vec::new(),
             aggregate: UsageAggregate::empty(),
             scoped_aggregates: Vec::new(),
@@ -52,6 +60,16 @@ impl UsageReadModel {
 
     pub const fn through_elapsed_ns(&self) -> ElapsedNs {
         self.through_elapsed_ns
+    }
+
+    pub fn contexts(&self) -> &[ContextUsageSampled] {
+        &self.contexts
+    }
+
+    pub fn context_for_scope(&self, scope: &DiagnosticScope) -> Option<&ContextUsageSampled> {
+        self.contexts
+            .iter()
+            .find(|context| context.header().scope() == scope)
     }
 
     pub fn usages(&self) -> &[ProjectedActUsage] {
@@ -103,6 +121,26 @@ impl UsageReadModel {
             });
         }
 
+        let mut context_scopes = BTreeSet::new();
+        let mut materialized_sequences = BTreeSet::new();
+        let mut previous_context_sequence = SchemaU64::new(0);
+        for context in &self.contexts {
+            let header = context.header();
+            if header.run_id() != self.run_id
+                || header.sequence().get() == 0
+                || header.sequence() > self.through_sequence
+                || header.elapsed_ns() > self.through_elapsed_ns
+                || header.sequence() <= previous_context_sequence
+                || !materialized_sequences.insert(header.sequence())
+                || !context_scopes.insert(context_scope_key(header.scope()))
+            {
+                return Err(UsageProjectionError::ContextRecordMismatch {
+                    event_sequence: header.sequence(),
+                });
+            }
+            previous_context_sequence = header.sequence();
+        }
+
         let mut acts = BTreeMap::new();
         let mut previous_sequence = SchemaU64::new(0);
         for usage in &self.usages {
@@ -111,6 +149,7 @@ impl UsageReadModel {
                 || usage.sequence() > self.through_sequence
                 || usage.elapsed_ns() > self.through_elapsed_ns
                 || usage.scope().act_id() != Some(usage.act_id())
+                || !materialized_sequences.insert(usage.sequence())
             {
                 return Err(UsageProjectionError::UsageRecordMismatch {
                     event_sequence: usage.sequence(),
@@ -505,29 +544,38 @@ fn candidate_for_event(
     validate_position(model, event)?;
     model.validate()?;
     let mut candidate = model.clone();
-    if let DiagnosticEvent::ActTokenUsageFinalized(event) = event {
-        let Some(act_id) = event.header().scope().act_id().cloned() else {
-            return Err(UsageProjectionError::MissingActIdentity {
-                event_sequence: event.header().sequence(),
-            });
-        };
-        if let Some(existing) = candidate.usage_for_act(&act_id) {
-            return Err(UsageProjectionError::DuplicateActUsage {
-                act_id,
-                first_sequence: existing.sequence(),
-                event_sequence: event.header().sequence(),
-            });
+    match event {
+        DiagnosticEvent::ContextUsageSampled(context) => {
+            candidate
+                .contexts
+                .retain(|existing| existing.header().scope() != context.header().scope());
+            candidate.contexts.push(context.clone());
         }
-        let projected = ProjectedActUsage::from_event(event, act_id);
-        if !projected.availability_is_valid() {
-            return Err(UsageProjectionError::AvailabilityMismatch {
-                act_id: projected.act_id().clone(),
-                event_sequence: projected.sequence(),
-            });
+        DiagnosticEvent::ActTokenUsageFinalized(event) => {
+            let Some(act_id) = event.header().scope().act_id().cloned() else {
+                return Err(UsageProjectionError::MissingActIdentity {
+                    event_sequence: event.header().sequence(),
+                });
+            };
+            if let Some(existing) = candidate.usage_for_act(&act_id) {
+                return Err(UsageProjectionError::DuplicateActUsage {
+                    act_id,
+                    first_sequence: existing.sequence(),
+                    event_sequence: event.header().sequence(),
+                });
+            }
+            let projected = ProjectedActUsage::from_event(event, act_id);
+            if !projected.availability_is_valid() {
+                return Err(UsageProjectionError::AvailabilityMismatch {
+                    act_id: projected.act_id().clone(),
+                    event_sequence: projected.sequence(),
+                });
+            }
+            candidate.aggregate.record(&projected)?;
+            record_scoped_aggregates(&mut candidate.scoped_aggregates, &projected)?;
+            candidate.usages.push(projected);
         }
-        candidate.aggregate.record(&projected)?;
-        record_scoped_aggregates(&mut candidate.scoped_aggregates, &projected)?;
-        candidate.usages.push(projected);
+        _ => {}
     }
     candidate.through_sequence = event.header().sequence();
     candidate.through_elapsed_ns = candidate
@@ -685,6 +733,28 @@ fn optional_contains<T: PartialEq>(parent: Option<&T>, child: Option<&T>) -> boo
     parent.is_none_or(|value| child == Some(value))
 }
 
+type ContextScopeKey<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<u64>,
+);
+
+fn context_scope_key(scope: &DiagnosticScope) -> ContextScopeKey<'_> {
+    (
+        scope.scene_id().map(RunLocalId::as_str),
+        scope.actor_id().map(RunLocalId::as_str),
+        scope.cue_id().map(RunLocalId::as_str),
+        scope.effect_id().map(RunLocalId::as_str),
+        scope.act_id().map(RunLocalId::as_str),
+        scope.tool_call_id().map(RunLocalId::as_str),
+        scope.session_generation().map(SchemaU64::get),
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageProjectionError {
     RunIdentityMismatch {
@@ -718,6 +788,9 @@ pub enum UsageProjectionError {
     UsageRecordMismatch {
         event_sequence: SchemaU64,
     },
+    ContextRecordMismatch {
+        event_sequence: SchemaU64,
+    },
     AggregateMismatch {
         event_sequence: SchemaU64,
     },
@@ -746,6 +819,7 @@ impl UsageProjectionError {
             Self::DuplicateActUsage { .. } => "duplicate_act_usage",
             Self::AvailabilityMismatch { .. } => "usage_availability_mismatch",
             Self::UsageRecordMismatch { .. } => "usage_record_mismatch",
+            Self::ContextRecordMismatch { .. } => "context_record_mismatch",
             Self::AggregateMismatch { .. } => "usage_aggregate_mismatch",
             Self::CountExhausted { .. } => "usage_count_exhausted",
             Self::InvalidTokenValue { .. } => "usage_token_invalid",
@@ -762,6 +836,7 @@ impl UsageProjectionError {
             | Self::DuplicateActUsage { event_sequence, .. }
             | Self::AvailabilityMismatch { event_sequence, .. }
             | Self::UsageRecordMismatch { event_sequence }
+            | Self::ContextRecordMismatch { event_sequence }
             | Self::AggregateMismatch { event_sequence }
             | Self::CountExhausted { event_sequence }
             | Self::InvalidTokenValue { event_sequence }
@@ -816,6 +891,9 @@ impl fmt::Display for UsageProjectionError {
             ),
             Self::UsageRecordMismatch { .. } => {
                 formatter.write_str("stored terminal usage identity or order is inconsistent")
+            }
+            Self::ContextRecordMismatch { .. } => {
+                formatter.write_str("stored context usage identity or order is inconsistent")
             }
             Self::AggregateMismatch { .. } => {
                 formatter.write_str("stored usage aggregate does not match terminal facts")
