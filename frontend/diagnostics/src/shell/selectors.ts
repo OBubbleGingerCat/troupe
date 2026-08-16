@@ -1,10 +1,15 @@
-import type { SpanStartedEvent } from "../protocol/event.ts";
+import type { DiagnosticScope, SpanStartedEvent } from "../protocol/event.ts";
 import type {
   DiagnosticState,
   ProjectedSpan,
   SelectionReference,
 } from "../state/model.ts";
 import { presentedLiveEdge } from "../state/reducer.ts";
+import {
+  sameSelectionReference,
+  scopeReference,
+  spanReference,
+} from "../state/selection.ts";
 
 
 export type ExecutionNodeKind =
@@ -118,20 +123,31 @@ function selectionMatches(
   state: DiagnosticState,
   selection: SelectionReference,
 ): boolean {
-  return state.presentation.selection?.kind === selection.kind
-    && state.presentation.selection.id === selection.id;
+  return sameSelectionReference(state.presentation.selection, selection);
 }
 
 function scopeKey(kind: "production" | "scene" | "actor" | "cue", ...ids: string[]): string {
   return JSON.stringify([kind, ...ids]);
 }
 
-function scopeSelection(id: string): SelectionReference {
-  return { kind: "scope", id };
+function spanSelection(span: BuiltInSpan): SelectionReference {
+  return spanReference(span.span_id);
 }
 
-function spanSelection(span: BuiltInSpan): SelectionReference {
-  return { kind: "span", id: span.span_id };
+function sparseScope(
+  sceneId: string | null,
+  actorId: string | null = null,
+  cueId: string | null = null,
+): DiagnosticScope {
+  return {
+    scene_id: sceneId,
+    actor_id: actorId,
+    cue_id: cueId,
+    effect_id: null,
+    act_id: null,
+    tool_call_id: null,
+    session_generation: null,
+  };
 }
 
 function leafNode(
@@ -249,7 +265,12 @@ function cueNode(
       )),
   ];
   const key = scopeKey("cue", sceneId, actorId, cue.id);
-  const selection = scopeSelection(cue.id);
+  const selection = scopeReference(
+    firstWait?.start.scope
+      ?? firstExecution?.start.scope
+      ?? acts[0]?.start.scope
+      ?? sparseScope(sceneId, actorId, cue.id),
+  );
   const expanded = state.presentation.expanded.includes(key);
   return {
     key,
@@ -298,7 +319,7 @@ function actorNode(
     .map((cue) => cueNode(state, sceneId, actor.id, cue))
     .sort((left, right) => left.label.localeCompare(right.label));
   const key = scopeKey("actor", sceneId, actor.id);
-  const selection = scopeSelection(actor.id);
+  const selection = scopeReference(actorSpan?.start.scope ?? sparseScope(sceneId, actor.id));
   const displayName = actorSpan === null ? null : detailString(actorSpan, "display_name");
   return {
     key,
@@ -322,7 +343,7 @@ function sceneNode(state: DiagnosticState, scene: SceneBuilder): ExecutionNode {
     .map((actor) => actorNode(state, scene.id, actor))
     .sort((left, right) => left.label.localeCompare(right.label));
   const key = scopeKey("scene", scene.id);
-  const selection = scopeSelection(scene.id);
+  const selection = scopeReference(sceneSpan?.start.scope ?? sparseScope(scene.id));
   return {
     key,
     kind: "scene",
@@ -387,7 +408,7 @@ export function selectExecutionTree(
   const runSpan = firstSpan(spans, "run.lifecycle");
   const children = buildScenes(spans).map((scene) => sceneNode(state, scene));
   const key = scopeKey("production", state.run_id);
-  const selection = scopeSelection(state.run_id);
+  const selection = scopeReference(runSpan?.start.scope ?? sparseScope(null));
   return {
     root: {
       key,

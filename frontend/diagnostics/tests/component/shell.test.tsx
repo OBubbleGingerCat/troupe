@@ -18,6 +18,7 @@ import {
   createDiagnosticState,
   reduceDiagnosticState,
 } from "../../src/state/reducer.ts";
+import { scopeReference } from "../../src/state/selection.ts";
 
 
 const RUN_ID = decodeCanonicalUuid("12345678-1234-4234-9234-123456789abc");
@@ -275,6 +276,11 @@ describe("diagnostics workbench shell", () => {
     expect(resume.getAttribute("title")).toBe("Resume live presentation");
     const toggle = screen.getByRole("button", { name: "Expand Cue c-102" });
     expect(toggle.getAttribute("title")).toBe("Expand Cue c-102");
+    fireEvent.click(screen.getByRole("button", { name: "Cue c-103" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "select",
+      selection: scopeReference(scope("c-103")),
+    });
     fireEvent.click(resume);
     expect(dispatch).toHaveBeenCalledWith({ type: "resume" });
   });
