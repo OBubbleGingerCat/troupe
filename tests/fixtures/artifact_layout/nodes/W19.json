@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/views/timeseries_shell.tsx",
+    "frontend/diagnostics/tests/component/view-timeseries-shell.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
