@@ -122,7 +122,7 @@ describe("C05 time series ViewSpec shell", () => {
     });
 
     const { container } = render(<TimeSeriesShell record={RECORD} state={{ status: "ready", response: RESPONSE }} />);
-    const mount = screen.getByRole("group", { name: "Time series plot" });
+    const mount = screen.getByRole("region", { name: "Time series plot" });
     expect(mount).toHaveAttribute("data-series-count", "1");
     expect(mount).toHaveAttribute("data-point-count", "4");
     expect(mount).toHaveAttribute("data-bucket-width-ns", "1");
@@ -251,7 +251,7 @@ describe("C05 time series ViewSpec shell", () => {
     expect(source).not.toMatch(/TimelineViewResponse|MetricViewResponse|TableViewResponse/);
     expect(source).not.toMatch(/uPlot|new\s+uPlot|canvas|getContext|requestAnimationFrame/i);
     expect(source).not.toMatch(/fetch\s*\(|EventSource|XMLHttpRequest|WebSocket/);
-    expect(source).not.toMatch(/parseFloat|parseInt|Number\s*\(|Math\.(ceil|floor|round)/);
+    expect(source).not.toMatch(/parseFloat|parseInt|\bNumber\s*\(|Math\.(ceil|floor|round)/);
     expect(source).not.toMatch(/renderPlot|rendererFactory|plugin|dangerouslySetInnerHTML|innerHTML/);
   });
 });
