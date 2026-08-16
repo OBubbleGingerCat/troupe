@@ -2,6 +2,7 @@ import type { JSX } from "preact";
 
 import type {
   JsonObject,
+  JsonValue,
   U64String,
 } from "../protocol/decimal.ts";
 import type {
@@ -157,23 +158,25 @@ function Binding({ response }: { readonly response: TimeSeriesViewResponse }): J
   );
 }
 
+function jsonObject(value: JsonValue): JsonObject | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonObject
+    : null;
+}
+
 function groupText(group: JsonObject | null): string {
   if (group === null) {
     return "All series";
   }
   const dimension = group.dimension;
   const value = group.value;
-  const dimensionName = dimension !== null
-    && typeof dimension === "object"
-    && !Array.isArray(dimension)
-    && typeof dimension.dimension === "string"
-    ? dimension.dimension
+  const dimensionObject = jsonObject(dimension);
+  const valueObject = jsonObject(value);
+  const dimensionName = typeof dimensionObject?.dimension === "string"
+    ? dimensionObject.dimension
     : "group";
-  const groupValue = value !== null
-    && typeof value === "object"
-    && !Array.isArray(value)
-    && "value" in value
-    ? value.value
+  const groupValue = valueObject !== null && "value" in valueObject
+    ? valueObject.value
     : null;
   return `${dimensionName}: ${groupValue === null ? "Unknown" : String(groupValue)}`;
 }
