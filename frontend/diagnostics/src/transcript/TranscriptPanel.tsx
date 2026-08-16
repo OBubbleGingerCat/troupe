@@ -16,7 +16,6 @@ import {
   ToolResultRow,
   type ToolResultItem,
   selectToolResultItems,
-  toolResultElapsed,
   toolResultKey,
   toolResultScope,
   toolResultSequence,
@@ -53,12 +52,6 @@ function entryScope(entry: TranscriptEntry): DiagnosticScope {
 
 function entrySequence(entry: TranscriptEntry): U64String {
   return entry.kind === "message" ? entry.message.first_sequence : toolResultSequence(entry.item);
-}
-
-function entryElapsed(entry: TranscriptEntry): U64String {
-  return entry.kind === "message"
-    ? entry.message.latest_elapsed_ns
-    : toolResultElapsed(entry.item);
 }
 
 function groupScope(scope: DiagnosticScope): DiagnosticScope {
@@ -106,12 +99,7 @@ export function selectTranscriptModel(state: DiagnosticState): TranscriptModel {
   entries.sort((left, right) => compareSequence(entrySequence(left), entrySequence(right)));
 
   const groups = new Map<string, { scope: DiagnosticScope; entries: TranscriptEntry[] }>();
-  let observedElapsedNs: U64String = "0" as U64String;
   for (const entry of entries) {
-    const elapsed = entryElapsed(entry);
-    if (compareSequence(elapsed, observedElapsedNs) > 0) {
-      observedElapsedNs = elapsed;
-    }
     const scope = groupScope(entryScope(entry));
     const key = groupKey(scope);
     const group = groups.get(key);
@@ -131,12 +119,11 @@ export function selectTranscriptModel(state: DiagnosticState): TranscriptModel {
 
   return {
     groups: orderedGroups,
-    observedElapsedNs,
+    observedElapsedNs: edge.observed_elapsed_ns,
     messagesIncomplete: edge.projection.messages.needs_server_refresh,
     activityIncomplete: edge.projection.spans.needs_server_refresh
       || edge.projection.tools.needs_server_refresh
-      || edge.projection.results.needs_server_refresh
-      || edge.dropped_through !== null,
+      || edge.projection.results.needs_server_refresh,
   };
 }
 

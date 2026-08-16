@@ -18,6 +18,7 @@ import type {
 } from "../state/model.ts";
 import {
   eventReference,
+  hierarchyScopeReference,
   sameSelectionReference,
   spanReference,
 } from "../state/selection.ts";
@@ -129,13 +130,6 @@ export function toolResultSequence(item: ToolResultItem): U64String {
   return item.kind === "thinking" ? item.span.start.sequence : item.fact.sequence;
 }
 
-export function toolResultElapsed(item: ToolResultItem): U64String {
-  if (item.kind === "thinking") {
-    return item.span.finish?.elapsed_ns ?? item.span.start.elapsed_ns;
-  }
-  return item.fact.elapsed_ns;
-}
-
 export function toolResultKey(item: ToolResultItem): string {
   return item.kind === "thinking"
     ? `thinking:${item.span.span_id}`
@@ -243,7 +237,9 @@ function ToolFactRow({
   readonly onSelectionChange: ((selection: SelectionReference) => void) | undefined;
 }): JSX.Element {
   const { fact } = item;
-  const reference = eventReference(fact.sequence);
+  const reference = fact.tool_call_id === null
+    ? eventReference(fact.sequence)
+    : hierarchyScopeReference(fact.scope, "tool_call_id");
   const selected = sameSelectionReference(selection, reference);
   const status = fact.status ?? fact.outcome ?? fact.phase;
   const durationEnd = item.latest_for_tool

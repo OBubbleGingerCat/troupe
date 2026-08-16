@@ -23,6 +23,7 @@ import {
 } from "../../src/state/reducer.ts";
 import {
   eventReference,
+  hierarchyScopeReference,
   messageReference,
   spanReference,
 } from "../../src/state/selection.ts";
@@ -209,7 +210,7 @@ function markMessageWindowTruncated(state: DiagnosticState): DiagnosticState {
 }
 
 describe("agent transcript", () => {
-  it("renders streaming plain text and preserves native selection and scroll across deltas", () => {
+  it("renders streaming plain text and preserves diagnostic selection and scroll across deltas", () => {
     const actScope = scope("actor-a", "cue-1", "act-1");
     const firstText = "hello <strong>literal</strong>\nline";
     const completeText = `${firstText} plus`;
@@ -335,7 +336,10 @@ describe("agent transcript", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select tool finished event 7" }));
     fireEvent.click(screen.getByRole("button", { name: "Select result.rejected event 5" }));
     expect(selected).toHaveBeenNthCalledWith(1, spanReference(decodeU64("1")));
-    expect(selected).toHaveBeenNthCalledWith(2, eventReference(decodeU64("7")));
+    expect(selected).toHaveBeenNthCalledWith(
+      2,
+      hierarchyScopeReference(toolScope, "tool_call_id"),
+    );
     expect(selected).toHaveBeenNthCalledWith(3, eventReference(decodeU64("5")));
   });
 
@@ -396,5 +400,24 @@ describe("agent transcript", () => {
     expect(screen.getByTestId("message-text-message-1").textContent).toBe(
       "before pause after pause",
     );
+  });
+
+  it("advances open thinking duration from the W08 live clock", () => {
+    const actScope = scope("actor-a", "cue-1", "act-1");
+    const state = stateFrom([
+      spanStarted(1, actScope, "agent.thinking", {}),
+      {
+        ...instant(2, actScope, "actor.cast", {}),
+        elapsed_ns: decodeU64("90"),
+      },
+    ]);
+    const projectedOnlyState: DiagnosticState = {
+      ...state,
+      live: { ...state.live, events: [] },
+    };
+
+    const { container } = render(<TranscriptPanel state={projectedOnlyState} />);
+    const thinking = container.querySelector('[data-activity-kind="thinking"]') as HTMLElement;
+    expect(thinking.textContent).toContain("80 ns");
   });
 });

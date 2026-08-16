@@ -1,5 +1,4 @@
 import { MessageSquareText } from "lucide-preact";
-import { Component } from "preact";
 import type { JSX } from "preact";
 
 import type {
@@ -22,98 +21,6 @@ export interface MessageStreamItemProps {
   readonly message: ProjectedMessage;
   readonly selection: SelectionReference | null;
   readonly onSelectionChange?: ((selection: SelectionReference) => void) | undefined;
-}
-
-interface TextSelectionSnapshot {
-  readonly start: number;
-  readonly end: number;
-}
-
-interface StableMessageTextProps {
-  readonly messageId: string;
-  readonly text: string;
-}
-
-function textOffset(root: Node, node: Node, offset: number): number {
-  const range = document.createRange();
-  range.selectNodeContents(root);
-  range.setEnd(node, offset);
-  return range.toString().length;
-}
-
-function textPoint(root: Node, offset: number): readonly [Node, number] {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  let remaining = offset;
-  let node = walker.nextNode();
-  while (node !== null) {
-    const length = node.textContent?.length ?? 0;
-    if (remaining <= length) {
-      return [node, remaining];
-    }
-    remaining -= length;
-    node = walker.nextNode();
-  }
-  return [root, root.childNodes.length];
-}
-
-class StableMessageText extends Component<StableMessageTextProps, Record<never, never>> {
-  private element: HTMLPreElement | null = null;
-
-  private readonly setElement = (element: HTMLPreElement | null): void => {
-    this.element = element;
-  };
-
-  override getSnapshotBeforeUpdate(
-    previousProps: Readonly<StableMessageTextProps>,
-  ): TextSelectionSnapshot | null {
-    const root = this.element;
-    const selection = window.getSelection();
-    if (
-      root === null
-      || selection === null
-      || selection.rangeCount === 0
-      || !this.props.text.startsWith(previousProps.text)
-    ) {
-      return null;
-    }
-    const range = selection.getRangeAt(0);
-    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
-      return null;
-    }
-    return {
-      start: textOffset(root, range.startContainer, range.startOffset),
-      end: textOffset(root, range.endContainer, range.endOffset),
-    };
-  }
-
-  override componentDidUpdate(
-    _previousProps: Readonly<StableMessageTextProps>,
-    _previousState: Readonly<Record<never, never>>,
-    snapshot: TextSelectionSnapshot | null,
-  ): void {
-    const root = this.element;
-    const selection = window.getSelection();
-    if (root === null || selection === null || snapshot === null) {
-      return;
-    }
-    const start = textPoint(root, snapshot.start);
-    const end = textPoint(root, snapshot.end);
-    const range = document.createRange();
-    range.setStart(start[0], start[1]);
-    range.setEnd(end[0], end[1]);
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  render(): JSX.Element {
-    return (
-      <pre
-        ref={this.setElement}
-        class="transcript-message__text"
-        data-testid={`message-text-${this.props.messageId}`}
-      >{this.props.text}</pre>
-    );
-  }
 }
 
 function completionLabel(message: ProjectedMessage): string {
@@ -178,7 +85,10 @@ export function MessageStreamItem({
         </ul>
       )}
 
-      <StableMessageText messageId={message.message_id} text={message.text} />
+      <pre
+        class="transcript-message__text"
+        data-testid={`message-text-${message.message_id}`}
+      >{message.text}</pre>
 
       <dl class="transcript-metadata">
         <div>
