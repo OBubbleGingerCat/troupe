@@ -198,7 +198,9 @@ def test_binding_transaction_and_inactive_fast_path_are_source_frozen() -> None:
     assert "standalone: None" in production
     assert "SinkOnlyDiagnosticHub::sink_only(run_id, StandaloneReserver)" in standalone
     assert "DiagnosticRunContext::sink_only" in standalone
-    assert "CanonicalObservationBridge::sink_only_with_subscribers" in standalone
+    assert standalone.index("DiagnosticRunContext::sink_only") < standalone.index(
+        "AgentDiagnosticObserver::new"
+    )
     assert "profile: DiagnosticAdmissionProfile::SinkOnlyVolatile" in standalone
     assert all(
         marker not in standalone
