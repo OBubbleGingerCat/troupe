@@ -11,6 +11,7 @@ use pyo3::types::{
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::oneshot;
 
+use crate::diagnostic_runtime::custom_act_binding::ActTaskAuthority;
 use crate::diagnostic_runtime::scene_producer::{self, SceneHook};
 use crate::orchestration::production::Production;
 use crate::orchestration::scene_context::{
@@ -39,6 +40,7 @@ enum TaskLineageKind {
 #[derive(Clone)]
 pub(crate) struct TaskLineage {
     kind: TaskLineageKind,
+    act_authority: Option<ActTaskAuthority>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,12 +63,14 @@ impl TaskLineage {
     pub(crate) fn from_scene(scene: &Arc<SceneScope>) -> Self {
         Self {
             kind: TaskLineageKind::Scene(Arc::downgrade(scene)),
+            act_authority: None,
         }
     }
 
     pub(crate) fn from_cued(cued: &Arc<CuedScope>) -> Self {
         Self {
             kind: TaskLineageKind::Cued(Arc::downgrade(cued)),
+            act_authority: None,
         }
     }
 
@@ -82,6 +86,7 @@ impl TaskLineage {
                     phase,
                     active: Arc::clone(&active),
                 },
+                act_authority: None,
             },
             RuntimeTaskLineageGuard { active },
         )
@@ -98,6 +103,13 @@ impl TaskLineage {
     }
 
     pub(crate) fn cued(&self) -> Option<Arc<CuedScope>> {
+        if self
+            .act_authority
+            .as_ref()
+            .is_some_and(ActTaskAuthority::is_supervisor)
+        {
+            return None;
+        }
         match &self.kind {
             TaskLineageKind::Cued(cued) => cued.upgrade(),
             _ => None,
@@ -118,7 +130,7 @@ impl TaskLineage {
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        match &self.kind {
+        let base_active = match &self.kind {
             TaskLineageKind::Scene(scene) => scene.upgrade().is_some_and(|scene| scene.is_open()),
             TaskLineageKind::Cued(cued) => cued.upgrade().is_some_and(|cued| cued.is_active()),
             TaskLineageKind::Runtime {
@@ -126,13 +138,59 @@ impl TaskLineage {
             } => active.load(Ordering::Acquire) && binding.strong_count() > 0,
             #[cfg(test)]
             TaskLineageKind::Test(_) => true,
+        };
+        base_active
+            || self
+                .act_authority
+                .as_ref()
+                .is_some_and(ActTaskAuthority::active_supervisor)
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn act_authority(&self) -> Option<&ActTaskAuthority> {
+        self.act_authority.as_ref()
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn with_act_authority(&self, authority: ActTaskAuthority) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            act_authority: Some(authority),
         }
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn without_act_authority(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            act_authority: None,
+        }
+    }
+
+    pub(crate) fn for_registered_child(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            act_authority: self
+                .act_authority
+                .as_ref()
+                .map(ActTaskAuthority::for_registered_child),
+        }
+    }
+
+    #[cfg(not(test))]
+    #[allow(dead_code)] // Used only when an internal Runtime supervisor registers its task.
+    pub(crate) fn for_act_supervisor(&self) -> Option<Self> {
+        Some(Self {
+            kind: self.kind.clone(),
+            act_authority: Some(self.act_authority.as_ref()?.for_supervisor()),
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn new_for_test(id: usize) -> Self {
         Self {
             kind: TaskLineageKind::Test(id),
+            act_authority: None,
         }
     }
 
@@ -222,6 +280,34 @@ impl TaskLineageRegistry {
         }
         self.entries.remove(&key);
         Ok(None)
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn replace_if(
+        &mut self,
+        task: &Bound<'_, PyAny>,
+        expected_authority_generation: Option<u64>,
+        lineage: TaskLineage,
+    ) -> bool {
+        let key = task.as_ptr() as usize;
+        let Some(entry) = self
+            .entries
+            .get_mut(&key)
+            .filter(|entry| entry.identity.matches(task))
+        else {
+            self.entries.remove(&key);
+            return false;
+        };
+        if entry
+            .lineage
+            .act_authority()
+            .map(ActTaskAuthority::generation)
+            != expected_authority_generation
+        {
+            return false;
+        }
+        entry.lineage = lineage;
+        true
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {

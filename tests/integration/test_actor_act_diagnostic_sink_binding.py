@@ -13,6 +13,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 MOCK_AGENT = ROOT / "tests" / "support" / "mock_acp_agent.py"
 SINK_BINDING = ROOT / "rust" / "src" / "diagnostic_runtime" / "sink_binding.rs"
+CUSTOM_ACT_BINDING = (
+    ROOT / "rust" / "src" / "diagnostic_runtime" / "custom_act_binding.rs"
+)
 HARNESS_TIMEOUT = 5.0
 
 
@@ -39,7 +42,10 @@ def _between(source: str, start: str, end: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _reset_test_launch(request: pytest.FixtureRequest) -> Any:
-    if request.node.name == "test_binding_transaction_and_inactive_fast_path_are_source_frozen":
+    if request.node.name in {
+        "test_binding_transaction_and_inactive_fast_path_are_source_frozen",
+        "test_act_authority_commit_and_rollback_join_the_binding_transaction",
+    }:
         yield
         return
     _native()._agent_test_reset_launch()
@@ -237,3 +243,44 @@ def test_binding_transaction_and_inactive_fast_path_are_source_frozen() -> None:
     assert "emit_instant_without_act_subscriber" in source
     assert "subscriber_for(&self, act_id: &str)" in source
     assert "self.bound(act_id)" in source
+
+
+def test_act_authority_commit_and_rollback_join_the_binding_transaction() -> None:
+    sink = SINK_BINDING.read_text(encoding="utf-8")
+    authority = CUSTOM_ACT_BINDING.read_text(encoding="utf-8")
+    binding = _between(sink, "fn bind(", "fn admit_without_sink(")
+    success = binding[binding.index("let prepared = self.prepare") :]
+    no_sink = _between(sink, "fn admit_without_sink(", "impl DiagnosticAdmissionCapability")
+
+    ordered = (
+        "let prepared = self.prepare(run, cued, control)?",
+        "let mut prepared_authority =",
+        "if let Some(authority) = &prepared_authority",
+        "if let Some(authority) = prepared_authority.as_mut()",
+        "bind_method.call1((sink,))?",
+        "reservation.publish",
+        "prepared.commit()",
+        "if let Some(authority) = prepared_authority {",
+    )
+    positions = [success.index(fragment) for fragment in ordered]
+    assert positions == sorted(positions)
+    assert "impl Drop for PreparedActAuthority" in authority
+    rollback = _between(authority, "impl Drop for PreparedActAuthority", "pub(crate) fn prepare(")
+    assert "!self.staged || self.committed" in rollback
+    assert "Some(self.authority.generation())" in rollback
+    assert "self.original.clone()" in rollback
+
+    assert no_sink.index("act_producer::prepare_admission") < no_sink.index(
+        "custom_act_binding::prepare(py, run, cued, prepared.act_scope())?"
+    )
+    no_sink_success = no_sink[no_sink.index("let reservation =") :]
+    no_sink_ordered = (
+        "registry.reserve(act_id.as_str())?",
+        ".install_authority_expiry(prepared_authority.expiry())",
+        "prepared_authority.stage(py)?",
+        "reservation.publish",
+        "prepared.commit()",
+        "prepared_authority.commit()",
+    )
+    no_sink_positions = [no_sink_success.index(fragment) for fragment in no_sink_ordered]
+    assert no_sink_positions == sorted(no_sink_positions)

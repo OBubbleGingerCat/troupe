@@ -84,14 +84,14 @@ mod active {
         prepare_sink_tool_payload, project_act_event,
     };
     use crate::diagnostic_runtime::sink_settlement::{
-        ActAuthorityExpiry, ActAuthorityExpiryInstallError, ActSettlementError, ActSettlementSink,
-        ActSettlementSinkCommit, ActSinkSettlement,
+        ActAuthorityExpiry, ActAuthorityExpiryInstallError, ActSettlementCoordinator,
+        ActSettlementError, ActSettlementSink, ActSettlementSinkCommit, ActSinkSettlement,
     };
     use crate::diagnostic_runtime::usage_finalization::{
         UsageFinalizationFailureOwner, UsageFinalizingObservationBridge,
         UsageObservationDisposition,
     };
-    use crate::diagnostic_runtime::{act_producer, runtime_producer};
+    use crate::diagnostic_runtime::{act_producer, custom_act_binding, runtime_producer};
     use crate::diagnostic_sink::{
         ActOutcome, AdmissionClass, AdmissionOutcome, DiagnosticSinkRuntime, DispatchEvent,
         SinkDeliveryFailure, SinkHandle,
@@ -282,6 +282,8 @@ mod active {
                 .act_id()
                 .expect("a prepared Act has an Act ID")
                 .clone();
+            let mut prepared_authority =
+                custom_act_binding::prepare(py, run, cued, prepared.act_scope())?;
             let reservation = self.state.registry.reserve(act_id.as_str())?;
             let callback = sink.getattr("on_event")?.unbind();
             let handle = self
@@ -308,6 +310,9 @@ mod active {
                 state: Arc::downgrade(&self.state),
                 capture,
                 act_scope: prepared.act_scope().clone(),
+                authority: prepared_authority
+                    .as_ref()
+                    .map(custom_act_binding::PreparedActAuthority::authority),
                 request: request.clone_ref(py),
                 handle,
                 payload: Mutex::new(PayloadState::default()),
@@ -316,6 +321,11 @@ mod active {
                 settlement,
                 terminal_enqueued: AtomicBool::new(false),
             });
+            if let Some(authority) = &prepared_authority {
+                subscriber
+                    .install_authority_expiry(authority.expiry())
+                    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            }
 
             let standalone_observer = self
                 .state
@@ -339,6 +349,9 @@ mod active {
                     PyRuntimeError::new_err(format!("attach diagnostic sink context: {error}"))
                 })?;
 
+            if let Some(authority) = prepared_authority.as_mut() {
+                authority.stage(py)?;
+            }
             // This is the exact base method under its exact RLock after an UNBOUND check, so no
             // user override or competing bind can introduce a fallible semantic transition here.
             bind_method.call1((sink,))?;
@@ -347,6 +360,9 @@ mod active {
             // ActCall control in the prepared producer. Its defensive registry-race branch is
             // therefore unreachable on this valid path, so commit cannot follow a half-publish.
             prepared.commit();
+            if let Some(authority) = prepared_authority {
+                authority.commit();
+            }
             if let Some(resources) = &self.state.standalone {
                 match resources.usage.bind_act(act_id.as_str()) {
                     Ok(UsageObservationDisposition::LateIgnored) => {
@@ -368,6 +384,47 @@ mod active {
                     }
                 }
             }
+            Ok(())
+        }
+
+        fn admit_without_sink(
+            &self,
+            py: Python<'_>,
+            run: &RunBinding,
+            cued: &Arc<CuedScope>,
+            control: &Arc<AgentTurnControl>,
+        ) -> PyResult<()> {
+            let Some(prepared) = act_producer::prepare_admission(run, cued, control, None)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            else {
+                return Ok(());
+            };
+            let act_id = prepared
+                .act_scope()
+                .act_id()
+                .expect("a prepared Act has an Act ID")
+                .clone();
+            let Some(mut prepared_authority) =
+                custom_act_binding::prepare(py, run, cued, prepared.act_scope())?
+            else {
+                prepared.commit();
+                return Ok(());
+            };
+            let reservation = self.state.registry.reserve(act_id.as_str())?;
+            let coordinator = ActSettlementCoordinator::new();
+            coordinator
+                .install_authority_expiry(prepared_authority.expiry())
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            let subscriber = Arc::new(AuthorityOnlySubscriber {
+                state: Arc::downgrade(&self.state),
+                act_id,
+                authority: prepared_authority.authority(),
+                coordinator,
+            });
+            prepared_authority.stage(py)?;
+            reservation.publish(Arc::clone(&subscriber));
+            prepared.commit();
+            prepared_authority.commit();
             Ok(())
         }
     }
@@ -395,11 +452,7 @@ mod active {
         ) -> PyResult<()> {
             if !binding.is_active() {
                 if self.state.profile == DiagnosticAdmissionProfile::ProductionDurable {
-                    let prepared = act_producer::prepare_admission(run, cued, control, None)
-                        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                    if let Some(prepared) = prepared {
-                        prepared.commit();
-                    }
+                    return self.admit_without_sink(py, run, cued, control);
                 }
                 return Ok(());
             }
@@ -601,6 +654,7 @@ mod active {
     enum RegistryEntry {
         Reserved,
         Bound(Arc<ActSinkSubscriber>),
+        Authority(Arc<AuthorityOnlySubscriber>),
     }
 
     impl ActSinkRegistry {
@@ -622,7 +676,7 @@ mod active {
         fn bound(&self, act_id: &str) -> Option<Arc<ActSinkSubscriber>> {
             match lock(&self.entries).get(act_id) {
                 Some(RegistryEntry::Bound(value)) => Some(Arc::clone(value)),
-                Some(RegistryEntry::Reserved) | None => None,
+                Some(RegistryEntry::Reserved | RegistryEntry::Authority(_)) | None => None,
             }
         }
 
@@ -631,9 +685,21 @@ mod active {
                 .values()
                 .filter_map(|entry| match entry {
                     RegistryEntry::Bound(value) => Some(Arc::clone(value)),
-                    RegistryEntry::Reserved => None,
+                    RegistryEntry::Reserved | RegistryEntry::Authority(_) => None,
                 })
                 .collect()
+        }
+
+        fn subscriber(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>> {
+            match lock(&self.entries).get(act_id) {
+                Some(RegistryEntry::Bound(value)) => {
+                    Some(Arc::clone(value) as Arc<dyn ActEventSubscriber>)
+                }
+                Some(RegistryEntry::Authority(value)) => {
+                    Some(Arc::clone(value) as Arc<dyn ActEventSubscriber>)
+                }
+                Some(RegistryEntry::Reserved) | None => None,
+            }
         }
 
         fn contains_bound_sink(&self, act_id: &str, sink_id: u64) -> bool {
@@ -656,6 +722,20 @@ mod active {
             expected
         }
 
+        fn retire_authority_expected(&self, act_id: &str, generation: u64) -> bool {
+            let mut entries = lock(&self.entries);
+            let expected = matches!(
+                entries.get(act_id),
+                Some(RegistryEntry::Authority(subscriber))
+                    if subscriber.authority.generation() == generation
+            );
+            if expected {
+                let removed = entries.remove(act_id);
+                debug_assert!(matches!(removed, Some(RegistryEntry::Authority(_))));
+            }
+            expected
+        }
+
         fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
             for entry in lock(&self.entries).values() {
                 if let RegistryEntry::Bound(subscriber) = entry {
@@ -668,8 +748,7 @@ mod active {
 
     impl DiagnosticActSubscriberLookup for ActSinkRegistry {
         fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>> {
-            self.bound(act_id)
-                .map(|subscriber| subscriber as Arc<dyn ActEventSubscriber>)
+            self.subscriber(act_id)
         }
 
         fn deliver_tool_payload(&self, act_id: &str, payload: &SinkOnlyToolPayload) {
@@ -685,10 +764,22 @@ mod active {
         published: bool,
     }
 
+    impl From<Arc<ActSinkSubscriber>> for RegistryEntry {
+        fn from(value: Arc<ActSinkSubscriber>) -> Self {
+            Self::Bound(value)
+        }
+    }
+
+    impl From<Arc<AuthorityOnlySubscriber>> for RegistryEntry {
+        fn from(value: Arc<AuthorityOnlySubscriber>) -> Self {
+            Self::Authority(value)
+        }
+    }
+
     impl SubscriberReservation<'_> {
-        fn publish(mut self, subscriber: Arc<ActSinkSubscriber>) {
-            let replaced = lock(&self.registry.entries)
-                .insert(self.act_id.clone(), RegistryEntry::Bound(subscriber));
+        fn publish(mut self, subscriber: impl Into<RegistryEntry>) {
+            let replaced =
+                lock(&self.registry.entries).insert(self.act_id.clone(), subscriber.into());
             debug_assert!(matches!(replaced, Some(RegistryEntry::Reserved)));
             self.published = true;
         }
@@ -703,10 +794,46 @@ mod active {
         }
     }
 
+    struct AuthorityOnlySubscriber {
+        state: Weak<CapabilityState>,
+        act_id: RunLocalId,
+        authority: custom_act_binding::ActAuthority,
+        coordinator: Arc<ActSettlementCoordinator>,
+    }
+
+    impl ActEventSubscriber for AuthorityOnlySubscriber {
+        fn deliver(&self, event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure> {
+            self.authority.observe(&event);
+            if !matches!(event.event(), DiagnosticEvent::SpanFinished(_))
+                || event.built_in_span_kind() != Some(SpanKind::ActLifecycle)
+            {
+                return Ok(());
+            }
+            let Some(state) = self.state.upgrade() else {
+                return Err(DeliveryFailure::new(SINK_SETTLEMENT_FAILED));
+            };
+            if let Err(error) = self.coordinator.settle_authority_only() {
+                state.failure_owner.latch_state_failure(error.code());
+                return Err(DeliveryFailure::new(SINK_SETTLEMENT_FAILED));
+            }
+            if !state
+                .registry
+                .retire_authority_expected(self.act_id.as_str(), self.authority.generation())
+            {
+                state
+                    .failure_owner
+                    .latch_state_failure("act.authority-retire-missing");
+                return Err(DeliveryFailure::new(SINK_SETTLEMENT_FAILED));
+            }
+            Ok(())
+        }
+    }
+
     struct ActSinkSubscriber {
         state: Weak<CapabilityState>,
         capture: DiagnosticCaptureConfig,
         act_scope: DiagnosticScope,
+        authority: Option<custom_act_binding::ActAuthority>,
         request: Py<PyAny>,
         handle: SinkHandle,
         payload: Mutex<PayloadState>,
@@ -948,6 +1075,9 @@ mod active {
 
     impl ActEventSubscriber for ActSinkSubscriber {
         fn deliver(&self, event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure> {
+            if let Some(authority) = &self.authority {
+                authority.observe(&event);
+            }
             self.deliver_projected(event)
         }
     }

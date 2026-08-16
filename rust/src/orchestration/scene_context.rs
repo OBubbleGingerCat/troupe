@@ -896,7 +896,7 @@ impl RunBinding {
         self.factory_replaced.store(true, Ordering::Release);
     }
 
-    fn current_task<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    pub(crate) fn current_task<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("loop", self.event_loop.bind(py))?;
         let task = self.current_task_lookup.bind(py).call((), Some(&kwargs))?;
@@ -976,6 +976,16 @@ impl RunBinding {
         lock(&self.tasks).register(task, lineage)
     }
 
+    #[cfg(not(test))]
+    pub(crate) fn replace_task_lineage_if(
+        &self,
+        task: &Bound<'_, PyAny>,
+        expected_authority_generation: Option<u64>,
+        lineage: TaskLineage,
+    ) -> bool {
+        lock(&self.tasks).replace_if(task, expected_authority_generation, lineage)
+    }
+
     fn unregister_task(&self, task: &Bound<'_, PyAny>) {
         lock(&self.tasks).unregister(task);
     }
@@ -1015,7 +1025,10 @@ impl RunBinding {
         let exact_lineage = self.permits.consume_exact(coroutine);
         let lineage = match exact_lineage {
             Some(lineage) => Some(lineage),
-            None => self.current_lineage(py)?.filter(TaskLineage::is_active),
+            None => self
+                .current_lineage(py)?
+                .filter(TaskLineage::is_active)
+                .map(|lineage| lineage.for_registered_child()),
         };
         let delegate_permit = lineage
             .as_ref()
