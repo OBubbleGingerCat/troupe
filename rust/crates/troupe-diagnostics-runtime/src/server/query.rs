@@ -234,9 +234,17 @@ impl QueryEndpoints {
             .and_then(|()| parse_event_query(&request))
             .and_then(|query| {
                 let result = self.with_capture(|source, _active| {
-                    encode_events_response(self.run_id, source, query)
+                    if let Err(error) =
+                        validate_event_query_head(query, source.captured_watermark())
+                    {
+                        return Ok(Err(error));
+                    }
+                    encode_events_response(self.run_id, source, query).map(Ok)
                 });
-                self.finish_operation(QueryEndpointKind::Events, result)
+                match result {
+                    Ok(result) => result,
+                    Err(error) => self.finish_operation(QueryEndpointKind::Events, Err(error)),
+                }
             });
         self.finish(result)
     }
@@ -906,6 +914,7 @@ fn validate_no_query(request: &RouteRequest) -> Result<(), ClientError> {
 fn parse_event_query(request: &RouteRequest) -> Result<FiniteEventQuery, ClientError> {
     let mut after = None;
     let mut tail = None;
+    let mut through = None;
     let Some(query) = request.uri().query().filter(|query| !query.is_empty()) else {
         return Ok(FiniteEventQuery::tail(SchemaU64::new(DEFAULT_EVENT_TAIL)));
     };
@@ -923,7 +932,8 @@ fn parse_event_query(request: &RouteRequest) -> Result<FiniteEventQuery, ClientE
         match name {
             "after" if after.is_none() => after = Some(parse_cursor(value)?),
             "tail" if tail.is_none() => tail = Some(parse_cursor(value)?),
-            "after" | "tail" => return Err(invalid_query()),
+            "through" if through.is_none() => through = Some(parse_cursor(value)?),
+            "after" | "tail" | "through" => return Err(invalid_query()),
             "format" => {
                 return Err(ClientError::new(
                     StatusCode::NOT_ACCEPTABLE,
@@ -934,16 +944,43 @@ fn parse_event_query(request: &RouteRequest) -> Result<FiniteEventQuery, ClientE
             _ => return Err(invalid_query()),
         }
     }
-    match (after, tail) {
-        (Some(_), Some(_)) => Err(ClientError::new(
+    match (after, tail, through) {
+        (Some(_), Some(_), _) | (_, Some(_), Some(_)) => Err(ClientError::new(
             StatusCode::BAD_REQUEST,
             "conflicting_event_query",
-            "after and tail are mutually exclusive",
+            "after/tail and tail/through are mutually exclusive",
         )),
-        (Some(after), None) => Ok(FiniteEventQuery::after(after)),
-        (None, Some(tail)) => Ok(FiniteEventQuery::tail(tail)),
-        (None, None) => Ok(FiniteEventQuery::tail(SchemaU64::new(DEFAULT_EVENT_TAIL))),
+        (Some(after), None, Some(through)) if after.get() <= through.get() => {
+            Ok(FiniteEventQuery::range(after, through))
+        }
+        (Some(_), None, Some(_)) => Err(invalid_event_range()),
+        (None, None, Some(_)) => Err(invalid_query()),
+        (Some(after), None, None) => Ok(FiniteEventQuery::after(after)),
+        (None, Some(tail), None) => Ok(FiniteEventQuery::tail(tail)),
+        (None, None, None) => Ok(FiniteEventQuery::tail(SchemaU64::new(DEFAULT_EVENT_TAIL))),
     }
+}
+
+fn validate_event_query_head(
+    query: FiniteEventQuery,
+    captured_watermark: SchemaU64,
+) -> Result<(), ClientError> {
+    if let FiniteEventQuery::Range {
+        through_inclusive, ..
+    } = query
+        && through_inclusive.get() > captured_watermark.get()
+    {
+        return Err(invalid_event_range());
+    }
+    Ok(())
+}
+
+const fn invalid_event_range() -> ClientError {
+    ClientError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_cursor",
+        "event range must satisfy after <= through <= captured watermark",
+    )
 }
 
 fn parse_cursor(value: &str) -> Result<SchemaU64, ClientError> {
