@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_cli_events_finite.rs",
+    "tests/fixtures/diagnostics/cli/events-human.txt",
+    "tests/fixtures/diagnostics/cli/events-v1.jsonl",
+    "tests/integration/test_diagnostic_cli_events.py"
+  ],
+  "modified": [
+    "rust/src/application/diagnostic_cli/events_finite.rs"
+  ],
   "removed": [],
   "generated": []
 }
