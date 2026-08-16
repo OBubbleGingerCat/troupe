@@ -55,6 +55,7 @@ const CURSOR_KEY: [u8; 32] = [0x6d; 32];
 
 const TIMELINE_RECORD: &[u8] = br#"{"renderer":"timeline","view_schema_version":1,"id":"timeline_view","title":"Timeline","time_range":"run","scope":"run","query":{"source":{"source":"instant","selector":{"selector":"built_in","kind":"cue.admitted"}},"filters":[],"group_by":null}}"#;
 const METRIC_RECORD: &[u8] = br#"{"renderer":"metric","view_schema_version":1,"id":"metric_view","title":"Metric","time_range":"run","scope":"run","query":{"source":{"source":"instant_count","selector":{"selector":"built_in","kind":"cue.admitted"}},"filters":[],"group_by":null,"reducer":"count"}}"#;
+const FUTURE_METRIC_RECORD: &[u8] = br#"{"renderer":"metric","view_schema_version":1,"id":"future_view","title":"Future metric","time_range":"run","scope":"run","query":{"source":{"source":"instant_count","selector":{"selector":"built_in","kind":"cue.admitted"}},"filters":[],"group_by":null,"reducer":"count"}}"#;
 const SELECTION_METRIC_RECORD: &[u8] = br#"{"renderer":"metric","view_schema_version":1,"id":"selection_metric_view","title":"Selection metric","time_range":"run","scope":"selection","query":{"source":{"source":"instant_count","selector":{"selector":"built_in","kind":"cue.admitted"}},"filters":[],"group_by":null,"reducer":"count"}}"#;
 const TABLE_RECORD: &[u8] = br#"{"renderer":"table","view_schema_version":1,"id":"table_view","title":"Table","time_range":"run","scope":"run","query":{"source":{"source":"event","kind":"instant_occurred"},"filters":[],"columns":[{"column":"sequence"},{"column":"elapsed_ns"}],"page_size":1}}"#;
 const TIME_SERIES_RECORD: &[u8] = br#"{"renderer":"time_series","view_schema_version":1,"id":"timeseries_view","title":"Time series","time_range":"run","scope":"run","query":{"source":{"source":"instant_count","selector":{"selector":"built_in","kind":"cue.admitted"}},"filters":[],"group_by":null,"reducer":"count"}}"#;
@@ -165,6 +166,24 @@ fn build_run_with_elapsed(
     label: &str,
     elapsed_values: &[u64],
 ) -> (TestRunDirectory, Arc<ActiveArchiveLease>) {
+    build_run_with_records(
+        label,
+        elapsed_values,
+        &[
+            TIMELINE_RECORD,
+            METRIC_RECORD,
+            SELECTION_METRIC_RECORD,
+            TABLE_RECORD,
+            TIME_SERIES_RECORD,
+        ],
+    )
+}
+
+fn build_run_with_records(
+    label: &str,
+    elapsed_values: &[u64],
+    records: &[&[u8]],
+) -> (TestRunDirectory, Arc<ActiveArchiveLease>) {
     let directory = TestRunDirectory::new(label);
     let lease = Arc::new(ActiveArchiveLease::acquire(directory.path()).expect("active lease"));
     let store = DiagnosticStore::create(
@@ -183,14 +202,8 @@ fn build_run_with_elapsed(
         .expect("commit view fixture events");
     drop(writer);
 
-    let compiled = CompiledViewSet::from_json_records([
-        TIMELINE_RECORD,
-        METRIC_RECORD,
-        SELECTION_METRIC_RECORD,
-        TABLE_RECORD,
-        TIME_SERIES_RECORD,
-    ])
-    .expect("compile canonical test view records");
+    let compiled = CompiledViewSet::from_json_records(records.iter().copied())
+        .expect("compile canonical test view records");
     persist_view_set(directory.path(), run_id(), &compiled).expect("persist test views");
     (directory, lease)
 }
@@ -361,6 +374,14 @@ fn fixture(name: &str) -> &'static [u8] {
             env!("CARGO_MANIFEST_DIR"),
             "/../../../tests/fixtures/diagnostics/http/view-error-v1.json"
         )),
+        "view-catalog-v1.json" => include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/diagnostics/http/view-catalog-v1.json"
+        )),
+        "view-catalog-archive-v1.json" => include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../tests/fixtures/diagnostics/http/view-catalog-archive-v1.json"
+        )),
         _ => panic!("unknown H03 fixture {name}"),
     }
 }
@@ -420,6 +441,67 @@ fn percent_encode(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[test]
+fn active_archive_and_empty_catalogs_are_exact_and_queryless() {
+    let (_directory, lease) = build_run_with_records("catalog-active", &[1], &[TIMELINE_RECORD]);
+    let server = start_server(test_active_endpoint(lease).route_definitions().unwrap());
+    assert_golden(
+        &request(
+            &server,
+            "GET",
+            &format!("{BASE_PATH}/api/v1/views"),
+            &[("Accept", "application/json")],
+        ),
+        "view-catalog-v1.json",
+    );
+    assert_error(
+        &request(
+            &server,
+            "GET",
+            &format!("{BASE_PATH}/api/v1/views?page_size=1"),
+            &[],
+        ),
+        400,
+        "invalid_view_query",
+    );
+    server.shutdown().unwrap();
+
+    let (_directory, lease) = build_run_with_records("catalog-empty", &[1], &[]);
+    let server = start_server(test_active_endpoint(lease).route_definitions().unwrap());
+    let empty = request(&server, "GET", &format!("{BASE_PATH}/api/v1/views"), &[]);
+    assert_eq!(empty.status, 200);
+    assert_json_headers(&empty);
+    assert_eq!(empty.json()["views"], serde_json::json!([]));
+    server.shutdown().unwrap();
+
+    let (directory, lease) = build_run_with_records(
+        "catalog-archive",
+        &[1],
+        &[TIMELINE_RECORD, FUTURE_METRIC_RECORD],
+    );
+    let connection = Connection::open(directory.database_path()).unwrap();
+    replace_manifest_version(&connection, "future_view", 1, 2);
+    connection
+        .execute(
+            "UPDATE diagnostic_view_records SET view_schema_version = 2, record_json = ?1 \
+             WHERE view_id = 'future_view'",
+            params![b"opaque future bytes".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    drop(lease);
+    let server = start_server(
+        ViewEndpoints::archive(run_id(), directory.path(), engine())
+            .route_definitions()
+            .unwrap(),
+    );
+    assert_golden(
+        &request(&server, "GET", &format!("{BASE_PATH}/api/v1/views"), &[]),
+        "view-catalog-archive-v1.json",
+    );
+    server.shutdown().unwrap();
 }
 
 #[test]
@@ -674,7 +756,7 @@ fn pagination_binding_and_width_inputs_are_closed_and_tamper_resistant() {
     server.shutdown().unwrap();
 }
 
-fn replace_manifest_version(connection: &Connection, old: u8, new: u8) {
+fn replace_manifest_version(connection: &Connection, view_id: &str, old: u8, new: u8) {
     let bytes = connection
         .query_row(
             "SELECT manifest_json FROM diagnostic_view_manifest WHERE singleton = 1",
@@ -683,10 +765,18 @@ fn replace_manifest_version(connection: &Connection, old: u8, new: u8) {
         )
         .unwrap();
     let text = String::from_utf8(bytes).unwrap();
+    let identity = format!("\"id\":\"{view_id}\"");
+    let identity_offset = text.find(&identity).expect("manifest view identity");
     let old = format!("\"view_schema_version\":{old}");
-    let new = format!("\"view_schema_version\":{new}");
-    let replaced = text.replacen(&old, &new, 1);
-    assert_ne!(replaced, text);
+    let version_offset = text[identity_offset..]
+        .find(&old)
+        .map(|offset| identity_offset + offset)
+        .expect("manifest view schema version");
+    let mut replaced = text;
+    replaced.replace_range(
+        version_offset..version_offset + old.len(),
+        &format!("\"view_schema_version\":{new}"),
+    );
     connection
         .execute(
             "UPDATE diagnostic_view_manifest SET manifest_json = ?1 WHERE singleton = 1",
@@ -700,24 +790,16 @@ fn archive_newer_and_corrupt_views_are_panel_local() {
     let (directory, lease) = build_run("archive-incompatible");
     let marker = directory.path().join("stored-content-executed");
     let connection = Connection::open(directory.database_path()).unwrap();
-    replace_manifest_version(&connection, 1, 2);
-    let future = serde_json::to_vec(&serde_json::json!({
-        "renderer": "timeline",
-        "view_schema_version": 2,
-        "id": "timeline_view",
-        "title": "<script>stored text only</script>",
-        "time_range": "run",
-        "scope": "run",
-        "query": {
-            "python": format!("write({:?})", marker.display().to_string()),
-        },
-    }))
-    .unwrap();
+    replace_manifest_version(&connection, "timeline_view", 1, 2);
+    let future = format!(
+        "not-json opaque future bytes containing inert path {:?}",
+        marker.display().to_string()
+    );
     connection
         .execute(
             "UPDATE diagnostic_view_records SET view_schema_version = 2, record_json = ?1 \
              WHERE view_id = 'timeline_view'",
-            params![future],
+            params![future.as_bytes()],
         )
         .unwrap();
     connection

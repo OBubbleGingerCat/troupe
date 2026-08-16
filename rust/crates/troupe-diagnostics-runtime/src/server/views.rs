@@ -20,9 +20,9 @@ use troupe_diagnostics_core::{
     scalar::SchemaU64,
     view_protocol::{
         API_SCHEMA_VERSION, Coverage, CoverageStatus, ExcludedCounts, IncompatibilityReason,
-        IncompatibleView, MAX_PAGE_ROWS, OpaqueCursor, Pagination, QueryBinding, Renderer,
-        ResultMetadata, ScopeMode, TableColumn, TimeRangeMode, ViewRecord, ViewResponse,
-        expected_bucket_width_ns,
+        IncompatibleView, MAX_PAGE_ROWS, OpaqueCursor, OperationalCapabilities, Pagination,
+        QueryBinding, Renderer, ResultMetadata, ScopeMode, TableColumn, TimeRangeMode, ViewRecord,
+        ViewResponse, expected_bucket_width_ns,
     },
 };
 
@@ -352,6 +352,36 @@ impl Default for ViewRequestControl {
     }
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+enum HttpViewResponse {
+    Catalog(ViewCatalogResponse),
+    Query(Box<ViewResponse>),
+}
+
+#[derive(Serialize)]
+struct ViewCatalogResponse {
+    api_schema_version: u8,
+    run_id: CanonicalUuid,
+    capabilities: OperationalCapabilities,
+    views: Vec<ViewCatalogEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ViewCatalogEntry {
+    Compatible(ViewRecord),
+    Incompatible(IncompatibleCatalogEntry),
+}
+
+#[derive(Serialize)]
+struct IncompatibleCatalogEntry {
+    status: &'static str,
+    view_id: String,
+    renderer: Renderer,
+    incompatible: IncompatibleView,
+}
+
 #[derive(Clone)]
 enum ViewTarget {
     Active {
@@ -437,12 +467,23 @@ impl ViewEndpoints {
 
     pub fn handle_query(&self, request: RouteRequest) -> RouteResponse {
         let result = validate_json_request(&request)
-            .and_then(|()| parse_http_query(&request))
             .map_err(HttpFailure::Client)
-            .and_then(|request| {
+            .and_then(|()| {
                 let control = ViewRequestControl::with_timeout(self.request_timeout);
-                self.execute_http(&request, &control)
-                    .map_err(HttpFailure::Operation)
+                if request.uri().query().is_none() {
+                    self.execute_catalog(&control)
+                        .map(HttpViewResponse::Catalog)
+                        .map_err(HttpFailure::Operation)
+                } else {
+                    parse_http_query(&request)
+                        .map_err(HttpFailure::Client)
+                        .and_then(|request| {
+                            self.execute_http(&request, &control)
+                                .map(Box::new)
+                                .map(HttpViewResponse::Query)
+                                .map_err(HttpFailure::Operation)
+                        })
+                }
             });
         match result {
             Ok(response) => match serde_json::to_vec(&response) {
@@ -500,6 +541,41 @@ impl ViewEndpoints {
                 }
             };
             self.execute_stored(source, stored, &query, control)
+        })
+    }
+
+    fn execute_catalog(
+        &self,
+        control: &ViewRequestControl,
+    ) -> Result<ViewCatalogResponse, ViewEndpointError> {
+        control.check()?;
+        self.with_capture(|source| {
+            control.check()?;
+            let catalog = load_stored_view_records(source)?;
+            let mut views = Vec::with_capacity(catalog.views().len());
+            for stored in catalog.views() {
+                let entry = match stored.availability() {
+                    StoredViewAvailability::Compatible(record) => {
+                        ViewCatalogEntry::Compatible(record.clone())
+                    }
+                    StoredViewAvailability::Unavailable(reason) => {
+                        ViewCatalogEntry::Incompatible(IncompatibleCatalogEntry {
+                            status: "incompatible",
+                            view_id: stored.id().to_owned(),
+                            renderer: stored.renderer(),
+                            incompatible: stored_incompatibility(source, stored, *reason)?,
+                        })
+                    }
+                };
+                views.push(entry);
+            }
+            control.check()?;
+            Ok(ViewCatalogResponse {
+                api_schema_version: API_SCHEMA_VERSION,
+                run_id: source.metadata().run_id(),
+                capabilities: OperationalCapabilities::default(),
+                views,
+            })
         })
     }
 
@@ -624,15 +700,7 @@ fn incompatible_response(
         SchemaU64::new(0),
     )
     .map_err(|_| ViewEndpointError::ProtocolInvariant { profile })?;
-    let incompatible = match reason {
-        IncompatibilityReason::NewerViewSchema => {
-            IncompatibleView::newer(stored.record_view_schema_version())
-        }
-        IncompatibilityReason::CorruptRecord => {
-            IncompatibleView::corrupt(Some(stored.record_view_schema_version()))
-        }
-    }
-    .map_err(|_| ViewEndpointError::ProtocolInvariant { profile })?;
+    let incompatible = stored_incompatibility(source, stored, reason)?;
     let pagination = matches!(stored.renderer(), Renderer::Timeline | Renderer::Table)
         .then(|| Pagination::new(MAX_PAGE_ROWS, None))
         .transpose()
@@ -665,6 +733,25 @@ fn incompatible_response(
         .validate()
         .map_err(|_| ViewEndpointError::ProtocolInvariant { profile })?;
     Ok(response)
+}
+
+fn stored_incompatibility(
+    source: &CapturedEventSource<'_>,
+    stored: &StoredViewRecord,
+    reason: IncompatibilityReason,
+) -> Result<IncompatibleView, ViewEndpointError> {
+    let incompatible = match reason {
+        IncompatibilityReason::NewerViewSchema => {
+            IncompatibleView::newer(stored.record_view_schema_version())
+        }
+        IncompatibilityReason::CorruptRecord => {
+            IncompatibleView::corrupt(Some(stored.record_view_schema_version()))
+        }
+    }
+    .map_err(|_| ViewEndpointError::ProtocolInvariant {
+        profile: source.profile(),
+    })?;
+    Ok(incompatible)
 }
 
 fn captured_elapsed_end_ns(source: &CapturedEventSource<'_>) -> Result<u64, ViewEndpointError> {

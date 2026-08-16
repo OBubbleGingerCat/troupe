@@ -454,6 +454,20 @@ fn read_record(
             IncompatibilityReason::CorruptRecord,
         ));
     }
+    *total_record_bytes = next_total;
+    match entry.view_schema_version().cmp(&VIEW_SCHEMA_VERSION) {
+        std::cmp::Ordering::Greater => {
+            return Ok(StoredViewAvailability::Unavailable(
+                IncompatibilityReason::NewerViewSchema,
+            ));
+        }
+        std::cmp::Ordering::Less => {
+            return Ok(StoredViewAvailability::Unavailable(
+                IncompatibilityReason::CorruptRecord,
+            ));
+        }
+        std::cmp::Ordering::Equal => {}
+    }
 
     let encoded = source
         .transaction()
@@ -465,7 +479,6 @@ fn read_record(
         .map_err(|error| {
             ArchiveViewLoadError::sqlite(profile, ArchiveViewLoadErrorCode::RecordRead, error)
         })?;
-    *total_record_bytes = next_total;
     Ok(classify_record(entry, &encoded))
 }
 
@@ -493,14 +506,8 @@ fn classify_record(entry: &ViewManifestEntry, encoded: &[u8]) -> StoredViewAvail
                 StoredViewAvailability::Unavailable(IncompatibilityReason::CorruptRecord)
             }
         }
-        ArchivedViewRecordStatus::Incompatible(reason) => {
-            if reason == IncompatibilityReason::NewerViewSchema
-                && version.is_some_and(|version| version > u64::from(VIEW_SCHEMA_VERSION))
-            {
-                StoredViewAvailability::Unavailable(IncompatibilityReason::NewerViewSchema)
-            } else {
-                StoredViewAvailability::Unavailable(IncompatibilityReason::CorruptRecord)
-            }
+        ArchivedViewRecordStatus::Incompatible(_) => {
+            StoredViewAvailability::Unavailable(IncompatibilityReason::CorruptRecord)
         }
     }
 }
@@ -701,23 +708,12 @@ mod tests {
         let marker = directory.path().join("embedded-content-executed");
         let connection = Connection::open(directory.database_path()).expect("open test database");
 
-        let future = serde_json::to_vec(&json!({
-            "renderer": "timeline",
-            "view_schema_version": 2,
-            "id": "future",
-            "title": "<script>write_marker()</script>",
-            "time_range": "run",
-            "scope": "run",
-            "query": {
-                "python": format!(
-                    "__import__('pathlib').Path({:?}).write_text('bad')",
-                    marker.display().to_string()
-                )
-            }
-        }))
-        .expect("encode future opaque record");
+        let future = format!(
+            "not-json future opaque bytes containing inert path {:?}",
+            marker.display().to_string()
+        );
         update_manifest_version(&connection, 1, 2);
-        replace_record(&connection, "future", 2, &future);
+        replace_record(&connection, "future", 2, future.as_bytes());
 
         let broken = serde_json::to_vec(&json!({
             "renderer": "timeline",
