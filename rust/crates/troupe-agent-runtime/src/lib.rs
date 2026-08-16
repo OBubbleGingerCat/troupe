@@ -25,7 +25,7 @@ pub use diagnostics::observer::{
     AgentDiagnosticCandidate, AgentDiagnosticDestination, AgentDiagnosticErrorCode,
     AgentDiagnosticFailureOwner, AgentDiagnosticObservation, AgentDiagnosticObservationKind,
     AgentDiagnosticObserver, AgentDiagnosticObserverFailure, AgentDiagnosticObserverInstallError,
-    AgentTurnDiagnosticSettlement,
+    AgentTurnDiagnosticOutcome, AgentTurnDiagnosticSettlement,
 };
 pub use diagnostics::payload::ToolPayloadCapturePolicy;
 pub use diagnostics::session::{

@@ -4,7 +4,10 @@ use agent_client_protocol::schema::v1::{PromptResponse, Usage};
 pub use troupe_diagnostics_core::kinds::{UsageAvailability, UsageSource, UsageUnavailableReason};
 pub use troupe_diagnostics_core::scalar::TokenCount;
 
-use super::observer::{AgentDiagnosticCandidate, AgentDiagnosticObservation};
+use super::observer::{
+    AgentDiagnosticCandidate, AgentDiagnosticErrorCode, AgentDiagnosticObservation,
+    AgentTurnDiagnosticOutcome,
+};
 use super::session::{AgentDiagnosticProvider, AgentTurnDiagnosticMetadata, TurnDiagnosticContext};
 use crate::adapter::{AcpAgentAdapter, agent_adapter};
 use crate::launch::{AcpWireProtocolVersion, LaunchRunner};
@@ -341,8 +344,11 @@ pub(crate) enum TurnTerminalSettlement {
     Unknown,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct TurnTerminalObservation<'a> {
     pub(crate) settlement: TurnTerminalSettlement,
+    pub(crate) outcome: AgentTurnDiagnosticOutcome,
+    pub(crate) error_code: Option<AgentDiagnosticErrorCode>,
     pub(crate) response: Option<&'a PromptResponse>,
     pub(crate) adapter: Option<&'static dyn AcpAgentAdapter>,
 }
@@ -351,6 +357,8 @@ impl TurnTerminalObservation<'_> {
     pub(crate) const fn not_submitted() -> Self {
         Self {
             settlement: TurnTerminalSettlement::NotSubmitted,
+            outcome: AgentTurnDiagnosticOutcome::Cancelled,
+            error_code: Some(AgentDiagnosticErrorCode::new("prompt_not_submitted")),
             response: None,
             adapter: None,
         }
@@ -362,6 +370,8 @@ impl TurnTerminalObservation<'_> {
     ) -> TurnTerminalObservation<'a> {
         TurnTerminalObservation {
             settlement: TurnTerminalSettlement::Authoritative,
+            outcome: terminal_outcome(response.stop_reason),
+            error_code: terminal_error_code(response.stop_reason),
             response: Some(response),
             adapter: Some(adapter),
         }
@@ -372,6 +382,8 @@ impl TurnTerminalObservation<'_> {
     ) -> Self {
         Self {
             settlement: TurnTerminalSettlement::Authoritative,
+            outcome: AgentTurnDiagnosticOutcome::Failed,
+            error_code: Some(AgentDiagnosticErrorCode::new("request_failed")),
             response: None,
             adapter: Some(adapter),
         }
@@ -380,9 +392,45 @@ impl TurnTerminalObservation<'_> {
     pub(crate) const fn unknown(adapter: Option<&'static dyn AcpAgentAdapter>) -> Self {
         Self {
             settlement: TurnTerminalSettlement::Unknown,
+            outcome: AgentTurnDiagnosticOutcome::Failed,
+            error_code: Some(AgentDiagnosticErrorCode::new("turn_settlement_unknown")),
             response: None,
             adapter,
         }
+    }
+
+    pub(crate) const fn with_failure(mut self, code: &'static str) -> Self {
+        self.outcome = AgentTurnDiagnosticOutcome::Failed;
+        self.error_code = Some(AgentDiagnosticErrorCode::new(code));
+        self
+    }
+}
+
+const fn terminal_outcome(stop_reason: agent_client_protocol::schema::v1::StopReason) -> AgentTurnDiagnosticOutcome {
+    use agent_client_protocol::schema::v1::StopReason;
+
+    match stop_reason {
+        StopReason::EndTurn => AgentTurnDiagnosticOutcome::Completed,
+        StopReason::Cancelled => AgentTurnDiagnosticOutcome::Cancelled,
+        StopReason::MaxTokens | StopReason::MaxTurnRequests | StopReason::Refusal => {
+            AgentTurnDiagnosticOutcome::Failed
+        }
+        _ => AgentTurnDiagnosticOutcome::Failed,
+    }
+}
+
+const fn terminal_error_code(
+    stop_reason: agent_client_protocol::schema::v1::StopReason,
+) -> Option<AgentDiagnosticErrorCode> {
+    use agent_client_protocol::schema::v1::StopReason;
+
+    match stop_reason {
+        StopReason::EndTurn => None,
+        StopReason::Cancelled => Some(AgentDiagnosticErrorCode::new("remote_cancelled")),
+        StopReason::MaxTokens => Some(AgentDiagnosticErrorCode::new("max_tokens")),
+        StopReason::MaxTurnRequests => Some(AgentDiagnosticErrorCode::new("max_turn_requests")),
+        StopReason::Refusal => Some(AgentDiagnosticErrorCode::new("refused")),
+        _ => Some(AgentDiagnosticErrorCode::new("request_failed")),
     }
 }
 
@@ -411,4 +459,56 @@ pub(crate) fn observe_turn_terminal(
     let candidate =
         AgentTurnUsageCandidate::new(Arc::new(turn), normalize_terminal_observation(observation));
     observer.observe(AgentDiagnosticObservation::Candidate(Arc::new(candidate)));
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::schema::v1::{PromptResponse, StopReason};
+
+    use super::*;
+
+    #[test]
+    fn terminal_boundaries_have_closed_outcomes_and_stable_error_codes() {
+        let adapter = agent_adapter(AgentKind::Codex);
+        for (stop_reason, outcome, error_code) in [
+            (StopReason::EndTurn, AgentTurnDiagnosticOutcome::Completed, None),
+            (
+                StopReason::Cancelled,
+                AgentTurnDiagnosticOutcome::Cancelled,
+                Some("remote_cancelled"),
+            ),
+            (
+                StopReason::MaxTokens,
+                AgentTurnDiagnosticOutcome::Failed,
+                Some("max_tokens"),
+            ),
+            (
+                StopReason::MaxTurnRequests,
+                AgentTurnDiagnosticOutcome::Failed,
+                Some("max_turn_requests"),
+            ),
+            (
+                StopReason::Refusal,
+                AgentTurnDiagnosticOutcome::Failed,
+                Some("refused"),
+            ),
+        ] {
+            let response = PromptResponse::new(stop_reason);
+            let observation = TurnTerminalObservation::settled(&response, adapter);
+            assert_eq!(observation.outcome, outcome);
+            assert_eq!(
+                observation
+                    .error_code
+                    .map(AgentDiagnosticErrorCode::as_str),
+                error_code
+            );
+        }
+
+        let unknown = TurnTerminalObservation::unknown(None).with_failure("transport_lost");
+        assert_eq!(unknown.outcome, AgentTurnDiagnosticOutcome::Failed);
+        assert_eq!(
+            unknown.error_code.map(AgentDiagnosticErrorCode::as_str),
+            Some("transport_lost")
+        );
+    }
 }

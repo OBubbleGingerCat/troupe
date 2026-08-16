@@ -33,7 +33,7 @@ use crate::adapter::{AcpAgentAdapter, agent_adapter};
 use crate::diagnostics::observer::AgentDiagnosticObserver;
 use crate::diagnostics::session::{
     self as diagnostic_session, AgentDiagnosticProvider, AgentSessionDiagnosticContext,
-    SessionDiagnosticCleanupHandle, SessionDiagnostics,
+    AgentSessionDiagnosticMetadata, SessionDiagnosticCleanupHandle, SessionDiagnostics,
 };
 use crate::error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
@@ -1458,6 +1458,10 @@ impl AgentSessionSlot {
 
     pub(crate) fn diagnostic_context(&self) -> Option<AgentSessionDiagnosticContext> {
         self.diagnostics.context()
+    }
+
+    pub(crate) fn diagnostic_metadata(&self) -> Option<Arc<AgentSessionDiagnosticMetadata>> {
+        self.diagnostics.metadata()
     }
 
     pub(crate) fn diagnostic_cleanup_handle(&self) -> Option<SessionDiagnosticCleanupHandle> {

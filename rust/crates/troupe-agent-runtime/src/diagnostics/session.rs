@@ -11,6 +11,8 @@ use super::observer::{
     AgentDiagnosticErrorCode, AgentDiagnosticObservation, AgentDiagnosticObserver,
     AgentTurnDiagnosticSettlement,
 };
+#[cfg(test)]
+use super::observer::AgentTurnDiagnosticOutcome;
 use super::payload::ToolPayloadCapturePolicy;
 use super::usage::{TurnTerminalObservation, TurnTerminalSettlement};
 use super::{context, cost, message, payload, plan, thinking, tool};
@@ -789,6 +791,22 @@ pub(crate) fn observe_turn_submitted(context: Option<&TurnDiagnosticContext>) {
 }
 
 #[inline]
+pub(crate) fn observe_turn_supervisor_handoff(context: Option<&TurnDiagnosticContext>) {
+    let Some(context) = context else {
+        return;
+    };
+    let (Some(observer), Some(metadata)) = (
+        context.effective_observer(),
+        context.runtime_metadata.as_ref(),
+    ) else {
+        return;
+    };
+    observer.observe(AgentDiagnosticObservation::TurnSupervisorHandoff(
+        Arc::clone(metadata),
+    ));
+}
+
+#[inline]
 pub(crate) fn observe_turn_terminal(
     context: Option<&TurnDiagnosticContext>,
     observation: &TurnTerminalObservation<'_>,
@@ -811,6 +829,8 @@ pub(crate) fn observe_turn_terminal(
         observer.observe(AgentDiagnosticObservation::TurnTerminal {
             metadata: Arc::clone(metadata),
             settlement,
+            outcome: observation.outcome,
+            error_code: observation.error_code,
         });
     }
     super::usage::observe_turn_terminal(context, observation);
@@ -1098,6 +1118,7 @@ mod tests {
         };
 
         observe_turn_submitted(Some(&context));
+        observe_turn_supervisor_handoff(Some(&context));
         observe_turn_terminal(Some(&context), &TurnTerminalObservation::not_submitted());
 
         let observations = destination.observations();
@@ -1108,16 +1129,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 AgentDiagnosticObservationKind::TurnSubmitted,
+                AgentDiagnosticObservationKind::TurnSupervisorHandoff,
                 AgentDiagnosticObservationKind::TurnTerminal,
+                AgentDiagnosticObservationKind::Candidate("agent_turn_usage_terminal"),
             ]
         );
         assert_eq!(observations[0].turn_metadata(), Some(metadata.as_ref()));
         assert_eq!(observations[1].turn_metadata(), Some(metadata.as_ref()));
+        assert_eq!(observations[2].turn_metadata(), Some(metadata.as_ref()));
         assert_eq!(
-            observations[1].turn_settlement(),
+            observations[2].turn_settlement(),
             Some(AgentTurnDiagnosticSettlement::NotSubmitted)
         );
-        assert!(observations[1].error_code().is_none());
+        assert_eq!(
+            observations[2].turn_outcome(),
+            Some(AgentTurnDiagnosticOutcome::Cancelled)
+        );
+        assert_eq!(
+            observations[2].error_code().map(AgentDiagnosticErrorCode::as_str),
+            Some("prompt_not_submitted")
+        );
         assert!(owner.failures().is_empty());
     }
 

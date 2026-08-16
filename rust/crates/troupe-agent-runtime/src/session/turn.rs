@@ -15,8 +15,8 @@ use crate::adapter::{AcpAgentAdapter, RemotePromptErrorSettlement, SupervisorRes
 use crate::diagnostics::observer::AgentDiagnosticObserver;
 use crate::diagnostics::payload::ToolPayloadCapturePolicy;
 use crate::diagnostics::session::{
-    self as diagnostic_session, AgentDiagnosticProvider, AgentTurnDiagnosticIdentity,
-    TurnDiagnosticContext, TurnDiagnosticContextAttachError,
+    self as diagnostic_session, AgentDiagnosticProvider, AgentSessionDiagnosticMetadata,
+    AgentTurnDiagnosticIdentity, TurnDiagnosticContext, TurnDiagnosticContextAttachError,
 };
 use crate::diagnostics::usage::TurnTerminalObservation;
 use crate::error::AgentSessionFailure;
@@ -222,6 +222,10 @@ impl AgentTurnControl {
         lock(&self.state).diagnostic_context.clone()
     }
 
+    pub fn diagnostic_session_metadata(&self) -> Option<Arc<AgentSessionDiagnosticMetadata>> {
+        self.slot.diagnostic_metadata()
+    }
+
     pub fn install_admission(&self, admission: ActAdmissionLease) -> bool {
         let mut state = lock(&self.state);
         if state.phase != AgentTurnControlPhase::Preparing || state.caller_admission.is_some() {
@@ -387,6 +391,11 @@ impl AgentTurnControl {
             };
             (accepted, None)
         });
+
+        if supervisor_handoff {
+            let context = self.diagnostic_context();
+            diagnostic_session::observe_turn_supervisor_handoff(context.as_ref());
+        }
 
         if let Some(marker) = cancelling_marker {
             marker.mark_cancelling();
@@ -681,6 +690,10 @@ impl AgentTurnControl {
                         }
                         (None, _) => TurnTerminalObservation::unknown(Some(adapter)),
                     };
+                let terminal_observation = broken_failure.as_ref().map_or(
+                    terminal_observation,
+                    |failure| terminal_observation.with_failure(failure.code),
+                );
                 Self::observe_turn_terminal_locked(&mut state, &terminal_observation);
             }
             (
@@ -750,6 +763,7 @@ impl AgentTurnControl {
         &self,
         failure: AgentSessionFailure,
     ) -> AgentTurnTerminalCleanup {
+        let terminal_error_code = failure.code;
         let mut state = lock(&self.state);
         match state.phase {
             AgentTurnControlPhase::Armed | AgentTurnControlPhase::Submitted => {
@@ -771,7 +785,7 @@ impl AgentTurnControl {
                 ));
                 state.phase = AgentTurnControlPhase::CallerOutcomeCommitted;
                 let terminal_observation = if submitted {
-                    TurnTerminalObservation::unknown(None)
+                    TurnTerminalObservation::unknown(None).with_failure(terminal_error_code)
                 } else {
                     TurnTerminalObservation::not_submitted()
                 };
@@ -793,7 +807,7 @@ impl AgentTurnControl {
                 state.phase = AgentTurnControlPhase::Settled;
                 Self::observe_turn_terminal_locked(
                     &mut state,
-                    &TurnTerminalObservation::unknown(None),
+                    &TurnTerminalObservation::unknown(None).with_failure(terminal_error_code),
                 );
                 AgentTurnTerminalCleanup {
                     prepared_result,
@@ -821,7 +835,7 @@ impl AgentTurnControl {
                 };
                 Self::observe_turn_terminal_locked(
                     &mut state,
-                    &TurnTerminalObservation::unknown(None),
+                    &TurnTerminalObservation::unknown(None).with_failure(terminal_error_code),
                 );
                 AgentTurnTerminalCleanup {
                     prepared_result,

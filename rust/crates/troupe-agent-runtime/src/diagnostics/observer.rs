@@ -20,6 +20,7 @@ pub enum AgentDiagnosticObservationKind {
     SessionClosing,
     SessionClosed,
     TurnSubmitted,
+    TurnSupervisorHandoff,
     TurnTerminal,
     Candidate(&'static str),
 }
@@ -34,6 +35,7 @@ impl AgentDiagnosticObservationKind {
             Self::SessionClosing => "session_closing",
             Self::SessionClosed => "session_closed",
             Self::TurnSubmitted => "turn_submitted",
+            Self::TurnSupervisorHandoff => "turn_supervisor_handoff",
             Self::TurnTerminal => "turn_terminal",
             Self::Candidate(kind) => kind,
         }
@@ -69,6 +71,23 @@ pub enum AgentTurnDiagnosticSettlement {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AgentTurnDiagnosticOutcome {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+impl AgentTurnDiagnosticOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 impl AgentTurnDiagnosticSettlement {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -97,9 +116,12 @@ pub enum AgentDiagnosticObservation {
     SessionClosing(Arc<AgentSessionDiagnosticMetadata>),
     SessionClosed(Arc<AgentSessionDiagnosticMetadata>),
     TurnSubmitted(Arc<AgentTurnDiagnosticMetadata>),
+    TurnSupervisorHandoff(Arc<AgentTurnDiagnosticMetadata>),
     TurnTerminal {
         metadata: Arc<AgentTurnDiagnosticMetadata>,
         settlement: AgentTurnDiagnosticSettlement,
+        outcome: AgentTurnDiagnosticOutcome,
+        error_code: Option<AgentDiagnosticErrorCode>,
     },
     Candidate(Arc<dyn AgentDiagnosticCandidate>),
 }
@@ -114,6 +136,9 @@ impl AgentDiagnosticObservation {
             Self::SessionClosing(_) => AgentDiagnosticObservationKind::SessionClosing,
             Self::SessionClosed(_) => AgentDiagnosticObservationKind::SessionClosed,
             Self::TurnSubmitted(_) => AgentDiagnosticObservationKind::TurnSubmitted,
+            Self::TurnSupervisorHandoff(_) => {
+                AgentDiagnosticObservationKind::TurnSupervisorHandoff
+            }
             Self::TurnTerminal { .. } => AgentDiagnosticObservationKind::TurnTerminal,
             Self::Candidate(candidate) => {
                 AgentDiagnosticObservationKind::Candidate(candidate.kind())
@@ -129,13 +154,18 @@ impl AgentDiagnosticObservation {
             | Self::SessionClosing(metadata)
             | Self::SessionClosed(metadata)
             | Self::SessionBroken { metadata, .. } => Some(metadata),
-            Self::TurnSubmitted(_) | Self::TurnTerminal { .. } | Self::Candidate(_) => None,
+            Self::TurnSubmitted(_)
+            | Self::TurnSupervisorHandoff(_)
+            | Self::TurnTerminal { .. }
+            | Self::Candidate(_) => None,
         }
     }
 
     pub fn turn_metadata(&self) -> Option<&AgentTurnDiagnosticMetadata> {
         match self {
-            Self::TurnSubmitted(metadata) | Self::TurnTerminal { metadata, .. } => Some(metadata),
+            Self::TurnSubmitted(metadata)
+            | Self::TurnSupervisorHandoff(metadata)
+            | Self::TurnTerminal { metadata, .. } => Some(metadata),
             Self::SessionOpening(_)
             | Self::SessionOpeningAttempt(_)
             | Self::SessionReady(_)
@@ -148,7 +178,18 @@ impl AgentDiagnosticObservation {
 
     pub const fn error_code(&self) -> Option<AgentDiagnosticErrorCode> {
         match self {
-            Self::SessionBroken { error_code, .. } => Some(*error_code),
+            Self::SessionBroken { error_code, .. }
+            | Self::TurnTerminal {
+                error_code: Some(error_code),
+                ..
+            } => Some(*error_code),
+            _ => None,
+        }
+    }
+
+    pub const fn turn_outcome(&self) -> Option<AgentTurnDiagnosticOutcome> {
+        match self {
+            Self::TurnTerminal { outcome, .. } => Some(*outcome),
             _ => None,
         }
     }
