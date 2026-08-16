@@ -552,6 +552,23 @@ def validate_repository_artifacts(repository_root: Path, layout: ArtifactLayout)
         for path in (root / "examples").rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
     }
-    expected_examples = {name: snapshot.data for name, snapshot in layout.base.examples.items()}
-    if actual_examples != expected_examples:
-        raise ArtifactLayoutError("example inventory or bytes differ from the artifact contract")
+    expected_example_names = set(layout.base.examples)
+    for node_id in layout.node_ids:
+        fragment = layout.fragments[node_id]
+        if fragment.state != "realized" or node_id == "F00":
+            continue
+        for path in fragment.introduced:
+            if path.startswith("examples/"):
+                expected_example_names.add(path.removeprefix("examples/"))
+        for removed in fragment.removed:
+            if removed.path.startswith("examples/"):
+                expected_example_names.discard(removed.path.removeprefix("examples/"))
+    if set(actual_examples) != expected_example_names:
+        raise ArtifactLayoutError("example inventory differs from the artifact contract")
+    for name, snapshot in layout.base.examples.items():
+        if (
+            name in expected_example_names
+            and not layout.is_changed_after_base(f"examples/{name}")
+            and actual_examples[name] != snapshot.data
+        ):
+            raise ArtifactLayoutError(f"baseline example was rewritten: {name}")
