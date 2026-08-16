@@ -1,8 +1,22 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "node",
+      "frontend/diagnostics/scripts/maintain.mjs",
+      "--npm-cache",
+      "${TROUPE_NPM_CACHE:?}",
+      "--typecheck",
+      "--unit",
+      "tests/unit/timeline-layout.test.ts,tests/unit/timeline-hit-test.test.ts",
+      "--component",
+      "tests/component/timeline-aria.test.tsx"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm"
+  ],
   "exclusive_resources": []
 }
