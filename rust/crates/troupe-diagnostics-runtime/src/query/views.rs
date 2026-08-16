@@ -629,17 +629,11 @@ fn bind_query(
         }
     };
     match (record.scope(), request.selected_scope.as_ref()) {
-        (ScopeMode::Run, None) | (ScopeMode::Selection, Some(_)) => {}
+        (ScopeMode::Run, None) | (ScopeMode::Selection, _) => {}
         (ScopeMode::Run, Some(_)) => {
             return Err(ViewQueryError::local(
                 ViewQueryErrorCode::InvalidBinding,
                 "run-scoped view cannot accept a selected scope",
-            ));
-        }
-        (ScopeMode::Selection, None) => {
-            return Err(ViewQueryError::local(
-                ViewQueryErrorCode::InvalidBinding,
-                "selection-scoped view requires a selected scope",
             ));
         }
     }

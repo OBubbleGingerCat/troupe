@@ -395,6 +395,73 @@ fn completed_span_duration_excludes_open_spans_while_timeline_keeps_them_open() 
 }
 
 #[test]
+fn selection_scoped_view_without_selection_falls_back_to_the_whole_run() {
+    let directory = TestRunDirectory::new("selection-fallback");
+    let lease = ActiveArchiveLease::acquire(directory.path()).unwrap();
+    let mut writer = TransactionalWriter::new(create_store(directory.path()), ()).unwrap();
+    let hub = diagnostic_hub();
+    let mut accepted = Vec::new();
+    for (elapsed, act) in [(1, "act-1"), (2, "act-2")] {
+        admit(&hub, &mut accepted, move |identity| {
+            DiagnosticEvent::InstantOccurred(InstantOccurred::new(
+                header(identity, elapsed, act_scope(act)),
+                troupe_diagnostics_core::detail::InstantDetail::CueAdmitted(EmptyDetail::new()),
+                None,
+            ))
+        });
+    }
+    commit(&mut writer, accepted);
+
+    let mut reader = DiagnosticReader::open_active(run_id(), lease.guard()).unwrap();
+    let captured = reader.capture().unwrap();
+    let record = ViewRecord::Timeline(
+        TimelineViewRecord::new(
+            "selection_fallback".to_owned(),
+            "Selection fallback".to_owned(),
+            TimeRangeMode::Run,
+            ScopeMode::Selection,
+            TimelineQuery::new(
+                TimelineSource::Instant {
+                    selector: InstantSelector::BuiltIn {
+                        kind: InstantKind::CueAdmitted,
+                    },
+                },
+                Vec::new(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+
+    let whole_run = engine()
+        .query(
+            &captured,
+            &record,
+            &ViewQueryRequest::new().with_page_size(10),
+        )
+        .unwrap();
+    assert_eq!(whole_run.timeline().unwrap().rows().len(), 2);
+    assert_eq!(whole_run.metadata().binding().scope(), ScopeMode::Selection);
+    assert!(whole_run.metadata().binding().selected_scope().is_none());
+
+    let selected = engine()
+        .query(
+            &captured,
+            &record,
+            &ViewQueryRequest::new()
+                .with_selected_scope(act_scope("act-1"))
+                .with_page_size(10),
+        )
+        .unwrap();
+    assert_eq!(selected.timeline().unwrap().rows().len(), 1);
+    assert_eq!(
+        selected.metadata().binding().selected_scope(),
+        Some(&act_scope("act-1"))
+    );
+}
+
+#[test]
 fn time_series_is_run_origin_aligned_and_selects_latest_counter_per_bucket() {
     let directory = TestRunDirectory::new("timeseries");
     let lease = ActiveArchiveLease::acquire(directory.path()).unwrap();
