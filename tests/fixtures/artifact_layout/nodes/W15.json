@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/tests/component/app-composition.test.tsx",
+    "frontend/diagnostics/tests/integration/app-live-query.test.tsx"
+  ],
+  "modified": [
+    "frontend/diagnostics/src/app.tsx"
+  ],
   "removed": [],
   "generated": []
 }
