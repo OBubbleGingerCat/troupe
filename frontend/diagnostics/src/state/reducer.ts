@@ -20,7 +20,9 @@ import type {
   ProjectedContextUsage,
   ProjectedCounter,
   ProjectedMessage,
+  ProjectedResultFact,
   ProjectedSpan,
+  ProjectedToolFact,
   ProjectionBucket,
   SelectionReference,
 } from "./model.ts";
@@ -31,7 +33,9 @@ import {
   GAP_CAPACITY,
   MESSAGE_CAPACITY,
   MESSAGE_TEXT_CODE_UNIT_CAPACITY,
+  RESULT_FACT_CAPACITY,
   SPAN_CAPACITY,
+  TOOL_FACT_CAPACITY,
 } from "./model.ts";
 import {
   cacheQueryResult,
@@ -85,6 +89,8 @@ function createLiveProjection(baseThrough: U64String): LiveProjection {
     counters: emptyBucket(baseThrough),
     context_usage: emptyBucket(baseThrough),
     act_usage: emptyBucket(baseThrough),
+    tools: emptyBucket(baseThrough),
+    results: emptyBucket(baseThrough),
     gaps: {
       ...emptyBucket(baseThrough),
       declared_dropped_count: 0n,
@@ -409,6 +415,157 @@ function projectActUsage(
   return event.scope.act_id === null || duplicate ? markRefresh(updated) : updated;
 }
 
+interface ToolDetail {
+  readonly title: string;
+  readonly tool_kind: NonNullable<ProjectedToolFact["tool_kind"]>;
+  readonly status: NonNullable<ProjectedToolFact["status"]>;
+  readonly error_code: string | null;
+}
+
+function toolDetail(event: Extract<DiagnosticEvent, { kind: "span_started" | "instant_occurred" }>): ToolDetail {
+  return event.detail as unknown as ToolDetail;
+}
+
+function latestToolFact(
+  bucket: ProjectionBucket<ProjectedToolFact>,
+  toolCallId: string | null,
+  spanId: U64String | null,
+): ProjectedToolFact | undefined {
+  for (let index = bucket.items.length - 1; index >= 0; index -= 1) {
+    const fact = bucket.items[index];
+    if (
+      fact !== undefined
+      && ((spanId !== null && fact.span_id === spanId)
+        || (toolCallId !== null && fact.tool_call_id === toolCallId))
+    ) {
+      return fact;
+    }
+  }
+  return undefined;
+}
+
+function appendToolFact(
+  bucket: ProjectionBucket<ProjectedToolFact>,
+  fact: ProjectedToolFact,
+): ProjectionBucket<ProjectedToolFact> {
+  const updated = upsertBounded(
+    bucket,
+    fact,
+    TOOL_FACT_CAPACITY,
+    (candidate) => candidate.sequence,
+    (candidate) => candidate.sequence,
+  );
+  return fact.tool_call_id === null ? markRefresh(updated) : updated;
+}
+
+function projectTool(
+  bucket: ProjectionBucket<ProjectedToolFact>,
+  spans: ProjectionBucket<ProjectedSpan>,
+  event: DiagnosticEvent,
+): ProjectionBucket<ProjectedToolFact> {
+  if (event.kind === "span_started" && event.span_kind === "tool.call") {
+    const detail = toolDetail(event);
+    return appendToolFact(bucket, {
+      phase: "started",
+      sequence: event.sequence,
+      elapsed_ns: event.elapsed_ns,
+      scope: event.scope,
+      tool_call_id: event.scope.tool_call_id,
+      span_id: event.sequence,
+      title: detail.title,
+      tool_kind: detail.tool_kind,
+      status: detail.status,
+      outcome: null,
+      error_code: detail.error_code,
+    });
+  }
+  if (event.kind === "instant_occurred" && event.instant_kind === "tool.updated") {
+    const previous = latestToolFact(bucket, event.scope.tool_call_id, event.containing_span_id);
+    const detail = toolDetail(event);
+    return appendToolFact(bucket, {
+      phase: "updated",
+      sequence: event.sequence,
+      elapsed_ns: event.elapsed_ns,
+      scope: event.scope,
+      tool_call_id: event.scope.tool_call_id ?? previous?.tool_call_id ?? null,
+      span_id: event.containing_span_id ?? previous?.span_id ?? null,
+      title: detail.title,
+      tool_kind: detail.tool_kind,
+      status: detail.status,
+      outcome: null,
+      error_code: detail.error_code,
+    });
+  }
+  if (event.kind !== "span_finished") {
+    return bucket;
+  }
+  const span = spans.items.find((candidate) => candidate.span_id === event.span_id);
+  const start = span?.start?.kind === "span_started" && span.start.span_kind === "tool.call"
+    ? span.start
+    : null;
+  const previous = latestToolFact(bucket, event.scope.tool_call_id, event.span_id);
+  if (start === null && previous === undefined) {
+    return event.scope.tool_call_id === null ? bucket : markRefresh(bucket);
+  }
+  const detail = start === null ? null : toolDetail(start);
+  const updated = appendToolFact(bucket, {
+    phase: "finished",
+    sequence: event.sequence,
+    elapsed_ns: event.elapsed_ns,
+    scope: event.scope,
+    tool_call_id: event.scope.tool_call_id ?? previous?.tool_call_id ?? start?.scope.tool_call_id ?? null,
+    span_id: event.span_id,
+    title: previous?.title ?? detail?.title ?? null,
+    tool_kind: previous?.tool_kind ?? detail?.tool_kind ?? null,
+    status: event.outcome === "completed"
+      ? "completed"
+      : event.outcome === "failed"
+        ? "failed"
+        : null,
+    outcome: event.outcome,
+    error_code: event.error_code ?? previous?.error_code ?? detail?.error_code ?? null,
+  });
+  return start === null ? markRefresh(updated) : updated;
+}
+
+const RESULT_KINDS: readonly ProjectedResultFact["result_kind"][] = [
+  "result.submitted",
+  "result.rejected",
+  "result.repair_requested",
+  "result.accepted",
+  "result.missing",
+];
+
+function isResultKind(kind: string): kind is ProjectedResultFact["result_kind"] {
+  return RESULT_KINDS.includes(kind as ProjectedResultFact["result_kind"]);
+}
+
+function projectResult(
+  bucket: ProjectionBucket<ProjectedResultFact>,
+  event: DiagnosticEvent,
+): ProjectionBucket<ProjectedResultFact> {
+  if (event.kind !== "instant_occurred" || !isResultKind(event.instant_kind)) {
+    return bucket;
+  }
+  const detail = event.detail as unknown as Pick<ProjectedResultFact, "issue" | "error_code">;
+  return upsertBounded(
+    bucket,
+    {
+      result_kind: event.instant_kind,
+      sequence: event.sequence,
+      elapsed_ns: event.elapsed_ns,
+      scope: event.scope,
+      act_id: event.scope.act_id,
+      containing_span_id: event.containing_span_id,
+      issue: detail.issue,
+      error_code: detail.error_code,
+    },
+    RESULT_FACT_CAPACITY,
+    (candidate) => candidate.sequence,
+    (candidate) => candidate.sequence,
+  );
+}
+
 function projectGap(bucket: GapProjection, event: DiagnosticEvent): GapProjection {
   if (event.kind !== "observation_gap") {
     return bucket;
@@ -439,6 +596,8 @@ function projectEvent(projection: LiveProjection, event: DiagnosticEvent): LiveP
   let counters = projectCounter(projection.counters, event);
   let contextUsage = projectContextUsage(projection.context_usage, event);
   let actUsage = projectActUsage(projection.act_usage, event);
+  let tools = projectTool(projection.tools, spans, event);
+  let results = projectResult(projection.results, event);
   if (gapAffects(event, ["span_started", "span_finished", "custom_span_started", "custom_span_finished"])) {
     spans = markRefresh(spans);
   }
@@ -454,12 +613,20 @@ function projectEvent(projection: LiveProjection, event: DiagnosticEvent): LiveP
   if (gapAffects(event, ["act_token_usage_finalized"])) {
     actUsage = markRefresh(actUsage);
   }
+  if (gapAffects(event, ["span_started", "span_finished", "instant_occurred"])) {
+    tools = markRefresh(tools);
+  }
+  if (gapAffects(event, ["instant_occurred"])) {
+    results = markRefresh(results);
+  }
   return {
     spans,
     messages,
     counters,
     context_usage: contextUsage,
     act_usage: actUsage,
+    tools,
+    results,
     gaps: projectGap(projection.gaps, event),
   };
 }
@@ -497,6 +664,8 @@ function projectionLostAfter(projection: LiveProjection, sequence: U64String): b
     projection.counters,
     projection.context_usage,
     projection.act_usage,
+    projection.tools,
+    projection.results,
     projection.gaps,
   ].some((bucket) => bucket.dropped_through !== null && compareU64(bucket.dropped_through, sequence) > 0);
 }

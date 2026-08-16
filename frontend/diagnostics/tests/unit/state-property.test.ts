@@ -14,7 +14,9 @@ import {
   LIVE_EDGE_EVENT_CAPACITY,
   MESSAGE_CAPACITY,
   QUERY_RESULT_CAPACITY,
+  RESULT_FACT_CAPACITY,
   SPAN_CAPACITY,
+  TOOL_FACT_CAPACITY,
 } from "../../src/state/model.ts";
 import { createDiagnosticState, reduceDiagnosticState } from "../../src/state/reducer.ts";
 
@@ -39,7 +41,7 @@ function generatedEvent(sequence: number) {
     },
     caused_by: [],
   };
-  switch (sequence % 6) {
+  switch (sequence % 8) {
     case 0:
       return decodeDiagnosticEvent({
         ...common,
@@ -90,7 +92,7 @@ function generatedEvent(sequence: number) {
         cached_read_tokens: null,
         cached_write_tokens: null,
       });
-    default:
+    case 5:
       return decodeDiagnosticEvent({
         ...common,
         kind: "observation_gap",
@@ -101,6 +103,28 @@ function generatedEvent(sequence: number) {
         affected_elapsed: null,
         affected_kind: null,
         affected_scope: null,
+      });
+    case 6:
+      return decodeDiagnosticEvent({
+        ...common,
+        scope: { ...common.scope, tool_call_id: `tool-${sequence}` },
+        kind: "instant_occurred",
+        instant_kind: "tool.updated",
+        detail: {
+          title: `Tool ${sequence}`,
+          tool_kind: "read",
+          status: "in_progress",
+          error_code: null,
+        },
+        containing_span_id: null,
+      });
+    default:
+      return decodeDiagnosticEvent({
+        ...common,
+        kind: "instant_occurred",
+        instant_kind: "result.submitted",
+        detail: { issue: null, error_code: null },
+        containing_span_id: null,
       });
   }
 }
@@ -134,10 +158,14 @@ describe("state invariants over long deterministic streams", () => {
     expect(projection.counters.items.length).toBeLessThanOrEqual(COUNTER_SERIES_CAPACITY);
     expect(projection.context_usage.items.length).toBeLessThanOrEqual(CONTEXT_USAGE_CAPACITY);
     expect(projection.act_usage.items.length).toBeLessThanOrEqual(ACT_USAGE_CAPACITY);
+    expect(projection.tools.items.length).toBeLessThanOrEqual(TOOL_FACT_CAPACITY);
+    expect(projection.results.items.length).toBeLessThanOrEqual(RESULT_FACT_CAPACITY);
     expect(projection.gaps.items.length).toBeLessThanOrEqual(GAP_CAPACITY);
     expect(state.live.dropped_through).not.toBeNull();
     expect(projection.spans.dropped_through).not.toBeNull();
     expect(projection.messages.needs_server_refresh).toBe(true);
+    expect(projection.tools.dropped_through).not.toBeNull();
+    expect(projection.results.dropped_through).not.toBeNull();
   });
 
   it("keeps the u64 maximum exact without converting identity or time to number", () => {

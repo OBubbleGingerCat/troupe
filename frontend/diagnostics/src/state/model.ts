@@ -26,6 +26,8 @@ export const MESSAGE_TEXT_CODE_UNIT_CAPACITY = 1_048_576;
 export const COUNTER_SERIES_CAPACITY = 256;
 export const CONTEXT_USAGE_CAPACITY = 128;
 export const ACT_USAGE_CAPACITY = 256;
+export const TOOL_FACT_CAPACITY = 256;
+export const RESULT_FACT_CAPACITY = 256;
 export const GAP_CAPACITY = 128;
 export const QUERY_RESULT_CAPACITY = 64;
 export const EXPANDED_ITEM_CAPACITY = 128;
@@ -106,6 +108,57 @@ export interface ProjectedActUsage {
   readonly event: ActTokenUsageFinalizedEvent;
 }
 
+export type ProjectedToolKind =
+  | "read"
+  | "edit"
+  | "delete"
+  | "move"
+  | "search"
+  | "execute"
+  | "think"
+  | "fetch"
+  | "switch_mode"
+  | "other";
+
+export type ProjectedToolStatus = "pending" | "in_progress" | "completed" | "failed";
+
+export interface ProjectedToolFact {
+  readonly phase: "started" | "updated" | "finished";
+  readonly sequence: U64String;
+  readonly elapsed_ns: U64String;
+  readonly scope: DiagnosticScope;
+  readonly tool_call_id: string | null;
+  readonly span_id: U64String | null;
+  readonly title: string | null;
+  readonly tool_kind: ProjectedToolKind | null;
+  readonly status: ProjectedToolStatus | null;
+  readonly outcome: SpanFinishedEvent["outcome"] | null;
+  readonly error_code: string | null;
+}
+
+export type ProjectedResultKind =
+  | "result.submitted"
+  | "result.rejected"
+  | "result.repair_requested"
+  | "result.accepted"
+  | "result.missing";
+
+export interface ProjectedResultIssue {
+  readonly code: string;
+  readonly path: string;
+}
+
+export interface ProjectedResultFact {
+  readonly result_kind: ProjectedResultKind;
+  readonly sequence: U64String;
+  readonly elapsed_ns: U64String;
+  readonly scope: DiagnosticScope;
+  readonly act_id: string | null;
+  readonly containing_span_id: U64String | null;
+  readonly issue: ProjectedResultIssue | null;
+  readonly error_code: string | null;
+}
+
 export interface GapProjection extends ProjectionBucket<ObservationGapEvent> {
   readonly declared_dropped_count: bigint;
   readonly has_unknown_dropped_count: boolean;
@@ -117,6 +170,8 @@ export interface LiveProjection {
   readonly counters: ProjectionBucket<ProjectedCounter>;
   readonly context_usage: ProjectionBucket<ProjectedContextUsage>;
   readonly act_usage: ProjectionBucket<ProjectedActUsage>;
+  readonly tools: ProjectionBucket<ProjectedToolFact>;
+  readonly results: ProjectionBucket<ProjectedResultFact>;
   readonly gaps: GapProjection;
 }
 

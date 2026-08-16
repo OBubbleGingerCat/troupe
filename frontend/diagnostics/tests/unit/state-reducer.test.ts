@@ -35,6 +35,7 @@ const SCOPE: DiagnosticScope = {
   tool_call_id: null,
   session_generation: decodeU64("1"),
 };
+const TOOL_SCOPE: DiagnosticScope = { ...SCOPE, tool_call_id: "tool-1" };
 
 function event(sequence: number, fields: Record<string, unknown>): DiagnosticEvent {
   return decodeDiagnosticEvent({
@@ -83,7 +84,7 @@ describe("diagnostic state reducer", () => {
     expect(scopeFromReference({ kind: "scope", id: "[null]" })).toBeNull();
   });
 
-  it("projects span, message, counter, usage, and gap facts from a contiguous stream", () => {
+  it("projects span, message, tool, result, counter, usage, and gap facts", () => {
     const events = [
       event(1, {
         kind: "span_started",
@@ -147,6 +148,46 @@ describe("diagnostic state reducer", () => {
         affected_scope: SCOPE,
       }),
       event(9, {
+        kind: "span_started",
+        scope: TOOL_SCOPE,
+        span_kind: "tool.call",
+        detail: {
+          title: "Read source",
+          tool_kind: "read",
+          status: "in_progress",
+          error_code: null,
+        },
+        parent_span_id: "1",
+      }),
+      event(10, {
+        kind: "instant_occurred",
+        scope: TOOL_SCOPE,
+        instant_kind: "tool.updated",
+        detail: {
+          title: "Read source",
+          tool_kind: "read",
+          status: "completed",
+          error_code: null,
+        },
+        containing_span_id: "9",
+      }),
+      event(11, {
+        kind: "instant_occurred",
+        instant_kind: "result.rejected",
+        detail: {
+          issue: { code: "out_of_range", path: "/score" },
+          error_code: "invalid_result",
+        },
+        containing_span_id: "1",
+      }),
+      event(12, {
+        kind: "span_finished",
+        scope: TOOL_SCOPE,
+        span_id: "9",
+        outcome: "completed",
+        error_code: null,
+      }),
+      event(13, {
         kind: "span_finished",
         span_id: "1",
         outcome: "completed",
@@ -156,10 +197,10 @@ describe("diagnostic state reducer", () => {
 
     const state = ingest(createDiagnosticState(RUN_ID, decodeU64("0")), events);
 
-    expect(state.cursor.delivered_through).toBe("9");
-    expect(state.cursor.committed_watermark).toBe("9");
+    expect(state.cursor.delivered_through).toBe("13");
+    expect(state.cursor.committed_watermark).toBe("13");
     expect(state.delivery_issue).toBeNull();
-    expect(state.live.projection.spans.items[0]?.finish?.sequence).toBe("9");
+    expect(state.live.projection.spans.items[0]?.finish?.sequence).toBe("13");
     expect(state.live.projection.messages.items[0]).toMatchObject({
       message_id: "message-1",
       text: "hello world",
@@ -170,8 +211,45 @@ describe("diagnostic state reducer", () => {
     expect(state.live.projection.act_usage.items[0]?.event.provider_total_tokens).toBe(
       "123456789012345678901234567890",
     );
+    expect(state.live.projection.tools.items.map((fact) => fact.phase)).toEqual([
+      "started",
+      "updated",
+      "finished",
+    ]);
+    expect(state.live.projection.tools.items[2]).toMatchObject({
+      tool_call_id: "tool-1",
+      span_id: "9",
+      title: "Read source",
+      tool_kind: "read",
+      status: "completed",
+      outcome: "completed",
+    });
+    expect(state.live.projection.results.items[0]).toMatchObject({
+      result_kind: "result.rejected",
+      act_id: "act-1",
+      issue: { code: "out_of_range", path: "/score" },
+      error_code: "invalid_result",
+    });
     expect(state.live.projection.gaps.items[0]?.sequence).toBe("8");
     expect(state.live.projection.gaps.declared_dropped_count).toBe(2n);
+  });
+
+  it("marks tool and result projections for refresh after an instant gap", () => {
+    const state = ingest(createDiagnosticState(RUN_ID, decodeU64("0")), [
+      event(1, {
+        kind: "observation_gap",
+        producer: "acp-normalizer",
+        component: "transcript",
+        reason: "provider_sequence_gap",
+        dropped_count: null,
+        affected_elapsed: null,
+        affected_kind: "instant_occurred",
+        affected_scope: SCOPE,
+      }),
+    ]);
+
+    expect(state.live.projection.tools.needs_server_refresh).toBe(true);
+    expect(state.live.projection.results.needs_server_refresh).toBe(true);
   });
 
   it("is idempotent by run and sequence while requiring the next contiguous cursor", () => {
