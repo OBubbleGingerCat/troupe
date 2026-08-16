@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/test_perfetto_compatibility.sh",
+    "tests/unit/test_perfetto_compatibility_assembly.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
