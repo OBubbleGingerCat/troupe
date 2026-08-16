@@ -1,8 +1,21 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "node",
+      "frontend/diagnostics/scripts/maintain.mjs",
+      "--npm-cache",
+      "${TROUPE_NPM_CACHE:?}",
+      "--build-raw",
+      "--verify-reproducible",
+      "--unit",
+      "tests/unit/bundle-contract.test.ts"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm"
+  ],
   "exclusive_resources": []
 }

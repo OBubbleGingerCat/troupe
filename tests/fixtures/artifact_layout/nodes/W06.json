@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/scripts/build.mjs",
+    "frontend/diagnostics/tests/unit/bundle-contract.test.ts"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
