@@ -1,10 +1,8 @@
 import type { JSX } from "preact";
 
-import type {
-  TokenIntegerString,
-  U64String,
-} from "../protocol/decimal.ts";
 import { compareU64 } from "../protocol/decimal.ts";
+import type { UsageFieldAggregateSnapshot } from "../protocol/http.ts";
+import type { SelectedUsageAggregate } from "../state/model.ts";
 import {
   formatCoverage,
   formatExactInteger,
@@ -21,37 +19,15 @@ const USAGE_FIELDS = [
   ["cached_write_tokens", "Cached write"],
 ] as const;
 
-export interface UsageFieldAggregateFact {
-  readonly known_sum: TokenIntegerString | null;
-  readonly reported_acts: U64String;
-  readonly finalized_acts: U64String;
-}
-
-export interface ValidatedUsageAggregate {
-  readonly scope_kind: "run" | "scene" | "actor";
-  readonly scope_label: string;
-  readonly finalized_acts: U64String;
-  readonly reported_acts: U64String;
-  readonly available_acts: U64String;
-  readonly partial_acts: U64String;
-  readonly unavailable_acts: U64String;
-  readonly provider_total_tokens: UsageFieldAggregateFact;
-  readonly input_tokens: UsageFieldAggregateFact;
-  readonly output_tokens: UsageFieldAggregateFact;
-  readonly thought_tokens: UsageFieldAggregateFact;
-  readonly cached_read_tokens: UsageFieldAggregateFact;
-  readonly cached_write_tokens: UsageFieldAggregateFact;
-}
-
 export interface UsageCoverageProps {
-  readonly aggregates: readonly ValidatedUsageAggregate[];
+  readonly aggregates: readonly SelectedUsageAggregate[];
 }
 
-function scopeName(kind: ValidatedUsageAggregate["scope_kind"]): string {
+function scopeName(kind: SelectedUsageAggregate["scope_kind"]): string {
   return `${kind[0]!.toUpperCase()}${kind.slice(1)}`;
 }
 
-function coverageLabel(field: UsageFieldAggregateFact): string {
+function coverageLabel(field: UsageFieldAggregateSnapshot): string {
   if (field.known_sum === null) {
     return "Total unavailable";
   }
@@ -63,17 +39,18 @@ function coverageLabel(field: UsageFieldAggregateFact): string {
     : "Known partial total";
 }
 
-function Aggregate({ aggregate }: { readonly aggregate: ValidatedUsageAggregate }): JSX.Element {
-  const kind = scopeName(aggregate.scope_kind);
+function Aggregate({ selected }: { readonly selected: SelectedUsageAggregate }): JSX.Element {
+  const kind = scopeName(selected.scope_kind);
+  const aggregate = selected.aggregate;
   return (
     <article
       class="usage-aggregate"
-      data-testid={`usage-aggregate-${aggregate.scope_kind}`}
+      data-testid={`usage-aggregate-${selected.scope_kind}`}
     >
       <header class="usage-aggregate__header">
         <div>
           <p class="usage-eyebrow">{kind}</p>
-          <h3>{aggregate.scope_label}</h3>
+          <h3>{selected.scope_label}</h3>
         </div>
         <span class="usage-aggregate__reported">
           {formatExactInteger(aggregate.reported_acts)} reported
@@ -133,7 +110,7 @@ export function UsageCoverage({ aggregates }: UsageCoverageProps): JSX.Element {
           {aggregates.map((aggregate) => (
             <Aggregate
               key={`${aggregate.scope_kind}:${aggregate.scope_label}`}
-              aggregate={aggregate}
+              selected={aggregate}
             />
           ))}
         </div>

@@ -11,13 +11,13 @@ import type {
   ProjectedContextUsage,
   ProjectedSpan,
 } from "../state/model.ts";
-import { presentedLiveEdge } from "../state/reducer.ts";
+import {
+  presentedLiveEdge,
+  selectUsagePanelFacts,
+} from "../state/reducer.ts";
 import { scopeFromReference } from "../state/selection.ts";
 import { ContextMeter } from "./ContextMeter.tsx";
-import {
-  type ValidatedUsageAggregate,
-  UsageCoverage,
-} from "./UsageCoverage.tsx";
+import { UsageCoverage } from "./UsageCoverage.tsx";
 import {
   formatTokenCount,
   formatUnavailableReason,
@@ -46,7 +46,6 @@ const SCOPE_FIELDS = [
 
 export interface UsagePanelProps {
   readonly state: DiagnosticState;
-  readonly validatedAggregates?: readonly ValidatedUsageAggregate[];
 }
 
 type ActAccountingRow =
@@ -194,20 +193,18 @@ function PendingAct({ span }: { readonly span: ProjectedSpan }): JSX.Element {
   );
 }
 
-export function UsagePanel({
-  state,
-  validatedAggregates = [],
-}: UsagePanelProps): JSX.Element {
+export function UsagePanel({ state }: UsagePanelProps): JSX.Element {
   const edge = presentedLiveEdge(state);
+  const facts = selectUsagePanelFacts(state);
   const scope = selectedScope(state, edge.projection.spans.items);
   const context = latestContext(edge.projection.context_usage.items, scope);
   const rows = accountingRows(
     edge.projection.spans.items,
-    edge.projection.act_usage.items,
+    facts.usages,
     scope,
   );
   const needsRefresh = edge.projection.context_usage.needs_server_refresh
-    || edge.projection.act_usage.needs_server_refresh
+    || facts.needs_server_refresh
     || edge.projection.spans.needs_server_refresh;
 
   return (
@@ -240,7 +237,7 @@ export function UsagePanel({
         )}
       </section>
 
-      <UsageCoverage aggregates={validatedAggregates} />
+      <UsageCoverage aggregates={facts.aggregates} />
     </div>
   );
 }

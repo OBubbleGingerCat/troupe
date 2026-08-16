@@ -26,18 +26,22 @@ import {
   decodeDiagnosticEvent,
 } from "../../src/protocol/event.ts";
 import {
+  type UsageFieldAggregateSnapshot,
+  decodeSnapshotResponse,
+} from "../../src/protocol/http.ts";
+import type { SelectedUsageAggregate } from "../../src/state/model.ts";
+import {
   createDiagnosticState,
   reduceDiagnosticState,
 } from "../../src/state/reducer.ts";
-import {
-  type UsageFieldAggregateFact,
-  type ValidatedUsageAggregate,
-} from "../../src/usage/UsageCoverage.tsx";
+import { hierarchyScopeReference } from "../../src/state/selection.ts";
+import { UsageCoverage } from "../../src/usage/UsageCoverage.tsx";
 import { UsagePanel } from "../../src/usage/UsagePanel.tsx";
 import {
   contextOccupancyPercent,
   formatExactInteger,
 } from "../../src/usage/format.ts";
+import { loadHttpFixture } from "../support/diagnostic-fixtures.ts";
 
 
 const RUN_ID = decodeCanonicalUuid("12345678-1234-4234-9234-123456789abc");
@@ -146,7 +150,7 @@ function aggregateField(
   knownSum: string | null,
   reported: string,
   finalized: string,
-): UsageFieldAggregateFact {
+): UsageFieldAggregateSnapshot {
   return {
     known_sum: knownSum === null ? null : decodeTokenInteger(knownSum),
     reported_acts: decodeU64(reported),
@@ -155,30 +159,49 @@ function aggregateField(
 }
 
 function aggregate(
-  scopeKind: ValidatedUsageAggregate["scope_kind"],
+  scopeKind: SelectedUsageAggregate["scope_kind"],
   scopeLabel: string,
   finalized: string,
   reported: string,
   available: string,
   partial: string,
   unavailable: string,
-  field: UsageFieldAggregateFact,
-): ValidatedUsageAggregate {
+  field: UsageFieldAggregateSnapshot,
+): SelectedUsageAggregate {
   return {
     scope_kind: scopeKind,
     scope_label: scopeLabel,
-    finalized_acts: decodeU64(finalized),
-    reported_acts: decodeU64(reported),
-    available_acts: decodeU64(available),
-    partial_acts: decodeU64(partial),
-    unavailable_acts: decodeU64(unavailable),
-    provider_total_tokens: field,
-    input_tokens: field,
-    output_tokens: field,
-    thought_tokens: field,
-    cached_read_tokens: field,
-    cached_write_tokens: field,
+    aggregate: {
+      finalized_acts: decodeU64(finalized),
+      reported_acts: decodeU64(reported),
+      available_acts: decodeU64(available),
+      partial_acts: decodeU64(partial),
+      unavailable_acts: decodeU64(unavailable),
+      provider_total_tokens: field,
+      input_tokens: field,
+      output_tokens: field,
+      thought_tokens: field,
+      cached_read_tokens: field,
+      cached_write_tokens: field,
+    },
   };
+}
+
+function stateFromUsageSnapshot() {
+  const response = decodeSnapshotResponse(loadHttpFixture("snapshot-v1.json"));
+  let state = createDiagnosticState(
+    RUN_ID,
+    response.watermark_sequence,
+    response.state.through_elapsed_ns,
+  );
+  state = reduceDiagnosticState(state, {
+    type: "usage_snapshot_received",
+    snapshot: response.state.usage,
+  });
+  return reduceDiagnosticState(state, {
+    type: "select",
+    selection: hierarchyScopeReference(actScope("act-1"), "actor_id"),
+  });
 }
 
 describe("usage diagnostics", () => {
@@ -274,7 +297,23 @@ describe("usage diagnostics", () => {
     expect(unavailableCard.textContent).not.toContain("thought content");
   });
 
-  it("shows supplied Run, Scene, and Actor sums with per-field coverage and no completeness inflation", () => {
+  it("renders Run, Scene, and Actor facts selected from the decoded server snapshot", () => {
+    render(<UsagePanel state={stateFromUsageSnapshot()} />);
+
+    const run = screen.getByTestId("usage-aggregate-run");
+    const scene = screen.getByTestId("usage-aggregate-scene");
+    const actor = screen.getByTestId("usage-aggregate-actor");
+    expect(within(run).getByRole("heading", { name: "Run" })).toBeInTheDocument();
+    expect(within(scene).getByRole("heading", { name: "scene-1" })).toBeInTheDocument();
+    expect(within(actor).getByRole("heading", { name: "actor-1" })).toBeInTheDocument();
+    expect(within(run).getByText(
+      "1,234,567,890,123,456,789,012,345,678,901,234,567,890",
+    )).toBeInTheDocument();
+    expect(within(run).getAllByText("Complete known total")).toHaveLength(6);
+    expect(screen.getByTestId("act-accounting-act-1")).toHaveTextContent("Available");
+  });
+
+  it("shows per-field aggregate coverage without completeness inflation", () => {
     const aggregates = [
       aggregate(
         "run",
@@ -308,7 +347,7 @@ describe("usage diagnostics", () => {
       ),
     ] as const;
 
-    render(<UsagePanel state={stateFrom([])} validatedAggregates={aggregates} />);
+    render(<UsageCoverage aggregates={aggregates} />);
 
     const run = screen.getByTestId("usage-aggregate-run");
     const scene = screen.getByTestId("usage-aggregate-scene");
@@ -348,8 +387,10 @@ describe("usage diagnostics", () => {
     const css = readFileSync(resolve(process.cwd(), "src/usage/usage.css"), "utf8");
 
     expect(panel).toContain("presentedLiveEdge(state)");
+    expect(panel).toContain("selectUsagePanelFacts(state)");
     expect(panel).toContain("edge.projection.context_usage.items");
-    expect(panel).toContain("edge.projection.act_usage.items");
+    expect(panel).toContain("facts.usages");
+    expect(panel).not.toContain("validatedAggregates");
     expect(panel).not.toContain("state.live.events");
     expect(panel).not.toContain("thought_content");
     expect(panel).not.toContain(".reduce(");
