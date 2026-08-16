@@ -309,9 +309,9 @@ def bind_managed_python_runtime(
     )
 
 
-def validated_features(manifest: Path, features: Sequence[str]) -> str:
+def validated_features(manifest: Path, features: Sequence[str]) -> str | None:
     if not features:
-        raise GateError("native gate descriptor must select at least one maturin feature")
+        return None
     if len(features) != len(set(features)):
         raise GateError("native gate descriptor contains a duplicate feature")
     unknown_contract = set(features) - ALLOWED_FEATURES
@@ -696,33 +696,13 @@ def _origin_probe(workspace: OwnedWorkspace, environment: Mapping[str, str]) -> 
     return payload
 
 
-def _execute_gate(repository: Path, node_id: str, workspace: OwnedWorkspace) -> None:
-    support = repository / "tests/support"
-    sys.path.insert(0, str(support))
-    try:
-        from artifact_layout import ArtifactLayoutError, load_gate_descriptors
-    except ImportError as error:
-        raise GateError("fresh gate environment cannot load artifact contract") from error
-    try:
-        descriptors = load_gate_descriptors(repository)
-    except ArtifactLayoutError as error:
-        raise GateError(str(error)) from error
-    descriptor = descriptors.get(node_id)
-    if descriptor is None:
-        raise GateError(f"unknown diagnostic node: {node_id}")
-    if descriptor.state != "realized":
-        raise GateError(f"diagnostic node gate is not realized: {node_id}")
-
-    environment = dict(os.environ)
-    command_environment = _descriptor_environment(
-        node_id,
-        environment,
-        descriptor.env,
-        descriptor.cache_requirements,
-    )
-    _current_checkout(repository, environment)
-    manifest = (repository / "rust/Cargo.toml").resolve(strict=True)
-    features = validated_features(manifest, descriptor.maturin_features)
+def _install_native_wheel(
+    repository: Path,
+    workspace: OwnedWorkspace,
+    manifest: Path,
+    features: str,
+    environment: Mapping[str, str],
+) -> None:
     cargo = shutil.which("cargo", path=environment.get("PATH"))
     uv = shutil.which("uv", path=environment.get("PATH"))
     if cargo is None or uv is None:
@@ -788,6 +768,43 @@ def _execute_gate(repository: Path, node_id: str, workspace: OwnedWorkspace) -> 
         cwd=workspace.tmp,
         env=environment,
     )
+
+
+def _execute_gate(repository: Path, node_id: str, workspace: OwnedWorkspace) -> None:
+    support = repository / "tests/support"
+    sys.path.insert(0, str(support))
+    try:
+        from artifact_layout import ArtifactLayoutError, load_gate_descriptors
+    except ImportError as error:
+        raise GateError("fresh gate environment cannot load artifact contract") from error
+    try:
+        descriptors = load_gate_descriptors(repository)
+    except ArtifactLayoutError as error:
+        raise GateError(str(error)) from error
+    descriptor = descriptors.get(node_id)
+    if descriptor is None:
+        raise GateError(f"unknown diagnostic node: {node_id}")
+    if descriptor.state != "realized":
+        raise GateError(f"diagnostic node gate is not realized: {node_id}")
+
+    environment = dict(os.environ)
+    command_environment = _descriptor_environment(
+        node_id,
+        environment,
+        descriptor.env,
+        descriptor.cache_requirements,
+    )
+    _current_checkout(repository, environment)
+    manifest = repository / "rust/Cargo.toml"
+    features = validated_features(manifest, descriptor.maturin_features)
+    if features is not None:
+        _install_native_wheel(
+            repository,
+            workspace,
+            manifest.resolve(strict=True),
+            features,
+            environment,
+        )
 
     command_environment["PATH"] = (
         f"{workspace.venv / 'bin'}{os.pathsep}{command_environment.get('PATH', '')}"

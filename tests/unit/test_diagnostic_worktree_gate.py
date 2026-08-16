@@ -246,6 +246,38 @@ def test_features_are_closed_unique_and_present_in_current_manifest(tmp_path: Pa
         gate.validated_features(manifest, ("diagnostics-test-support",))
 
 
+def test_empty_feature_descriptor_executes_without_installing_a_wheel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import artifact_layout
+
+    workspace = _workspace(tmp_path)
+    descriptor = artifact_layout.GateDescriptor(
+        state="realized",
+        argv=(("scripts/run_diagnostic_node_gate.sh", "D11"),),
+        env={},
+        maturin_features=(),
+        cache_requirements=(),
+        exclusive_resources=(),
+    )
+    monkeypatch.setattr(
+        artifact_layout,
+        "load_gate_descriptors",
+        lambda _repository: {"D11": descriptor},
+    )
+    monkeypatch.setattr(gate, "_current_checkout", lambda _repository, _environment: None)
+
+    def reject_native_install(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("direct gate attempted to install a native wheel")
+
+    monkeypatch.setattr(gate, "_install_native_wheel", reject_native_install)
+    try:
+        gate._execute_gate(workspace.repository, "D11", workspace)
+    finally:
+        gate.cleanup_owned_workspace(workspace)
+
+
 def test_cargo_json_artifacts_must_all_resolve_inside_owned_target(tmp_path: Path) -> None:
     target = tmp_path / "target"
     artifact = target / "debug/lib_runtime.so"
