@@ -1,8 +1,25 @@
 {
-  "state": "planned",
-  "argv": [],
-  "env": {},
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_perfetto_tool_fetch.py"
+    ],
+    [
+      "scripts/fetch_pinned_perfetto_tools.sh",
+      "--offline",
+      "--verify-only",
+      "--cache",
+      "${TROUPE_PERFETTO_CACHE:?}"
+    ]
+  ],
+  "env": {
+    "TROUPE_GATE_TMP": "required"
+  },
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "perfetto"
+  ],
   "exclusive_resources": []
 }

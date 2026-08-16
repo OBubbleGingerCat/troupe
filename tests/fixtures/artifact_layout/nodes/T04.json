@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/fetch_pinned_perfetto_tools.sh",
+    "tests/perfetto/tools/README.md",
+    "tests/perfetto/tools/SHA256SUMS",
+    "tests/perfetto/tools/manifest.json",
+    "tests/unit/test_perfetto_tool_fetch.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
