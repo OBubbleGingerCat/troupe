@@ -1,6 +1,9 @@
 use std::convert::Infallible;
 
-use troupe_agent_runtime::diagnostics::payload::ToolPayloadSource;
+use troupe_agent_runtime::diagnostics::payload::{
+    ACT_TOOL_PAYLOAD_MAX_BYTES, AgentToolPayloadActBudget, TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES,
+    ToolPayloadSource, with_sized_tool_input_for_test,
+};
 use troupe_diagnostics_core::{
     detail::{DiagnosticAttributes, EmptyDetail, PlanEntry, SpanStartDetail, ToolCallDetail},
     event::{
@@ -33,7 +36,7 @@ use hooks::DiagnosticCaptureConfig;
 use sink_projection::{
     PreparedSinkToolPayload, SinkProjectedJsonValue, SinkProjectedToolInput,
     SinkProjectedToolLocation, SinkProjectedToolOutput, counter_selected, instant_selected,
-    project_act_event, span_selected,
+    prepare_sink_tool_payload, project_act_event, projected_tool_payload, span_selected,
 };
 
 const RUN_ID: &str = "12345678-1234-4234-9234-123456789abc";
@@ -533,34 +536,22 @@ fn projected_value(json: &str) -> SinkProjectedJsonValue {
     SinkProjectedJsonValue::from_canonical_json_for_test(json)
 }
 
-fn prepared_payload(
-    tool_call_id: &str,
-    source: ToolPayloadSource,
-    truncated: bool,
-) -> PreparedSinkToolPayload {
+fn prepared_payload(tool_call_id: &str, source: ToolPayloadSource) -> PreparedSinkToolPayload {
     PreparedSinkToolPayload::new_for_test(
         tool_call_id,
         source,
         Some(SinkProjectedToolInput::new_for_test(
-            (!truncated).then(|| projected_value(r#"{"path":"src/lib.rs"}"#)),
-            truncated,
+            Some(projected_value(r#"{"path":"src/lib.rs"}"#)),
+            false,
         )),
         Some(SinkProjectedToolOutput::new_for_test(
-            (!truncated).then(|| projected_value(r#"{"ok":true}"#)),
-            if truncated {
-                Vec::new()
-            } else {
-                vec![projected_value(r#"{"type":"text","text":"done"}"#)]
-            },
-            if truncated {
-                Vec::new()
-            } else {
-                vec![SinkProjectedToolLocation::new_for_test(
-                    "src/lib.rs",
-                    Some(17),
-                )]
-            },
-            truncated,
+            Some(projected_value(r#"{"ok":true}"#)),
+            vec![projected_value(r#"{"type":"text","text":"done"}"#)],
+            vec![SinkProjectedToolLocation::new_for_test(
+                "src/lib.rs",
+                Some(17),
+            )],
+            false,
         )),
     )
 }
@@ -585,11 +576,16 @@ fn tool_payload_is_opt_in_enrichment_and_never_changes_the_canonical_fact() {
             ))
         }
     });
-    let payload = prepared_payload("tool-1", ToolPayloadSource::Started, false);
+    let payload = prepared_payload("tool-1", ToolPayloadSource::Started);
     let tools_only = capture(false, false, true, false, false, false, false, false);
     let without_fields = project_act_event(&start, &current, tools_only, Some(&payload)).unwrap();
     assert!(without_fields.captured_input().is_none());
     assert!(without_fields.captured_output().is_none());
+
+    let inconsistent = capture(false, false, false, false, false, false, true, true);
+    let (input, output) = projected_tool_payload(start.event(), inconsistent, Some(&payload));
+    assert!(input.is_none() && output.is_none());
+    assert!(project_act_event(&start, &current, inconsistent, Some(&payload)).is_none());
 
     let input_only = capture(false, false, true, false, false, false, true, false);
     let input = project_act_event(&start, &current, input_only, Some(&payload)).unwrap();
@@ -625,30 +621,85 @@ fn tool_payload_is_opt_in_enrichment_and_never_changes_the_canonical_fact() {
         project_act_event(&start, &current, both, Some(&payload))
     );
 
-    let wrong_id = prepared_payload("tool-other", ToolPayloadSource::Started, false);
-    let wrong_source = prepared_payload("tool-1", ToolPayloadSource::Updated, false);
+    let wrong_id = prepared_payload("tool-other", ToolPayloadSource::Started);
+    let wrong_source = prepared_payload("tool-1", ToolPayloadSource::Updated);
     for mismatched in [&wrong_id, &wrong_source] {
         let projected = project_act_event(&start, &current, both, Some(mismatched)).unwrap();
         assert!(projected.captured_input().is_none());
         assert!(projected.captured_output().is_none());
     }
-
-    let omitted_by_budget = prepared_payload("tool-1", ToolPayloadSource::Started, true);
-    let projected = project_act_event(&start, &current, both, Some(&omitted_by_budget)).unwrap();
-    let input = projected.captured_input().unwrap();
-    let output = projected.captured_output().unwrap();
-    assert!(input.raw_input().is_none() && input.truncated());
-    assert!(output.raw_output().is_none());
-    assert!(output.content().is_empty());
-    assert!(output.locations().is_empty());
-    assert!(output.truncated());
 }
 
 #[test]
-fn budget_preparation_is_explicit_and_sink_values_remain_non_serializable() {
-    let source = include_str!("../src/diagnostic_runtime/sink_projection.rs");
-    assert!(source.contains("let mut payload = payload.clone();"));
-    assert!(source.contains("payload.apply_act_budget(budget);"));
-    assert!(!source.contains("derive(Serialize"));
-    assert!(!source.contains("impl Serialize for SinkProjected"));
+fn real_a09_budget_drives_none_equal_and_over_budget_projection() {
+    let fixture = include_str!("../../tests/fixtures/diagnostics/sink-projection.json");
+    for case in [
+        "no_payload",
+        "equal_to_remaining_act_budget",
+        "over_remaining_act_budget",
+    ] {
+        assert!(
+            fixture.contains(&format!(r#""case": "{case}""#)),
+            "missing executable fixture case {case}"
+        );
+    }
+
+    let hub = hub();
+    let current = act_scope("act-budget");
+    let tool = tool_scope("act-budget", "tool-budget");
+    let start = accept(&hub, move |identity| {
+        DiagnosticEvent::SpanStarted(SpanStarted::new(
+            header(identity, tool),
+            SpanStartDetail::ToolCall(ToolCallDetail::new(
+                "Read".to_owned(),
+                ToolKind::Read,
+                ToolCallStatus::InProgress,
+                None,
+            )),
+            None,
+        ))
+    });
+    let capture_input = capture(false, false, true, false, false, false, true, false);
+    let mut budget = AgentToolPayloadActBudget::new();
+
+    let no_payload = project_act_event(&start, &current, capture_input, None).unwrap();
+    assert!(no_payload.captured_input().is_none());
+    assert_eq!(budget.accepted_bytes(), 0);
+    assert!(!budget.truncated());
+
+    assert_eq!(
+        ACT_TOOL_PAYLOAD_MAX_BYTES % TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES,
+        0
+    );
+    let snapshots_at_limit = ACT_TOOL_PAYLOAD_MAX_BYTES / TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES;
+    for _ in 0..snapshots_at_limit {
+        let prepared = with_sized_tool_input_for_test(
+            "tool-budget",
+            TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES,
+            |payload| prepare_sink_tool_payload(payload, &mut budget),
+        );
+        let projected =
+            project_act_event(&start, &current, capture_input, Some(&prepared)).unwrap();
+        let input = projected.captured_input().unwrap();
+        assert_eq!(
+            input.raw_input().unwrap().canonical_json().len(),
+            TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES
+        );
+        assert!(!input.truncated());
+    }
+    assert_eq!(budget.accepted_bytes(), ACT_TOOL_PAYLOAD_MAX_BYTES);
+    assert_eq!(budget.remaining_bytes(), 0);
+    assert!(!budget.truncated());
+
+    let over =
+        with_sized_tool_input_for_test("tool-budget", TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES, |payload| {
+            prepare_sink_tool_payload(payload, &mut budget)
+        });
+    let projected = project_act_event(&start, &current, capture_input, Some(&over)).unwrap();
+    let input = projected.captured_input().unwrap();
+    assert!(input.raw_input().is_none());
+    assert!(input.truncated());
+    assert_eq!(budget.accepted_bytes(), ACT_TOOL_PAYLOAD_MAX_BYTES);
+    assert_eq!(budget.remaining_bytes(), 0);
+    assert!(budget.truncated());
 }

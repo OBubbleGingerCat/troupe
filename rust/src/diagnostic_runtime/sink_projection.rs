@@ -365,7 +365,7 @@ pub(crate) const fn counter_selected(kind: CounterKind, capture: DiagnosticCaptu
     }
 }
 
-fn projected_tool_payload(
+pub(crate) fn projected_tool_payload(
     event: &DiagnosticEvent,
     capture: DiagnosticCaptureConfig,
     payload: Option<&PreparedSinkToolPayload>,
@@ -376,12 +376,12 @@ fn projected_tool_payload(
     let Some(payload) = payload.filter(|payload| payload_matches_event(payload, event)) else {
         return (None, None);
     };
-    let input = if capture.tool_inputs {
+    let input = if capture.tool_calls && capture.tool_inputs {
         payload.input().cloned()
     } else {
         None
     };
-    let output = if capture.tool_outputs {
+    let output = if capture.tool_calls && capture.tool_outputs {
         payload.output().cloned()
     } else {
         None
