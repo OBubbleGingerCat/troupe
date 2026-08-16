@@ -5,7 +5,10 @@ import { cleanup, render, screen } from "@testing-library/preact";
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { decodeU64 } from "../../src/protocol/decimal.ts";
+import {
+  decodeCanonicalInteger,
+  decodeU64,
+} from "../../src/protocol/decimal.ts";
 import {
   type TableViewRecord,
   type TableViewResponse,
@@ -141,7 +144,7 @@ describe("C05 table ViewSpec renderer", () => {
       rows: [{
         sequence: u64("1"),
         cells: [
-          { type: "integer", value: "123456789012345678901234567890" },
+          { type: "integer", value: decodeCanonicalInteger("123456789012345678901234567890") },
           { type: "string", value: payload },
           null,
         ],
