@@ -170,10 +170,11 @@ describe("state invariants over long deterministic streams", () => {
 
   it("keeps the u64 maximum exact without converting identity or time to number", () => {
     const maximum = decodeU64("18446744073709551615");
-    const state = createDiagnosticState(RUN_ID, maximum);
+    const state = createDiagnosticState(RUN_ID, maximum, maximum);
 
     expect(state.cursor.delivered_through).toBe("18446744073709551615");
     expect(state.cursor.committed_watermark).toBe("18446744073709551615");
+    expect(state.live.observed_elapsed_ns).toBe("18446744073709551615");
     expect(typeof state.cursor.delivered_through).toBe("string");
   });
 

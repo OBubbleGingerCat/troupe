@@ -99,9 +99,10 @@ function createLiveProjection(baseThrough: U64String): LiveProjection {
   };
 }
 
-function createLiveEdge(baseThrough: U64String): LiveEdgeState {
+function createLiveEdge(baseThrough: U64String, observedElapsedNs: U64String): LiveEdgeState {
   return {
     base_through: baseThrough,
+    observed_elapsed_ns: observedElapsedNs,
     events: [],
     dropped_through: null,
     projection: createLiveProjection(baseThrough),
@@ -111,6 +112,7 @@ function createLiveEdge(baseThrough: U64String): LiveEdgeState {
 export function createDiagnosticState(
   runId: CanonicalUuid,
   throughSequence: U64String,
+  throughElapsedNs: U64String = "0" as U64String,
 ): DiagnosticState {
   return {
     run_id: runId,
@@ -120,7 +122,7 @@ export function createDiagnosticState(
     },
     delivery_issue: null,
     windows: createWindowState(),
-    live: createLiveEdge(throughSequence),
+    live: createLiveEdge(throughSequence, throughElapsedNs),
     queries: createQueryCache(),
     presentation: createPresentationState(),
     pause: {

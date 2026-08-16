@@ -96,6 +96,9 @@ export function appendLiveEvent(
     ...state,
     events,
     dropped_through: droppedThrough,
+    observed_elapsed_ns: compareU64(event.elapsed_ns, state.observed_elapsed_ns) > 0
+      ? event.elapsed_ns
+      : state.observed_elapsed_ns,
     projection,
   };
 }

@@ -462,7 +462,9 @@ describe("diagnostic state reducer", () => {
     });
 
     expect(state.live.projection.messages.items[0]?.text).toBe("before after");
+    expect(state.live.observed_elapsed_ns).toBe("20");
     expect(presentedLiveEdge(state).projection.messages.items[0]?.text).toBe("before");
+    expect(presentedLiveEdge(state).observed_elapsed_ns).toBe("10");
     expect(presentedLiveEdge(reduceDiagnosticState(state, { type: "resume" }))).toBe(state.live);
   });
 

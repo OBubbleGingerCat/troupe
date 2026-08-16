@@ -177,6 +177,7 @@ export interface LiveProjection {
 
 export interface LiveEdgeState {
   readonly base_through: U64String;
+  readonly observed_elapsed_ns: U64String;
   readonly events: readonly DiagnosticEvent[];
   readonly dropped_through: U64String | null;
   readonly projection: LiveProjection;
