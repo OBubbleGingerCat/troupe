@@ -20,7 +20,8 @@ use crate::{
     },
     identity::{ExactCounterValue, exact_counter_value},
     schema::{
-        BuiltinClock, DebugAnnotation, TracePacket, TrackDescriptor, TrackEvent, TrackEventType,
+        BuiltinClock, CounterDescriptor, DebugAnnotation, TracePacket, TrackDescriptor, TrackEvent,
+        TrackEventType,
         debug_annotation, encode_trace_packet_fragment, trace_packet, track_descriptor,
         track_event,
     },
@@ -28,6 +29,8 @@ use crate::{
         ROOT_TRACK_IDENTITY, counter_track_identity, scope_track_identity,
     },
 };
+
+const TRACK_EVENT_PACKET_SEQUENCE_ID: u32 = 1;
 
 pub fn project_prefix(
     metadata: ProjectionMetadata,
@@ -119,12 +122,18 @@ impl ProjectionPlan {
     pub(crate) fn descriptor_packets(&self) -> impl Iterator<Item = TracePacket> + '_ {
         self.tracks.descriptors().map(|descriptor| TracePacket {
             timestamp: None,
+            optional_trusted_packet_sequence_id: Some(
+                trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                    TRACK_EVENT_PACKET_SEQUENCE_ID,
+                ),
+            ),
             data: Some(trace_packet::Data::TrackDescriptor(TrackDescriptor {
                 uuid: Some(descriptor.uuid),
                 static_or_dynamic_name: Some(track_descriptor::StaticOrDynamicName::Name(
                     descriptor.name.to_owned(),
                 )),
                 parent_uuid: descriptor.parent_uuid,
+                counter: descriptor.is_counter.then_some(CounterDescriptor {}),
             })),
             timestamp_clock_id: None,
         })
@@ -182,6 +191,7 @@ impl PacketProjector<'_> {
                 vec![self.numeric_packet(
                     value.header(),
                     &track,
+                    &scope_track,
                     value.counter_kind().as_str(),
                     &value.value().get().to_string(),
                     Vec::new(),
@@ -357,6 +367,7 @@ impl PacketProjector<'_> {
                 vec![self.numeric_packet(
                     value.header(),
                     &track,
+                    &scope_track,
                     value.name(),
                     number,
                     annotations,
@@ -483,6 +494,7 @@ impl PacketProjector<'_> {
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
+                &scope_track,
                 "context.used_tokens",
                 &used.get().to_string(),
                 Vec::new(),
@@ -496,6 +508,7 @@ impl PacketProjector<'_> {
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
+                &scope_track,
                 "context.window_tokens",
                 &window.get().to_string(),
                 Vec::new(),
@@ -512,6 +525,7 @@ impl PacketProjector<'_> {
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
+                &scope_track,
                 "context.cumulative_cost",
                 amount.as_str(),
                 vec![string_annotation("troupe.cost.currency", currency.as_str())],
@@ -558,6 +572,7 @@ impl PacketProjector<'_> {
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
+                ROOT_TRACK_IDENTITY,
                 &format!("usage.known.{}", field.as_str()),
                 &total,
                 Vec::new(),
@@ -578,6 +593,7 @@ impl PacketProjector<'_> {
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
+                ROOT_TRACK_IDENTITY,
                 &format!("usage.coverage.{coverage}"),
                 &count.to_string(),
                 Vec::new(),
@@ -626,6 +642,7 @@ impl PacketProjector<'_> {
         &self,
         header: &troupe_diagnostics_core::event::DiagnosticEventHeader,
         track_identity: &str,
+        fallback_track_identity: &str,
         name: &str,
         canonical_decimal: &str,
         mut annotations: Vec<DebugAnnotation>,
@@ -658,7 +675,7 @@ impl PacketProjector<'_> {
                 ));
                 self.event_packet(
                     header,
-                    track_identity,
+                    fallback_track_identity,
                     TrackEventType::Instant,
                     Some(name),
                     None,
@@ -690,6 +707,11 @@ impl PacketProjector<'_> {
         common.append(&mut annotations);
         Ok(TracePacket {
             timestamp: Some(header.elapsed_ns().get()),
+            optional_trusted_packet_sequence_id: Some(
+                trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(
+                    TRACK_EVENT_PACKET_SEQUENCE_ID,
+                ),
+            ),
             data: Some(trace_packet::Data::TrackEvent(TrackEvent {
                 debug_annotations: common,
                 r#type: Some(event_type as i32),
@@ -1078,10 +1100,18 @@ fn packets_json(packets: &[TracePacket]) -> String {
         output.push_str("  {");
         match packet.data.as_ref() {
             Some(trace_packet::Data::TrackDescriptor(descriptor)) => {
-                output.push_str("\"kind\":\"descriptor\",\"uuid\":");
+                output.push_str("\"kind\":\"descriptor\",\"packet_sequence_id\":");
+                push_packet_sequence_id(&mut output, packet);
+                output.push_str(",\"uuid\":");
                 push_optional_u64(&mut output, descriptor.uuid);
                 output.push_str(",\"parent_uuid\":");
                 push_optional_u64(&mut output, descriptor.parent_uuid);
+                output.push_str(",\"counter_track\":");
+                output.push_str(if descriptor.counter.is_some() {
+                    "true"
+                } else {
+                    "false"
+                });
                 output.push_str(",\"name\":");
                 let name = match descriptor.static_or_dynamic_name.as_ref() {
                     Some(track_descriptor::StaticOrDynamicName::Name(name)) => name.as_str(),
@@ -1090,7 +1120,9 @@ fn packets_json(packets: &[TracePacket]) -> String {
                 push_json_string(&mut output, name);
             }
             Some(trace_packet::Data::TrackEvent(event)) => {
-                output.push_str("\"kind\":\"event\",\"timestamp\":");
+                output.push_str("\"kind\":\"event\",\"packet_sequence_id\":");
+                push_packet_sequence_id(&mut output, packet);
+                output.push_str(",\"timestamp\":");
                 push_optional_u64(&mut output, packet.timestamp);
                 output.push_str(",\"clock_id\":");
                 push_optional_u64(
@@ -1173,6 +1205,18 @@ fn packets_json(packets: &[TracePacket]) -> String {
     }
     output.push_str("\n]\n");
     output
+}
+
+fn push_packet_sequence_id(output: &mut String, packet: &TracePacket) {
+    let value = packet
+        .optional_trusted_packet_sequence_id
+        .as_ref()
+        .map(
+            |trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(value)| {
+                u64::from(*value)
+            },
+        );
+    push_optional_u64(output, value);
 }
 
 fn push_optional_u64(output: &mut String, value: Option<u64>) {

@@ -48,6 +48,13 @@
           "cardinality": "optional"
         },
         {
+          "name": "trusted_packet_sequence_id",
+          "number": 10,
+          "type": "uint32",
+          "cardinality": "oneof",
+          "oneof": "optional_trusted_packet_sequence_id"
+        },
+        {
           "name": "track_event",
           "number": 11,
           "type": "perfetto.protos.TrackEvent",
@@ -69,6 +76,12 @@
         }
       ],
       "oneofs": [
+        {
+          "name": "optional_trusted_packet_sequence_id",
+          "fields": [
+            "trusted_packet_sequence_id"
+          ]
+        },
         {
           "name": "data",
           "fields": [
@@ -101,6 +114,12 @@
           "number": 5,
           "type": "uint64",
           "cardinality": "optional"
+        },
+        {
+          "name": "counter",
+          "number": 8,
+          "type": "perfetto.protos.CounterDescriptor",
+          "cardinality": "optional"
         }
       ],
       "oneofs": [
@@ -111,6 +130,13 @@
           ]
         }
       ]
+    },
+    {
+      "kind": "message",
+      "full_name": "perfetto.protos.CounterDescriptor",
+      "file": "upstream/protos/perfetto/trace/track_event/counter_descriptor.proto",
+      "fields": [],
+      "oneofs": []
     },
     {
       "kind": "message",

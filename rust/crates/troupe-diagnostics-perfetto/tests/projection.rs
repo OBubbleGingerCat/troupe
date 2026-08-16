@@ -373,6 +373,7 @@ fn canonical_projection_matches_checked_binary_and_packet_goldens() {
     assert!(packets.contains("Worker 一"));
     assert!(packets.contains("完成 一"));
     assert!(packets.contains("\"clock_id\":\"11\""));
+    assert!(packets.contains("\"packet_sequence_id\":\"1\""));
     assert!(packets.contains("troupe.flow.start.0"));
     assert!(packets.contains("troupe.gap.affected_start_ns"));
     assert!(packets.contains("\"double\":\"0.5\""));
@@ -590,4 +591,7 @@ fn exact_large_doubles_and_non_exact_numbers_are_not_rounded() {
     assert!(packets.contains("\"double\":\"9223372036854776000\""));
     assert!(packets.contains("9223372036854775809"));
     assert!(packets.contains("troupe.counter_projection"));
+    assert!(packets.contains(
+        "\"type\":\"instant\",\"track_uuid\":\"1\",\"name\":\"numbers.non_exact\""
+    ));
 }

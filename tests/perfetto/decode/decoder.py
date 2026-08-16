@@ -312,11 +312,17 @@ def _decode_descriptor(data: bytes, packet_index: int) -> dict[str, Any]:
     fields, unknown = _partition(
         data,
         context,
-        {1: ("uuid", 0), 2: ("name", 2), 5: ("parent_uuid", 0)},
+        {
+            1: ("uuid", 0),
+            2: ("name", 2),
+            5: ("parent_uuid", 0),
+            8: ("counter", 2),
+        },
     )
     uuid_field = _single(fields, 1, context, "uuid", required=True)
     name_field = _single(fields, 2, context, "name", required=True)
     parent_field = _single(fields, 5, context, "parent_uuid", required=False)
+    counter_field = _single(fields, 8, context, "counter", required=False)
     assert uuid_field is not None and name_field is not None
     uuid = _integer(uuid_field)
     if uuid == 0:
@@ -327,10 +333,17 @@ def _decode_descriptor(data: bytes, packet_index: int) -> dict[str, Any]:
     parent = _integer(parent_field) if parent_field is not None else None
     if parent == uuid:
         raise DecodeError(f"{context}.parent_uuid: descriptor cannot parent itself")
+    counter_unknown: list[dict[str, int]] = []
+    if counter_field is not None:
+        _, counter_unknown = _partition(
+            _bytes(counter_field), f"{context}.counter", {}
+        )
     return {
         "uuid": str(uuid),
         "name": name,
         "parent_uuid": str(parent) if parent is not None else None,
+        "counter": counter_field is not None,
+        "counter_unknown_fields": counter_unknown,
         "unknown_fields": unknown,
     }
 
@@ -342,17 +355,24 @@ def _decode_packet(data: bytes, packet_index: int) -> dict[str, Any]:
         context,
         {
             8: ("timestamp", 0),
+            10: ("trusted_packet_sequence_id", 0),
             11: ("track_event", 2),
             58: ("timestamp_clock_id", 0),
             60: ("track_descriptor", 2),
         },
     )
     timestamp = _single(fields, 8, context, "timestamp", required=False)
+    sequence_id = _single(
+        fields, 10, context, "trusted_packet_sequence_id", required=True
+    )
     clock = _single(fields, 58, context, "timestamp_clock_id", required=False)
     event = _single(fields, 11, context, "track_event", required=False)
     descriptor = _single(fields, 60, context, "track_descriptor", required=False)
     if (event is None) == (descriptor is None):
         raise DecodeError(f"{context}.data: expected exactly one oneof member")
+    assert sequence_id is not None
+    if _integer(sequence_id) != 1:
+        raise DecodeError(f"{context}.trusted_packet_sequence_id: expected 1")
     if descriptor is not None:
         if timestamp is not None or clock is not None:
             raise DecodeError(f"{context}: descriptor packet must not carry a timestamp")
@@ -480,6 +500,8 @@ def validate_trace(trace: dict[str, Any]) -> None:
         event = packet["event"]
         if event["track_uuid"] not in descriptors:
             raise DecodeError(f"event references unknown track {event['track_uuid']}")
+        if (event["type"] == "counter") != descriptors[event["track_uuid"]]["counter"]:
+            raise DecodeError("event type does not match its track descriptor kind")
         timestamp = int(packet["timestamp"])
         if timestamp < previous_timestamp:
             raise DecodeError("event timestamps regress")
@@ -516,6 +538,7 @@ def _unknown_count(trace: dict[str, Any]) -> int:
         count += len(packet["unknown_fields"])
         if packet["kind"] == "descriptor":
             count += len(packet["descriptor"]["unknown_fields"])
+            count += len(packet["descriptor"]["counter_unknown_fields"])
         else:
             event = packet["event"]
             count += len(event["unknown_fields"])

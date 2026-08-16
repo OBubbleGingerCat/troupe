@@ -7,6 +7,7 @@
     "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/common/builtin_clock.proto",
     "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/trace.proto",
     "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/trace_packet.proto",
+    "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/counter_descriptor.proto",
     "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/debug_annotation.proto",
     "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/track_descriptor.proto",
     "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/track_event.proto",

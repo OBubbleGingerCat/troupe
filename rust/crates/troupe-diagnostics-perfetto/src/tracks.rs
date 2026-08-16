@@ -9,12 +9,19 @@ use crate::{
 
 pub(crate) const ROOT_TRACK_IDENTITY: &str = "production";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrackKind {
+    Timeline,
+    Counter,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrackDefinition {
     canonical_identity: String,
     parent_identity: Option<String>,
     name: String,
     depth: usize,
+    kind: TrackKind,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -28,7 +35,13 @@ impl TrackCatalogBuilder {
         structural_budget: &mut StructuralIndexBudget,
     ) -> Result<Self, ProjectionError> {
         let mut builder = Self::default();
-        builder.register(ROOT_TRACK_IDENTITY, None, &root_name, structural_budget)?;
+        builder.register(
+            ROOT_TRACK_IDENTITY,
+            None,
+            &root_name,
+            TrackKind::Timeline,
+            structural_budget,
+        )?;
         Ok(builder)
     }
 
@@ -42,6 +55,7 @@ impl TrackCatalogBuilder {
             &identity,
             Some(ROOT_TRACK_IDENTITY),
             &name,
+            TrackKind::Timeline,
             structural_budget,
         )?;
         Ok(identity)
@@ -56,7 +70,13 @@ impl TrackCatalogBuilder {
         for (tag, value, label) in scope_segments(scope) {
             let identity = format!("{parent}/{tag}:{}", component(&value));
             let name = format!("{label} {value}");
-            self.register(&identity, Some(&parent), &name, structural_budget)?;
+            self.register(
+                &identity,
+                Some(&parent),
+                &name,
+                TrackKind::Timeline,
+                structural_budget,
+            )?;
             parent = identity;
         }
         Ok(parent)
@@ -70,7 +90,13 @@ impl TrackCatalogBuilder {
         structural_budget: &mut StructuralIndexBudget,
     ) -> Result<String, ProjectionError> {
         let identity = counter_track_identity(parent, series_identity);
-        self.register(&identity, Some(parent), name, structural_budget)?;
+        self.register(
+            &identity,
+            Some(parent),
+            name,
+            TrackKind::Counter,
+            structural_budget,
+        )?;
         Ok(identity)
     }
 
@@ -79,6 +105,7 @@ impl TrackCatalogBuilder {
         canonical_identity: &str,
         parent_identity: Option<&str>,
         name: &str,
+        kind: TrackKind,
         structural_budget: &mut StructuralIndexBudget,
     ) -> Result<(), ProjectionError> {
         let depth = match parent_identity {
@@ -93,6 +120,7 @@ impl TrackCatalogBuilder {
             if existing.parent_identity.as_deref() != parent_identity
                 || existing.name != name
                 || existing.depth != depth
+                || existing.kind != kind
             {
                 return Err(ProjectionError::conflicting_track(canonical_identity));
             }
@@ -114,6 +142,7 @@ impl TrackCatalogBuilder {
             parent_identity: parent_identity.map(str::to_owned),
             name: name.to_owned(),
             depth,
+            kind,
         };
         self.definitions
             .insert(canonical_identity.to_owned(), definition);
@@ -215,6 +244,7 @@ impl TrackCatalog {
                         .expect("finished catalog assigns every descriptor parent")
                 }),
                 name: &definition.name,
+                is_counter: definition.kind == TrackKind::Counter,
             }
         })
     }
@@ -225,6 +255,7 @@ pub(crate) struct TrackDescriptorInfo<'catalog> {
     pub(crate) uuid: u64,
     pub(crate) parent_uuid: Option<u64>,
     pub(crate) name: &'catalog str,
+    pub(crate) is_counter: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +325,7 @@ pub(crate) fn allocate_span_lanes(
                 &track_identity,
                 Some(&interval.parent_track_identity),
                 display_name,
+                TrackKind::Timeline,
                 structural_budget,
             )?;
             structural_budget.reserve_owned(1, [track_identity.as_str()])?;

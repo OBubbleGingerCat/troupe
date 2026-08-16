@@ -28,6 +28,9 @@ pub(crate) struct TracePacket {
     // perfetto-schema: field perfetto.protos.TracePacket.timestamp
     #[prost(uint64, optional, tag = "8")]
     pub(crate) timestamp: Option<u64>,
+    #[prost(oneof = "trace_packet::OptionalTrustedPacketSequenceId", tags = "10")]
+    pub(crate) optional_trusted_packet_sequence_id:
+        Option<trace_packet::OptionalTrustedPacketSequenceId>,
     #[prost(oneof = "trace_packet::Data", tags = "11, 60")]
     pub(crate) data: Option<trace_packet::Data>,
     // perfetto-schema: field perfetto.protos.TracePacket.timestamp_clock_id
@@ -36,6 +39,14 @@ pub(crate) struct TracePacket {
 }
 
 pub(crate) mod trace_packet {
+    // perfetto-schema: oneof perfetto.protos.TracePacket.optional_trusted_packet_sequence_id
+    #[derive(Clone, PartialEq, prost::Oneof)]
+    pub(crate) enum OptionalTrustedPacketSequenceId {
+        // perfetto-schema: field perfetto.protos.TracePacket.trusted_packet_sequence_id
+        #[prost(uint32, tag = "10")]
+        TrustedPacketSequenceId(u32),
+    }
+
     // perfetto-schema: oneof perfetto.protos.TracePacket.data
     #[derive(Clone, PartialEq, prost::Oneof)]
     pub(crate) enum Data {
@@ -59,6 +70,9 @@ pub(crate) struct TrackDescriptor {
     // perfetto-schema: field perfetto.protos.TrackDescriptor.parent_uuid
     #[prost(uint64, optional, tag = "5")]
     pub(crate) parent_uuid: Option<u64>,
+    // perfetto-schema: field perfetto.protos.TrackDescriptor.counter
+    #[prost(message, optional, tag = "8")]
+    pub(crate) counter: Option<CounterDescriptor>,
 }
 
 pub(crate) mod track_descriptor {
@@ -70,6 +84,10 @@ pub(crate) mod track_descriptor {
         Name(String),
     }
 }
+
+// perfetto-schema: definition perfetto.protos.CounterDescriptor
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct CounterDescriptor {}
 
 // perfetto-schema: definition perfetto.protos.TrackEvent
 #[derive(Clone, PartialEq, Message)]

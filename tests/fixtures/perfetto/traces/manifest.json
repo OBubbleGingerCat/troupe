@@ -1,14 +1,14 @@
 {
   "schema": "troupe.perfetto.trace-fixtures.v1",
   "files": [
-    {"path":"active-watermark.pftrace","bytes":874,"sha256":"5647ee9163a7c13afb61e867140341bc093b485c63036ecf2100ee41742bba82"},
-    {"path":"archive-watermark.pftrace","bytes":865,"sha256":"9b5377224a4739fd127179f422cae284fd3a46e8e5f7db5e926703a7a5b5dddb"},
-    {"path":"empty.pftrace","bytes":388,"sha256":"f3f399a6897afb940a3dc95daa1ece2f4816eff37b6cc95bef154c661b211496"},
-    {"path":"multi-cue.pftrace","bytes":2745,"sha256":"30afce7070bd03798d31b6fcd46bcd8782908733b693d92a6f292409e87a56c5"},
-    {"path":"nested.pftrace","bytes":2427,"sha256":"24f7a01a2a9758fc6eb3c92dae9147239bdb55b66d34027e528f942775eeff40"},
-    {"path":"numeric-boundary.pftrace","bytes":1033,"sha256":"bc1569fc24ae271135e7f503367258d4c863e7c9b10fe7c8b4b31a226116df36"},
-    {"path":"open.pftrace","bytes":693,"sha256":"08011b4bceec4b95ade8861aa75af15171d3350fb62dfe969674bb7d37e5d48d"},
-    {"path":"overlap.pftrace","bytes":2745,"sha256":"e5bcf81dedbfa45ca0ad910766eea2e5da83efd4a286a6113627fbeea1a166c4"},
-    {"path":"repeated-dump.pftrace","bytes":2745,"sha256":"30afce7070bd03798d31b6fcd46bcd8782908733b693d92a6f292409e87a56c5"}
+    {"path":"active-watermark.pftrace","bytes":886,"sha256":"ec124d4874402f3e219d98425792e87c181a1f90e0daf8f9f96b8262e2042299"},
+    {"path":"archive-watermark.pftrace","bytes":877,"sha256":"4dc5be24c71be85f7bebccff0c6b10f6d9700016f5323c47091f4bb06c1c7243"},
+    {"path":"empty.pftrace","bytes":392,"sha256":"b1d10d3c138ee8cf094108dee6cbd85679a0b958361ddaae72b8a5ea4ec34eac"},
+    {"path":"multi-cue.pftrace","bytes":2775,"sha256":"688a7b632f8ec3161bc2e11ec90cbd65ff4d42afba425ed954913f1a4d5a9665"},
+    {"path":"nested.pftrace","bytes":2453,"sha256":"8020b1b42b7bb0c9eb3b12891a84ad577343574181ae691c6c38615d68a90b77"},
+    {"path":"numeric-boundary.pftrace","bytes":986,"sha256":"c5d2890e80e575359aee9734f86796bb84590a8c052e6812da85e81d2688eb32"},
+    {"path":"open.pftrace","bytes":701,"sha256":"d672b9535ce6b4e4903c93a671f3076d2bea28720a9c392d67dcda8bd6409168"},
+    {"path":"overlap.pftrace","bytes":2775,"sha256":"a1618f648a6acfc8d215ce9eb195314c22ef906c11355b2f72e0252e81537395"},
+    {"path":"repeated-dump.pftrace","bytes":2775,"sha256":"688a7b632f8ec3161bc2e11ec90cbd65ff4d42afba425ed954913f1a4d5a9665"}
   ]
 }

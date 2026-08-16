@@ -78,9 +78,9 @@ def _synthetic_flow_trace() -> bytes:
         + _fixed64(47, 7)
         + _fixed64(48, 8)
     )
-    descriptor_packet = _message(60, root)
-    metadata_packet = _message(60, metadata)
-    event_packet = _uint(8, 5) + _message(11, event) + _uint(58, 11)
+    descriptor_packet = _uint(10, 1) + _message(60, root)
+    metadata_packet = _uint(10, 1) + _message(60, metadata)
+    event_packet = _uint(8, 5) + _uint(10, 1) + _message(11, event) + _uint(58, 11)
     return _message(1, descriptor_packet) + _message(1, metadata_packet) + _message(1, event_packet)
 
 
@@ -149,11 +149,17 @@ def test_synthetic_packet_decodes_unpacked_flow_and_annotations() -> None:
 
 
 def test_numeric_fixture_preserves_int64_boundary_and_decimal_fallback() -> None:
-    summary = decoder.summarize_trace(decoder.decode_trace(NUMERIC_TRACE.read_bytes()))
+    decoded = decoder.decode_trace(NUMERIC_TRACE.read_bytes())
+    summary = decoder.summarize_trace(decoded)
 
     assert summary["counter_values"] == [
         {"name": "numeric.i64_max", "int64": "9223372036854775807"}
     ]
+    assert [
+        packet["descriptor"]["name"]
+        for packet in decoded["packets"]
+        if packet["kind"] == "descriptor" and packet["descriptor"]["counter"]
+    ] == ["numeric.not_exact", "numeric.i64_max"]
     assert "troupe.counter.value_decimal" in summary["annotation_names"]
     assert "troupe.counter_projection" in summary["annotation_names"]
 
