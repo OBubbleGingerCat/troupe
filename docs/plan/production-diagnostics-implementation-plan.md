@@ -366,7 +366,7 @@ provision的唯一命令是`scripts/fetch_pinned_perfetto_tools.sh --manifest te
 | B18 | Act sink admission 与 one-shot binding | producer-act-sink | B05,B06,B15,K02 |
 | B16 | Act sink seal、`wait_closed()` 与 summary settlement | producer-act-sink | B17,B18 |
 | B07 | Custom instrumentation Runtime context 与 mandatory admission | producer-custom | P04,B11 |
-| B14 | Act-scoped custom context 与 `DiagnosticSink` projection | producer-custom | B07,B18 |
+| B14 | Act-scoped custom context 与 `DiagnosticSink` projection | producer-custom | B07,B16 |
 | Q01 | Analytical ViewSpec query/reducer/pagination engine | query | Q00,C05 |
 | B08 | Pre-constructor ViewSpec compile 与 atomic persistence | producer-view | B00,P04 |
 | B13 | Archive View record compatibility 与 isolation | producer-view | B08 |
@@ -402,7 +402,7 @@ provision的唯一命令是`scripts/fetch_pinned_perfetto_tools.sh --manifest te
 | D11 | Cleanup apply、lease revalidation 与 whole-directory removal | cli-cleanup | D05 |
 | D06 | `dump` command wiring 与 atomic output UX | cli-dump | D01,H04,T08 |
 | D07 | Top-level diagnostic CLI assembly 与 exit semantics | cli-assembly | D08,D02,D09,D10,D04,D11,D06 |
-| X00 | Mandatory Runtime activation 与 ready ordering | convergence | B10,B04,B14,B16,D07 |
+| X00 | Mandatory Runtime activation 与 ready ordering | convergence | B10,B04,B14,D07 |
 | X01 | Core fatal supervision 与 Production cancellation convergence | convergence | X00 |
 | X02 | Terminal facts、drain、stream close、registry/store shutdown | convergence | X01 |
 | V00 | Cross-browser desktop/mobile visual interaction acceptance | verify-browser | X02 |
@@ -421,7 +421,7 @@ provision的唯一命令是`scripts/fetch_pinned_perfetto_tools.sh --manifest te
 | V12 | Happy/failure E2E runner assembly | verify-e2e-assembly | V02,V06 |
 | V16 | Acceptance evidence publisher primitive | verify-evidence-publisher | V05,V07 |
 | O00 | Operator overview、state、failure 与 cleanup documentation | docs-operations | X02 |
-| O01 | Python diagnostics API 与 examples documentation | docs-python | B13,B14,B16 |
+| O01 | Python diagnostics API 与 examples documentation | docs-python | B13,B14 |
 | O02 | Live Web UI documentation | docs-web | H04 |
 | O03 | Diagnostic CLI 与 Perfetto documentation | docs-cli-perfetto | D07,T02 |
 | V11 | D1-D54 traceability tooling 与 release checklist | verify-traceability | V12 |
@@ -570,7 +570,7 @@ flowchart LR
   P04 --> B07
   B11 --> B07
   B07 --> B14
-  B18 --> B14
+  B16 --> B14
   Q00 --> Q01
   C05 --> Q01
   B00 --> B08
@@ -644,7 +644,6 @@ flowchart LR
   B10 --> X00
   B04 --> X00
   B14 --> X00
-  B16 --> X00
   D07 --> X00
   X00 --> X01
   X01 --> X02
@@ -676,7 +675,6 @@ flowchart LR
   X02 --> O00
   B13 --> O01
   B14 --> O01
-  B16 --> O01
   H04 --> O02
   D07 --> O03
   T02 --> O03
@@ -786,6 +784,7 @@ parent、template、cardinality和SHA绑定。任何其他artifact placeholder�
 | `rust/crates/troupe-diagnostics-core/src/lib.rs` | F01 -> F04 | placeholder后只接module declaration |
 | `rust/crates/troupe-diagnostics-runtime/src/lib.rs` | F01 -> F04 | placeholder后只接module declaration |
 | `rust/crates/troupe-diagnostics-perfetto/src/lib.rs` | F01 -> F04 | placeholder后只接module declaration |
+| `rust/crates/troupe-diagnostics-perfetto/src/{collect,tracks}.rs` | F04 -> T01 -> T03 | T01完成projection；T03只增加fixed structural-index preflight |
 | `rust/Cargo.toml` | F01 -> F05 | F05只加入`diagnostics-test-support`feature，不加dependency |
 | `rust/src/lib.rs` | F05 | 一次性调用private installer seam；P04只填`install.rs` |
 | `rust/src/act_call.rs` | F05 -> B06 | F05接no-op lifecycle hooks；B06唯一修改public sink signature/preflight |
@@ -793,8 +792,11 @@ parent、template、cardinality和SHA绑定。任何其他artifact placeholder�
 | `rust/src/application/invocation.rs` | L00 -> D07 | loader return type后才接diagnostic CLI dispatch |
 | `rust/src/application/mod.rs` | F05 -> D07 | private module declaration后才公开dispatch |
 | `rust/src/application/cli.rs` | D07 -> X00 | CLI family join后才接mandatory Runtime activation |
-| `rust/src/orchestration/{mod,actor_handle,actor_registry,cue,cue_future,effect,mailbox,production,python_task,runtime,scene_context}.rs` | F05 | F05一次性放置typed no-op calls；B节点只填`diagnostic_runtime/`slot |
+| `rust/src/orchestration/{mod,actor_handle,actor_registry,cue,cue_future,effect,mailbox,production,runtime}.rs` | F05 | F05一次性放置typed no-op calls；B节点只填`diagnostic_runtime/`slot |
+| `rust/src/orchestration/{python_task,scene_context}.rs` | F05 -> B14 | F05建立lineage seam；B14加入generation-bound Act task authority |
 | `rust/src/orchestration/actor.rs` | F05 -> B06 | F05放置compile-safe signature/preflight seam；B06唯一加入PyO3 keyword和同步validation调用 |
+| `rust/src/diagnostic_sink/mod.rs` | F05 -> B16 | F05声明sink modules；B16只导出settlement所需crate-private types |
+| `rust/src/diagnostic_runtime/sink_binding.rs` | F05 -> B18 -> B16 -> B14 | binding、settlement hook、authority transaction按DAG有序接线 |
 | `rust/crates/troupe-agent-runtime/src/{lib.rs,session/mod.rs,session/supervisor.rs,session/turn.rs}` | F06 | F06一次性放置typed optional observer calls；A节点只填`diagnostics/`slot |
 | `rust/src/diagnostic_python/install.rs` | F05 -> P04 | P04唯一组装Python module |
 | `rust/src/diagnostic_runtime/activation.rs` | F05 -> X00 | X00唯一启用mandatory Runtime path |
@@ -809,12 +811,14 @@ parent、template、cardinality和SHA绑定。任何其他artifact placeholder�
 | `tests/unit/test_verify_diagnostic_fixtures.py` | C03 -> C05 | 与fixture verifier同序扩展 |
 | `scripts/verify_wheel.py` | F00 -> V07 | F00等价迁移，V07只增加diagnostics assertions |
 | `tests/unit/test_release_script.py` | F00 -> V01 | F00等价迁移，V01只增加diagnostics dispatch cases |
+| `tests/integration/test_actor_act_diagnostic_sink_binding.py` | B18 -> B14 | B18建立binding覆盖；B14追加authority commit/rollback顺序断言 |
 
 ### 4.3 Slot behavior owner 的完整映射
 
-`mod.rs`默认只含F04/F05/F06创建的declaration；下表覆盖4.1中除此以外的每个slot，且每个展开path恰出现
-一次。behavior owner只能填充该文件，不能修改parent；creator与owner相同时表示该foundation node直接完成
-test-only seam。4.2同时列出的slot，其最后一个writer必须等于这里的behavior owner。
+`mod.rs`默认只含F04/F05/F06创建的declaration；下表覆盖4.1中除此以外的每个slot，以及4.2明确授权后继
+修改的`mod.rs`，且每个展开path恰出现一次。behavior owner是slot主要实现owner，只能填充该文件，不能修改
+parent；creator与owner相同时表示该foundation node直接完成test-only seam。4.2可以在behavior owner之后列出
+有序successor writer；最终writer由4.2决定，未列出的后继仍非法。
 
 | Owner | Exact slot paths |
 |---|---|
@@ -866,6 +870,7 @@ test-only seam。4.2同时列出的slot，其最后一个writer必须等于这�
 | K00 | `rust/src/diagnostic_sink/{queue,budget}.rs` |
 | K01 | `rust/src/diagnostic_sink/{thread,dispatcher,callback}.rs` |
 | K02 | `rust/src/diagnostic_sink/{seal,summary,shutdown}.rs` |
+| B16 | `rust/src/diagnostic_sink/mod.rs` |
 | F05 | `rust/src/diagnostic_runtime/hooks.rs` |
 | X00 | `rust/src/diagnostic_runtime/activation.rs` |
 | B00 | `rust/src/diagnostic_runtime/bootstrap.rs` |
@@ -959,7 +964,7 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 #### F02 - Exact ownership ledger 与 dispatch audit
 
 - **产物**：`tests/fixtures/artifact_layout/ownership-ledger.json`；`scripts/audit_diagnostic_ownership.py`的全路径/role/diff验证扩展；`tests/unit/test_diagnostic_ownership.py`的DAG/path/category/owner negative cases。
-- **验收**：ledger的`paths[]`逐static file指定`baseline_state`、closed ordered`writers`及`create|seam|implement|assemble|generate|remove` role，并另含4.2唯一G01 grant；`--plan-only`从4.1 creator/behavior、4.2 shared rows、4.3、第5节exact artifact、唯一artifact fragment family与唯一gate descriptor family计算projected writer集合，与ledger/grant双向相等，且每个slot的creator/behavior owner、每个shared row与contract-derived writer都双向相等，不读取未来manifest actual members；第5节产物字段中每个反引号literal必须是canonical repository-root path、F00登记的artifact family或W14登记的`files[].path`，拒绝absolute、`./`、`.`/`..` segment、backslash、empty segment、未知root、重复展开和`*?[]` glob；Gate literal与realized descriptor argv中的每个repository path必须来自exact PRODUCT_BASE_SHA、五文件accepted planning bundle或当前node/任一ancestor的artifact，frontend maintain relative test path先规范化到`frontend/diagnostics/`，ownerless、sibling或future-only path在dispatch前失败；gate descriptor concrete path绝不进入artifact union；F00/F01/W00/F02的两类lifecycle file必须realized，artifact fragment的`introduced ∪ modified ∪ removed ∪ generated`与其实际ledger writer集合双向相等，其余两类file分别保持planned/empty；existing/planned与F02 checkout和future first writer一致；writer必须是index node且相邻writer可达；两个不可比较node不能拥有同path；每node必须有至少一个projected exact file或唯一受限grant，directory/glob不作为ownership key；所有4.2机器表逐row/逐column closed解析，missing/extra/malformed row或field失败；missing/extra/duplicate/ghost shared path、第三个parameterized family、artifact/gate schema混用、family writer漂移、unknown/越序writer、hidden parent join、非法generated field/template/cardinality、W06/V00 exact artifact漂移、Gate ownerless/non-ancestor path、diff未登记、category/role/state不符逐一失败；accepted planning bundle五文件必须tracked、hash匹配且不属于任何node。
+- **验收**：ledger的`paths[]`逐static file指定`baseline_state`、closed ordered`writers`及`create|seam|implement|assemble|generate|remove` role，并另含4.2唯一G01 grant；`--plan-only`从4.1 creator/behavior、4.2 shared rows、4.3、第5节exact artifact、唯一artifact fragment family与唯一gate descriptor family计算projected writer集合，与ledger/grant双向相等，且每个slot的creator/behavior owner、每个shared row与contract-derived writer都双向相等；slot primary behavior owner固定为creator后的第一个shared writer，4.2可继续列出有序successor writers且不能误把最终writer当primary owner；不读取未来manifest actual members；第5节产物字段中每个反引号literal必须是canonical repository-root path、F00登记的artifact family或W14登记的`files[].path`，拒绝absolute、`./`、`.`/`..` segment、backslash、empty segment、未知root、重复展开和`*?[]` glob；Gate literal与realized descriptor argv中的每个repository path必须来自exact PRODUCT_BASE_SHA、五文件accepted planning bundle或当前node/任一ancestor的artifact，frontend maintain relative test path先规范化到`frontend/diagnostics/`，ownerless、sibling或future-only path在dispatch前失败；gate descriptor concrete path绝不进入artifact union；F00/F01/W00/F02的两类lifecycle file必须realized，artifact fragment的`introduced ∪ modified ∪ removed ∪ generated`与其实际ledger writer集合双向相等，其余两类file分别保持planned/empty；existing/planned与F02 checkout和future first writer一致；writer必须是index node且相邻writer可达；两个不可比较node不能拥有同path；每node必须有至少一个projected exact file或唯一受限grant，directory/glob不作为ownership key；所有4.2机器表逐row/逐column closed解析，missing/extra/malformed row或field失败；missing/extra/duplicate/ghost shared path、第三个parameterized family、artifact/gate schema混用、family writer漂移、unknown/越序writer、hidden parent join、非法generated field/template/cardinality、W06/V00 exact artifact漂移、Gate ownerless/non-ancestor path、diff未登记、category/role/state不符逐一失败；accepted planning bundle五文件必须tracked、hash匹配且不属于任何node。
 - **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh F02`，descriptor执行`pytest -q tests/unit/test_diagnostic_ownership.py tests/unit/test_artifact_layout.py`和`python scripts/audit_diagnostic_ownership.py --plan-only --plan docs/plan/production-diagnostics-implementation-plan.md`。
 - **边界**：只定义/验证ledger，不创建Rust slot或改变build/runtime。
 
@@ -1300,7 +1305,7 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 
 - **产物**：`rust/crates/troupe-agent-runtime/src/diagnostics/result.rs`；`rust/crates/troupe-agent-runtime/tests/diagnostic_result.rs`。
 - **验收**：消费F06接入真实result MCP state machine的typed observations；submitted/rejected/repair/accepted/missing只含stable metadata/code/path，validated result value、raw validation payload和script永不进入candidate；每次validation rejection同时产生同一Act scope的cumulative `result.validation_rejections` counter candidate，值严格为1..N，repair-requested/terminal/cancel不重复计数；transition与counter的先后、cardinality及全部terminal/cancel permutations deterministic且不改变现有Act return/error。
-- **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-agent-runtime --test diagnostic_result`；test必须驱动真实Result MCP service/state machine及F06 seam，逐项断言accepted/rejected/repair/missing和0/1/N rejection边界，不能只直接构造normalizer输入。
+- **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-agent-runtime --features agent-test-support --test diagnostic_result`；test必须驱动真实Result MCP service/state machine及F06 seam，逐项断言accepted/rejected/repair/missing和0/1/N rejection边界，不能只直接构造normalizer输入。
 - **边界**：不读取tool payload或构造Python dict结果。
 
 #### A09 - Opaque sink-only payload budgeting
@@ -1335,9 +1340,9 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 
 #### T03 - Bounded captured-prefix Perfetto packet stream
 
-- **产物**：`rust/crates/troupe-diagnostics-perfetto/src/dump.rs`；`rust/crates/troupe-diagnostics-perfetto/tests/dump.rs`；`tests/fixtures/perfetto/traces/{manifest.json,empty.pftrace,open.pftrace,nested.pftrace,multi-cue.pftrace,overlap.pftrace,numeric-boundary.pftrace,active-watermark.pftrace,archive-watermark.pftrace,repeated-dump.pftrace}`。输入只使用Q00在workspace interface暴露的CapturedEventSource，不新增runtime/native bridge文件。
-- **验收**：提供唯一可复用`CapturedEventSource -> AsyncWrite/packet stream`bounded encoder core，调用方admission捕获W，default导出1..W，explicit through必须canonical且<=W，through0/empty生成合法descriptor-only trace；每次只把一个packet写入可复用buffer，paged reader/peak memory不随Run长度增长；writer short-write/cancel/encode/source error原样返回且不重试或改变source；metadata精确包含schemas/run/W/version/outcome/clean shutdown availability/content warning；九个checked-in fixture由同一typed source向in-memory writer确定性生成，manifest逐文件固定SHA-256，clean regenerate byte-equal。
-- **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-diagnostics-perfetto --test dump`，覆盖writer short-write/cancel、source/encode fault和large paged-stream memory bound，且不接触filesystem output path。
+- **产物**：`rust/crates/troupe-diagnostics-perfetto/src/{collect,tracks,dump}.rs`；`rust/crates/troupe-diagnostics-perfetto/tests/dump.rs`；`tests/fixtures/perfetto/traces/{manifest.json,empty.pftrace,open.pftrace,nested.pftrace,multi-cue.pftrace,overlap.pftrace,numeric-boundary.pftrace,active-watermark.pftrace,archive-watermark.pftrace,repeated-dump.pftrace}`。输入只使用Q00在workspace interface暴露的CapturedEventSource，不新增runtime/native bridge文件。
+- **验收**：提供唯一可复用`CapturedEventSource -> AsyncWrite/packet stream`bounded encoder core，调用方admission捕获W，default导出1..W，explicit through必须canonical且<=W，through0/empty生成合法descriptor-only trace；在首次poll writer以前完成第一遍captured-prefix结构预检，建立固定上限且不可配置的prefix-wide index：最多1,000,000个structural entries和64 MiB owned structural payload，equal接受，下一次reservation在allocation前以typed `StructuralIndexLimitExceeded { dimension, limit, required }`失败。index精确计入sequence/span records、unique tracks、spans、lane assignments、causal flows及start/end attachments、Act usage、dense identities和descriptor order；不保留完整canonical events/pages/trace bytes、不spill filesystem/temp index。第二遍才重新读取同一captured prefix并每次只把一个packet写入可复用buffer，输出侧常驻内存至多一个source page、一个packet和一个reusable buffer；invalid through/dense/reference/timestamp/ID/structural limit均在首次writer poll前失败，第二遍source/encode/write/cancel error可留下partial stream且原样返回、不重试或改变source；metadata精确包含schemas/run/W/version/outcome/clean shutdown availability/content warning；九个checked-in fixture由同一typed source向in-memory writer确定性生成，manifest逐文件固定SHA-256，clean regenerate byte-equal。
+- **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-diagnostics-perfetto --lib --test projection --test dump`，覆盖fixed structural entry/payload equal/over、first-writer-poll barrier、writer short-write/cancel、second-pass source/encode fault和large paged-stream bound，且不接触filesystem output path。
 - **边界**：只编码captured prefix；不创建/rename/fsync文件、不解释force/CLI/HTTP、不运行official Perfetto工具。
 
 #### T08 - Atomic local `.pftrace` publication wrapper
@@ -1350,8 +1355,8 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 #### T04 - Pinned Perfetto tool manifest、fetch 与 offline cache contract
 
 - **产物**：`tests/perfetto/tools/{manifest.json,SHA256SUMS,README.md}`；`scripts/fetch_pinned_perfetto_tools.sh`；`tests/unit/test_perfetto_tool_fetch.py`。
-- **验收**：manifest只允许official v57.2 exact URLs/platforms/hashes和cache filenames；fetch必须显式`--cache <absolute-owned-dir>`且先download temp、hash、atomic rename，已有hash-match复用；`--offline`绝不联网且missing/mismatch明确失败；path traversal/symlink/cache escape拒绝；binary/UI bundle只在external cache，不进source/wheel；current public UI canary是另一个non-blocking mode且网络失败不改变blocking result。
-- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh T04`，descriptor在owned fake transport/cache执行`pytest -q tests/unit/test_perfetto_tool_fetch.py`和`scripts/fetch_pinned_perfetto_tools.sh --offline --verify-only --cache "${TROUPE_PERFETTO_CACHE:?}"`；root随后执行`scripts/fetch_pinned_perfetto_tools.sh --manifest tests/perfetto/tools/manifest.json --cache "${TROUPE_PERFETTO_CACHE:?}" --provision`并按第2.2节冻结cache evidence。
+- **验收**：manifest只允许official v57.2 exact URLs/platforms/hashes和cache filenames；fetch必须显式`--cache <absolute-owned-dir>`且先download temp、hash、atomic rename，已有hash-match复用；`--offline`绝不联网且missing/mismatch明确失败；path traversal/symlink/cache escape拒绝；binary/UI bundle只在external cache，不进source/wheel；current public UI canary是另一个non-blocking mode且网络失败不改变blocking result。node Gate通过后root恰执行一次`scripts/fetch_pinned_perfetto_tools.sh --manifest tests/perfetto/tools/manifest.json --cache "${TROUPE_PERFETTO_CACHE:?}" --provision`并按第2.2节冻结cache evidence；该网络provision不是可重复descriptor argv。
+- **Gate**：`scripts/run_diagnostic_bootstrap_gate.sh T04`，descriptor执行`pytest -q tests/unit/test_perfetto_tool_fetch.py`和`scripts/fetch_pinned_perfetto_tools.sh --offline --verify-only --cache "${TROUPE_PERFETTO_CACHE:?}"`，runner提供owned fake transport/cache。
 - **边界**：不生成trace、不运行任何兼容层、不提交downloaded tool。
 
 #### T05 - Independent protobuf decode compatibility layer
@@ -1392,7 +1397,7 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 #### H01 - Status/snapshot/events HTTP endpoints
 
 - **产物**：`rust/crates/troupe-diagnostics-runtime/src/server/query.rs`；`rust/crates/troupe-diagnostics-runtime/tests/server_query.rs`；`tests/fixtures/diagnostics/http/{status-v1.json,snapshot-v1.json,events-v1.json,error-v1.json}`。
-- **验收**：唯一注册identity-checked `/status`、`/snapshot`和finite `/events`，分别只调用Q02/Q03/Q04，并让同一golden通过Rust response、stdlib verifier与W01 TypeScript decoder；snapshot state/watermark一致，events after/tail/captured head与HTTP errors/version精确；所有schema `u64`/token int decimal string，UUID/null/canonical event bytes不损；invalid cursor/format/identity/schema有closed error；headers/MIME/no-store/relative base path正确；failed/incomplete读取仍200并显式status；单request cancellation不取消query engine或Runtime。
+- **验收**：唯一注册identity-checked `/status`、`/snapshot`和finite `/events`，分别只调用Q02/Q03/Q04，并让同一golden通过Rust response、stdlib verifier与W01 TypeScript decoder；snapshot state/watermark一致，events保持既有after/tail语义并新增仅与after成对合法的through：`after=A&through=W`返回exact dense `(A,W]`，response仍为`{api_schema_version,run_id,captured_watermark,events,next_after:null}`且不新增limit/API版本；through alone、after+tail、tail+through拒绝，invalid/future cursor/format/identity/schema有closed error；所有schema `u64`/token int decimal string，UUID/null/canonical event bytes不损；headers/MIME/no-store/relative base path正确；failed/incomplete读取仍200并显式status；单request cancellation不取消query engine或Runtime。
 - **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-diagnostics-runtime --test server_query`，golden response和concurrent commit captured-head test。
 - **边界**：不实现follow/SSE、View aggregate或CLI formatting。
 
@@ -1405,15 +1410,15 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 
 #### H03 - View query HTTP endpoint 与 panel-local error contract
 
-- **产物**：`rust/crates/troupe-diagnostics-runtime/src/server/views.rs`；`rust/crates/troupe-diagnostics-runtime/tests/server_views.rs`；`tests/fixtures/diagnostics/http/{view-timeline-v1.json,view-metric-v1.json,view-table-v1.json,view-timeseries-v1.json,view-error-v1.json}`。
-- **验收**：只接受version-compatible C05 descriptor/compiled view ID，调用Q01并返回run/W/time/scope/coverage/cursor/capabilities；TimeSeries response带exact frozen range/width/aligned empty+partial buckets且不允许client override width；page<=500、cursor和scope tamper拒绝；unsupported/corrupt archive view返回单panel unavailable但canonical endpoints仍工作；invalid client query/timeout/cancel是local versioned error；active profile的Q00 corruption或query execution context系统性退出转发core-fatal，archive profile同类store/query open failure只终止对应request/serve command；所有内容只作data，不执行Production Python。
+- **产物**：`rust/crates/troupe-diagnostics-runtime/src/server/views.rs`；`rust/crates/troupe-diagnostics-runtime/tests/server_views.rs`；`tests/fixtures/diagnostics/http/{view-timeline-v1.json,view-metric-v1.json,view-table-v1.json,view-timeseries-v1.json,view-error-v1.json,view-catalog-v1.json,view-catalog-archive-v1.json}`。
+- **验收**：无query的`GET /api/v1/views`返回exact `{api_schema_version,run_id,capabilities,views}`，最多64项、保持manifest order且允许empty；compatible entry是exact C05 ViewRecord，archive incompatible entry只含status、manifest `view_id`/renderer和exact C05 IncompatibleView，不伪造title/query。带`view_id`的既有query行为不变，任何其他无view_id参数fail closed；query只接受version-compatible C05 descriptor/compiled view ID，调用Q01并返回run/W/time/scope/coverage/cursor/capabilities；TimeSeries response带exact frozen range/width/aligned empty+partial buckets且不允许client override width；page<=500、cursor和scope tamper拒绝；unsupported/corrupt archive view返回单panel unavailable但canonical endpoints仍工作；invalid client query/timeout/cancel是local versioned error；active profile的Q00 corruption或query execution context系统性退出转发core-fatal，archive profile同类store/query open failure只终止对应request/serve command；所有内容只作data，不执行Production Python。
 - **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-diagnostics-runtime --test server_views`，逐四renderer、pagination、newer/corrupt、local-vs-system failure。
 - **边界**：不渲染UI、不compile Python ViewSpec。
 
 #### H05 - Perfetto captured-prefix HTTP dump endpoint
 
 - **产物**：`rust/crates/troupe-diagnostics-runtime/src/server/dump.rs`；`rust/crates/troupe-diagnostics-runtime/tests/server_dump.rs`；`tests/fixtures/diagnostics/http/{dump-metadata-v1.json,dump-error-v1.json}`。
-- **验收**：identity-checked read-only `GET /api/v1/dump`在active profile复用S05 Runtime-held borrowed guard且断言零lock acquire/release，在archive profile才由server端取得并释放request-owned shared lease；两者都通过Q00 read transaction捕获W，并以optional canonical `through<=W`选择同一稳定prefix；直接把T03 bounded encoder流式写入response，exact MIME、run/W/schema/version/outcome/content-warning metadata headers与trace内metadata一致，memory不随Run长度增长；client disconnect只取消本request并释放reader/request-owned archive lease，绝不释放active guard，不创建server temp或访问archive外path；remote request不能提供server output path、force/overwrite参数或任意filesystem target；active并发commit只影响后续request，archive/incomplete/error均有closed response fixture且不影响其他route。
+- **验收**：identity-checked read-only `GET /api/v1/dump`在active profile复用S05 Runtime-held borrowed guard且断言零lock acquire/release，在archive profile才由server端取得并释放request-owned shared lease；两者都通过Q00 read transaction捕获W，并以optional canonical `through<=W`选择同一稳定prefix；必须等待T03 bounded encoder第一遍structural preflight全部成功后才commit successful response并开始poll response writer，随后流式写入第二遍packet，exact MIME、run/W/schema/version/outcome/content-warning metadata headers与trace内metadata一致；client disconnect只取消本request并释放reader/request-owned archive lease，绝不释放active guard，不创建server temp或访问archive外path；remote request不能提供server output path、force/overwrite参数或任意filesystem target；active并发commit只影响后续request，archive/incomplete/error均有closed response fixture且不影响其他route。
 - **Gate**：`cargo test --locked --manifest-path rust/Cargo.toml -p troupe-diagnostics-runtime --test server_dump`，用counting fake lease覆盖active zero-reacquire/guard retention与archive exact shared acquire-release，并覆盖through边界、concurrent commit barrier、large paged stream、disconnect、path/force参数拒绝和metadata golden。
 - **边界**：只把Q00 captured source接到T03 stream core；不创建本地文件、不解析CLI、不提供upload或public Perfetto UI。
 
@@ -1526,8 +1531,8 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 
 #### B16 - Act sink seal、`wait_closed()` 与 summary settlement
 
-- **产物**：`rust/src/diagnostic_runtime/sink_settlement.rs`；`tests/integration/{test_actor_act_diagnostic_sink_close.py,test_actor_act_diagnostic_sink_standalone.py}`。
-- **验收**：terminal顺序对completed/cancelled/failed/unavailable和`usage=False`全部固定为B17完成唯一canonical usage admission -> B05完成`act.lifecycle` SpanFinished admission -> B18对两项应用B15 projection并把selected usage及不可关闭的Act finish按sequence入队 -> B16在Act finish已入该sink queue后恰好一次seal；Act return/caller cancel不等待callback，remote handoff仍可投递到seal；repeatable no-timeout`wait_closed()`在CLOSED后总返回同一immutable summary，多个waiter一致，waiter cancellation不取消delivery；normal/drop/callback-failed/Runtime shutdown abandoned reasons和`complete`准确；K02 bounded shutdown不阻塞Production，post-seal无event；terminal usage不重复进summary字段；作为B12/B17/B18汇合后的standalone full-chain owner，用合法cued/RunBinding和真实mock ACP/result MCP证明已有session不重建、message/plan/tool/result/context/terminal usage canonical events与terminal order、同binding sequence共享、standalone opt-in tool payload只到sink且没有store/file side effect、None零分配及零listener/file/registry/SQLite side effect。
+- **产物**：`rust/src/diagnostic_runtime/{sink_settlement,sink_binding}.rs`；`rust/src/diagnostic_sink/mod.rs`；`tests/integration/{test_actor_act_diagnostic_sink_close.py,test_actor_act_diagnostic_sink_standalone.py}`。
+- **验收**：terminal顺序对completed/cancelled/failed/unavailable和`usage=False`全部固定为B17完成唯一canonical usage admission -> B05完成`act.lifecycle` SpanFinished admission -> B18对两项应用B15 projection并把selected usage及不可关闭的Act finish按sequence入队 -> B14使act/generation authority过期 -> B16在settlement hook确认authority expiry后恰好一次seal并retire binding；B16只暴露B14可调用的transactional settlement hook，失败时不得留下半过期authority或半seal queue；Act return/caller cancel不等待callback，remote handoff仍可投递到seal；repeatable no-timeout`wait_closed()`在CLOSED后总返回同一immutable summary，多个waiter一致，waiter cancellation不取消delivery；normal/drop/callback-failed/Runtime shutdown abandoned reasons和`complete`准确；K02 bounded shutdown不阻塞Production，post-seal无event；terminal usage不重复进summary字段；作为B12/B17/B18汇合后的standalone full-chain owner，用合法cued/RunBinding和真实mock ACP/result MCP证明已有session不重建、message/plan/tool/result/context/terminal usage canonical events与terminal order、同binding sequence共享、standalone opt-in tool payload只到sink且没有store/file side effect、None零分配及零listener/file/registry/SQLite side effect。
 - **Gate**：`scripts/run_diagnostic_node_gate.sh B16`，descriptor执行`pytest -q tests/integration/test_actor_act_diagnostic_sink_close.py tests/integration/test_actor_act_diagnostic_sink_standalone.py tests/integration/test_actor_act_cancellation.py tests/unit/test_diagnostic_sink_close.py`。
 - **边界**：不改变capture/filter或Act result/error surface。
 
@@ -1540,8 +1545,8 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 
 #### B14 - Act-scoped custom context 与 `DiagnosticSink` projection
 
-- **产物**：`rust/src/diagnostic_runtime/custom_act_binding.rs`；`tests/integration/test_diagnostic_custom_act_sink.py`。
-- **验收**：在active Act和registered descendant中为B07补齐准确act/tool/session scope，Act结束后context立即过期；custom fact只经mandatory hub一次分配sequence；B18-bound sink对相同act_id的fact应用B15 pure projection，frozen`capture.custom_events=True`才收到同一immutable projection，false不收到但global stream不变；custom span temporal parent不跨new task，caller cancellation后仅仍获授权的supervisor task可发布；sink overflow/callback failure不反压或改变custom admission；store/sink fixture identity byte-equal，Web/Perfetto跨consumer closure留给V02。
+- **产物**：`rust/src/diagnostic_runtime/{custom_act_binding,sink_binding}.rs`；`rust/src/orchestration/{python_task,scene_context}.rs`；`tests/integration/{test_diagnostic_custom_act_sink.py,test_actor_act_diagnostic_sink_binding.py}`。
+- **验收**：用exact `RunBinding + act_id/generation + role/state` authority在active Act及registered propagation内为B07补齐准确act/tool/session scope；role closed为caller、caller descendant、supervisor，只有registered child传播，thread/unregistered task/错误generation/expired token同步失败且绝不fallback到Cue scope、sink registry reverse lookup或其他ambient context。authority建立、custom admission和B18 sink projection采用staged/transactional commit，任一失败完整rollback；terminal严格在B17 usage admission、B05 Act finish admission及B18 terminal enqueue之后经B16 settlement hook提交authority expiry，随后才由B16 seal/retire。custom fact只经mandatory hub一次分配sequence；B18-bound sink对相同act_id的fact应用B15 pure projection，frozen`capture.custom_events=True`才收到同一immutable projection，false不收到但global stream不变；custom span temporal parent不跨new task，caller cancellation后仅仍获授权的supervisor task可发布；sink overflow/callback failure不反压或改变custom admission；store/sink fixture identity byte-equal，Web/Perfetto跨consumer closure留给V02。
 - **Gate**：`scripts/run_diagnostic_node_gate.sh B14`，descriptor执行`pytest -q tests/integration/test_diagnostic_custom_act_sink.py tests/integration/test_diagnostic_custom_runtime.py tests/integration/test_actor_act_diagnostic_sink_binding.py`。
 - **边界**：不改变public custom/sink values、不复制或重写canonical event。
 
@@ -1555,7 +1560,7 @@ crate-local scope缩写。`rust/crates/.../tests/foo.rs`与repository-root `test
 #### B13 - Archive View record compatibility 与 isolation
 
 - **产物**：`rust/crates/troupe-diagnostics-runtime/src/query/archive_views.rs`与`rust/src/diagnostic_runtime/archive_views.rs`；`tests/integration/test_diagnostic_archive_views.py`。
-- **验收**：archive只读stored manifest/records且绝不import Production；current compatible records解码，单条newer schema或corrupt record仅标该view unavailable并保留canonical timeline/query/其他views；manifest/store identity或canonical event损坏仍为archive operation failure；reason stable且不执行embedded string/markup；active mode不允许局部跳过invalid view。
+- **验收**：archive只读stored manifest/records且绝不import Production；必须先检查manifest声明的schema version，newer version保持opaque并直接映射exact C05 IncompatibleView，绝不按current JSON schema解析；只有current-version record才执行decode/identity/canonical验证，current compatible records解码，单条current corrupt record仅标该view unavailable并保留canonical timeline/query/其他views；manifest/store identity或canonical event损坏仍为archive operation failure；reason stable且不执行embedded string/markup；active mode不允许局部跳过invalid view。
 - **Gate**：`scripts/run_diagnostic_node_gate.sh B13`，descriptor执行`pytest -q tests/integration/test_diagnostic_archive_views.py`。
 - **边界**：不serve HTTP、不渲染panel；只暴露typed archive-view result给后续server/View consumer。
 
@@ -1590,7 +1595,7 @@ mock event parser，也不进入build input。
 #### W08 - Bounded browser read model、cursor 与 query invalidation reducer
 
 - **产物**：`frontend/diagnostics/src/state/{model,reducer,windows,lru,queries,selection}.ts`；`frontend/diagnostics/tests/unit/{state-reducer.test.ts,state-windows.test.ts,state-property.test.ts}`。
-- **验收**：只保存visible window、selected/expanded detail、fixed adjacent-window LRU和bounded live-edge projection；按`(run_id,sequence)`幂等、strict monotonic cursor、span/message/counter/usage/gap read model一致；pause继续推进watermark/unseen count但不积无界raw backlog，resume标记被淘汰range需server query；SSE event使受影响query invalid而非浏览器重算aggregate；selection/expand/filter/follow/zoom跨增量更新保持；没有IndexedDB/localStorage/service worker/Web Worker/WebGL；capacity边界和eviction不丢canonical correctness metadata。
+- **验收**：只保存visible window、selected/expanded detail、fixed adjacent-window LRU和bounded live-edge projection；提供W05唯一调用的atomic hydrate：snapshot是materialized facts authority，raw suffix不经ordinary `event_received`重放，只补EventTable以及snapshot缺失的instant-derived tool update/result transition；hydrate整体校验后一次commit，A>0时设置tool/result refresh flags和`dropped_through=A`。其余增量按`(run_id,sequence)`幂等、strict monotonic cursor、span/message/counter/usage/gap read model一致；pause继续推进watermark/unseen count但不积无界raw backlog，resume标记被淘汰range需server query；SSE event使受影响query invalid而非浏览器重算aggregate；selection/expand/filter/follow/zoom跨增量更新保持；没有IndexedDB/localStorage/service worker/Web Worker/WebGL；capacity边界和eviction不丢canonical correctness metadata。
 - **Gate**：`node frontend/diagnostics/scripts/maintain.mjs --npm-cache "${TROUPE_NPM_CACHE:?}" --typecheck --unit tests/unit/state-reducer.test.ts,tests/unit/state-windows.test.ts,tests/unit/state-property.test.ts`。
 - **边界**：无网络/DOM/Canvas/uPlot。
 
@@ -1667,14 +1672,14 @@ mock event parser，也不进入build input。
 #### W05 - SSE/reconnect/live-edge/pause frontend integration
 
 - **产物**：`frontend/diagnostics/src/live/{bootstrap,snapshot,sse,reconnect,pause}.ts`；`frontend/diagnostics/tests/integration/{live-bootstrap.test.tsx,live-reconnect.test.tsx,live-pause.test.tsx}`。
-- **验收**：native fetch先验证bootstrap/compat并取得snapshot W，再native EventSource after W；按run/sequence dedupe，control不推进cursor；reconnect/gap/resync回server snapshot/replay，不从cache猜；stream_closed停止自动重连；live update保持expand/selection/zoom/filter/follow；pause继续W/unseen ingestion，有界window淘汰后resume发range query intent；connection/security/failed/incomplete状态准确；一个commit最多触发一次scheduled Canvas draw；无external requests。
+- **验收**：native fetch先验证bootstrap/compat并取得snapshot W，令`A=max(0,W-4096)`，再请求`GET /api/v1/events?after=A&through=W`并验证response run/watermark、canonical IDs、至多4096项及exact dense `(A,W]`；只在snapshot与suffix整体成功后调用W08 atomic hydrate，随后native EventSource after W。不得发送limit或引入新API版本；按run/sequence dedupe，control不推进cursor；reconnect/gap/resync回同一snapshot/bounded suffix/SSE流程，不从cache猜；stream_closed停止自动重连；live update保持expand/selection/zoom/filter/follow；pause继续W/unseen ingestion，有界window淘汰后resume发range query intent；connection/security/failed/incomplete状态准确；一个commit最多触发一次scheduled Canvas draw；无external requests。
 - **Gate**：`node frontend/diagnostics/scripts/maintain.mjs --npm-cache "${TROUPE_NPM_CACHE:?}" --typecheck --unit tests/integration/live-bootstrap.test.tsx,tests/integration/live-reconnect.test.tsx,tests/integration/live-pause.test.tsx`。
 - **边界**：不执行View query、不build production assets。
 
 #### W10 - View query invalidation、pagination 与 uPlot data integration
 
 - **产物**：`frontend/diagnostics/src/query/{client,cache,pagination,binding}.ts`；`frontend/diagnostics/tests/integration/{query-invalidation.test.ts,query-pagination.test.ts}`。
-- **验收**：只向H03发送closed descriptors/compiled view ID和captured time/scope binding；opaque cursor不解析；query generation key冻结run/view/selection/scope/W/viewport range，任一变化都使整份result stale并coalesce/refetch；TimeSeries response还必须byte-equal绑定server返回的range/derived width，pan/zoom或width变化时abort-or-ignore旧inflight response并完整替换，旧response不能覆盖新selection/W/viewport/width，也不得merge/rebucket不同width；Table pagination<=500并保持captured context；pause/follow不造无界response cache；query/timeout/renderer failure局部；server返回matched/contributing/excluded/gap/coverage完整传给panel；不在client重做aggregate。
+- **验收**：在owned `client.ts`复用W01 decoder实现无query catalog decoder；每个Run/Views surface恰fetch一次，完整响应closed validation成功后才atomic commit。catalog只为compatible entry发query，incompatible entry零query；任一malformed entry使整个surface进入local error且不保留partial catalog。既有query只向H03发送closed descriptors/compiled view ID和captured time/scope binding；opaque cursor不解析；query generation key冻结run/view/selection/scope/W/viewport range，任一变化都使整份result stale并coalesce/refetch；TimeSeries response还必须byte-equal绑定server返回的range/derived width，pan/zoom或width变化时abort-or-ignore旧inflight response并完整替换，旧response不能覆盖新selection/W/viewport/width，也不得merge/rebucket不同width；Table pagination<=500并保持captured context；pause/follow不造无界response cache；query/timeout/renderer failure局部；server返回matched/contributing/excluded/gap/coverage完整传给panel；不在client重做aggregate。
 - **Gate**：`node frontend/diagnostics/scripts/maintain.mjs --npm-cache "${TROUPE_NPM_CACHE:?}" --typecheck --unit tests/integration/query-invalidation.test.ts,tests/integration/query-pagination.test.ts`。
 - **边界**：只产生validated TimeSeries columnar model，不直接调用uPlot。
 
@@ -1688,7 +1693,7 @@ mock event parser，也不进入build input。
 #### W15 - Frontend application composition assembly
 
 - **产物**：按第4.2节唯一填充`frontend/diagnostics/src/app.tsx`；`frontend/diagnostics/tests/component/app-composition.test.tsx`；`frontend/diagnostics/tests/integration/app-live-query.test.tsx`。
-- **验收**：只通过W02/W12/W03/W11/W09/W17/W18/W19/W20/W04/W05/W10/W13导出的typed component/controller组装shell、timeline、inspector、transcript、usage、四View panels、local boundary、live和query；route/tab/selection ownership唯一，TimeSeries shell使用W13 renderer；没有复制decoder/reducer/query/SSE逻辑；all panels在active/archive/compatibility/empty状态均可达；同Actor多Cue selection在tree/timeline/transcript/query间保持；composition test证明没有未注册panel或循环import。
+- **验收**：只通过W02/W12/W03/W11/W09/W17/W18/W19/W20/W04/W05/W10/W13导出的typed component/controller组装shell、timeline、inspector、transcript、usage、四View panels、local boundary、live和query；route/tab/selection ownership唯一，TimeSeries shell使用W13 renderer；没有复制decoder/reducer/query/SSE逻辑；catalog严格保持manifest order，compatible entry装配对应panel，incompatible entry固定走W20，empty catalog显示empty surface且不发query；all panels在active/archive/compatibility/empty状态均可达；同Actor多Cue selection在tree/timeline/transcript/query间保持；composition test证明没有未注册panel或循环import。
 - **Gate**：`node frontend/diagnostics/scripts/maintain.mjs --npm-cache "${TROUPE_NPM_CACHE:?}" --typecheck --component tests/component/app-composition.test.tsx --unit tests/integration/app-live-query.test.tsx`。
 - **边界**：只填composition root和assembly tests；不改任何feature subtree、protocol、Vite config或generated asset。
 
@@ -1990,7 +1995,7 @@ HEAD修复并重跑该V节点；V节点只拥有harness、fixture、baseline和�
 
 第3节只保留直接依赖；plan validator会拒绝任何可以由其他路径推导的transitive edge。当前静态结果为：
 
-- 145个节点、256条直接边、root=`F00`、唯一sink=`V03`；所有节点均由root可达并能到达sink。
+- 145个节点、254条直接边、root=`F00`、唯一sink=`V03`；所有节点均由root可达并能到达sink。
 - longest remaining path长度为34：
   `F00 -> F01 -> F02 -> F04 -> C00 -> C01 -> C04 -> C03 -> S02 -> S12 -> S03 -> S04 -> S06 -> B00 -> B08 -> B13 -> H03 -> W10 -> W13 -> W15 -> W06 -> W14 -> W07 -> H04 -> D04 -> D07 -> X00 -> X01 -> X02 -> V02 -> V12 -> V11 -> O04 -> V03`。
 - 这条路径不是手工优先级。每次merge后scheduler从当前integration HEAD重新计算longest downstream path；
@@ -2052,27 +2057,27 @@ HEAD修复并重跑该V节点；V节点只拥有harness、fixture、baseline和�
 | 17 | H01, W08, B13 |
 | 18 | H02, Q01, W02 |
 | 19 | W03, W04, W11 |
-| 20 | W12, H03, B09 |
+| 20 | W12, B09, H03 |
 | 21 | W05, B01, W09 |
-| 22 | W10, W17, W18 |
-| 23 | W13, W19, W20 |
-| 24 | B02, T00, W15 |
-| 25 | B03, F06, T01 |
-| 26 | W06, A00, B11 |
-| 27 | D00, K00, R02 |
-| 28 | T03, W14, A01 |
-| 29 | A02, A03, A05 |
-| 30 | A06, A07, A08 |
-| 31 | A09, B05, D01 |
-| 32 | H05, K01, W07 |
-| 33 | A04, B06, B12 |
-| 34 | B15, D03, D05 |
-| 35 | H04, K02, T08 |
-| 36 | B07, B17, B18 |
-| 37 | D02, D04, D06 |
-| 38 | D08, D09, D10 |
-| 39 | D11, B04, B10 |
-| 40 | B14, B16, D07 |
+| 22 | W10, B02, W17 |
+| 23 | W13, W18, W19 |
+| 24 | W20, B03, F06 |
+| 25 | T00, W15, A00 |
+| 26 | B11, K00, T01 |
+| 27 | W06, A01, A02 |
+| 28 | A03, A05, A06 |
+| 29 | A07, A08, A09 |
+| 30 | B05, D00, K01 |
+| 31 | R02, T03, W14 |
+| 32 | A04, B06, B12 |
+| 33 | B15, D01, H05 |
+| 34 | K02, W07, B17 |
+| 35 | B18, D03, D05 |
+| 36 | H04, T08, B07 |
+| 37 | B16, D02, D04 |
+| 38 | D06, D08, D09 |
+| 39 | D10, D11, B04 |
+| 40 | B10, B14, D07 |
 | 41 | X00, T04, T05 |
 | 42 | X01, T06, T07 |
 | 43 | X02, T02, O01 |
@@ -2232,7 +2237,7 @@ integration HEAD执行且内部exact command manifest固定为：
 | D20 | R01, R02, X02 | atomic durable publish/unpublish、process+run identity、conservative stale cleanup |
 | D21 | S00, S01, R01, H00, H04, W07, V13, O00 | trusted LAN、owner-only files、no auth/control/CORS、忽略forwarded headers与same-origin read-only security tests |
 | D22 | R00, H00, D01, X00 | plain HTTP bind、explicit advertise URL/base path、pure-Rust HTTP(S) CLI |
-| D23 | S03, Q04, H02, W05, D10 | committed snapshot/replay/live SSE、at-least-once dedupe和handoff race |
+| D23 | S03, Q04, H01, H02, W08, W05, D10 | committed snapshot/bounded suffix/replay/live SSE、at-least-once dedupe和handoff race |
 | D24 | C00, H02, W01 | one event/frame、decimal ID、control no-ID、slow-client gap+disconnect |
 | D25 | S01, S03 | per-Run owner-only DB/WAL/SHM、WAL/FULL/single writer和event/read-model/watermark transaction |
 | D26 | S03, S02, S08, S09, S10, S11, S12, Q00, Q03, Q04, H02, T03 | dense committed prefix与read-model，仅COMMIT后query/live/export visible |
@@ -2250,12 +2255,12 @@ integration HEAD执行且内部exact command manifest固定为：
 | D38 | P00, P04, A00, A03, A09, K00, B15, B18, B16, V02 | public immutable tool payload types/fields、per-turn sidecar、sink-only projection、真实Production/standalone plumbing、exact depth/node/byte/Act limits和atomic omission |
 | D39 | C01, A04, B17, P00 | exact usage shape/invariants，public nonnegative int无u64 product maximum |
 | D40 | A04, B05, B17, S11, V06 | pre-submission/session-terminal/authoritative-settlement三类linearization、exactly-one terminal usage beforeAct finish、qualified source/reasons和coverage |
-| D41 | P02, B07, B14 | sync event/gauge/span eager validation、scope/parent admission和sink projection |
+| D41 | P02, B07, B14, B16 | sync event/gauge/span eager validation、generation-bound task authority、transactional expiry/seal和sink projection |
 | D42 | C00, P02 | dotted namespace、tagged flat scalar、finite decimal、fixed resource limits、不脱敏 |
-| D43 | C05, P03, Q01, H03, W09, W17, W18, W19, W20, W10, V00, V02 | four closed ViewSpecs/query algebra、server固定Run-origin/1024-point TimeSeries bucket、viewport/width stale refetch与browser no-rebucket、独立renderer/error boundary及coverage/pagination |
-| D44 | B08, B13, H03, X01, V06, W09 | pre-constructor pure JSON persistence与clean failed archive，active系统故障fatal、archive per-view/request isolation，无Python execution |
+| D43 | C05, P03, Q01, H03, W09, W17, W18, W19, W20, W10, W15, V00, V02 | four closed ViewSpecs/query algebra、bounded catalog、server固定Run-origin/1024-point TimeSeries bucket、viewport/width stale refetch与browser no-rebucket、独立renderer/error boundary及coverage/pagination |
+| D44 | B08, B13, H03, X01, V06, W09, W10, W15 | pre-constructor pure JSON persistence与clean failed archive，newer opaque classification、active系统故障fatal、archive per-view/request isolation，无Python execution |
 | D45 | W00, W01, W02, W04, W13, W15, O02 | exact frontend stack/ownership与唯一composition；禁止依赖静态审计和renderer tests |
-| D46 | W08, W04, W05, W10 | bounded windows/LRU、bigint、pause/requery、Canvas/ARIA，无worker/storage/cache |
+| D46 | W08, W04, W05, W10 | atomic snapshot/suffix hydrate、bounded windows/LRU、bigint、pause/requery、Canvas/ARIA，无worker/storage/cache |
 | D47 | W00, W16, W06, W14, V07, V09 | pinned Node/lock/npm+browser cache、deterministic single bundle、checked-in embedded assets、offline wheel |
 | D48 | W07, V13 | hashed relative assets、MIME/cache/ETag/compression/CSP/browser floor |
 | D49 | V00, V04, V13, V05, V01, V09 | size、three-engine visual、Canvas pixel、axe/security、stress/determinism/wheel gates |
@@ -2282,6 +2287,11 @@ integration HEAD执行且内部exact command manifest固定为：
 4. 让**所有**reviewer对同一个新hash从头复审，不能只让提出finding的人复核。
 
 ### 10.2 Required independent reviewers
+
+Round 13是在100/145节点已经merge后的实现阻塞修订。用户明确授权本轮仅由root修改同一五文件planning bundle、
+运行完整validator/mutation self-test并做逐项自审后继续实现，豁免本轮四票独立复审；该一次性豁免只适用于
+review record中标明的Round-13 exact hashes，不改变最终产品实现必须接受独立correctness/design-drift/
+simplicity/scope review的要求，也不能沿用到后续未获用户明确授权的planning hash。
 
 计划冻结后派出四个独立subagent角色；当前四槽环境先并行三名，任一结束后立即派第四名，root不充当其中
 任何一票：

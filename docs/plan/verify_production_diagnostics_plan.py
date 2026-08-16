@@ -928,7 +928,7 @@ def validate_slot_inventory(
                 f"multi-writer contract artifact is missing from shared inventory: "
                 f"{path} {sorted(owners)}"
             )
-        if set(shared[path]) != owners:
+        if path not in inventory and set(shared[path]) != owners:
             raise PlanError(
                 f"contract/shared writer mismatch: {path} "
                 f"{sorted(owners)} != {list(shared[path])}"
@@ -956,11 +956,18 @@ def validate_slot_inventory(
                 raise PlanError(
                     f"slot behavior owner is not reachable from creator: {path} {creator}->{owner}"
                 )
-            if path in shared and shared[path][-1] != owner:
+            if path in shared and owner not in shared[path]:
                 raise PlanError(
-                    f"slot behavior/shared final writer mismatch: {path} "
-                    f"{owner} != {shared[path][-1]}"
+                    f"slot behavior owner is absent from shared writers: {path} "
+                    f"{owner} not in {shared[path]}"
                 )
+            if path in shared:
+                expected_owner = shared[path][1] if len(shared[path]) > 1 else creator
+                if owner != expected_owner:
+                    raise PlanError(
+                        f"slot primary behavior owner mismatch: {path} "
+                        f"{owner} != {expected_owner}"
+                    )
             behavior_owners[path] = owner
     required_behavior_paths = {
         path for path in inventory if not path.endswith("/mod.rs")
@@ -979,7 +986,7 @@ def validate_slot_inventory(
     for path, creator in inventory.items():
         behavior_owner = behavior_owners.get(path, creator)
         contract_writers = explicit_artifacts.get(path, set())
-        allowed_writers = {creator, behavior_owner}
+        allowed_writers = set(shared.get(path, (creator, behavior_owner)))
         unexpected = contract_writers - allowed_writers
         if unexpected:
             raise PlanError(
@@ -1399,7 +1406,16 @@ def validate_sink_and_publication_contracts(text: str) -> None:
             "缺失未选import target不应失败",
             "`BUILTIN_CLOCK_TRACE_FILE=11`",
         ),
-        "T03": ("CapturedEventSource -> AsyncWrite/packet stream",),
+        "T03": (
+            "CapturedEventSource -> AsyncWrite/packet stream",
+            "最多1,000,000个structural entries和64 MiB owned structural payload",
+            "StructuralIndexLimitExceeded { dimension, limit, required }",
+            "在首次poll writer以前",
+            "sequence/span records、unique tracks、spans、lane assignments、causal flows及start/end attachments、Act usage、dense identities和descriptor order",
+            "不spill filesystem/temp index",
+            "第二遍才重新读取同一captured prefix",
+            "可留下partial stream",
+        ),
         "T08": (
             "接收T03 stream producer",
             "exclusive temp",
@@ -1417,6 +1433,7 @@ def validate_sink_and_publication_contracts(text: str) -> None:
             "绝不释放active guard",
             "remote request不能提供server output path",
             "T03 bounded encoder",
+            "第一遍structural preflight全部成功后才commit successful response",
         ),
         "D06": (
             "URL/active target只调用H05 endpoint",
@@ -1428,6 +1445,10 @@ def validate_sink_and_publication_contracts(text: str) -> None:
             "不让remote选择server filesystem path",
         ),
         "H03": (
+            "GET /api/v1/views",
+            "最多64项、保持manifest order且允许empty",
+            "archive incompatible entry只含status",
+            "任何其他无view_id参数fail closed",
             "exact frozen range/width/aligned empty+partial buckets",
             "active profile的Q00 corruption或query execution context系统性退出转发core-fatal",
             "archive profile同类store/query open failure只终止对应request/serve command",
@@ -1451,7 +1472,9 @@ def validate_sink_and_publication_contracts(text: str) -> None:
             "B17完成唯一canonical usage admission",
             "B05完成`act.lifecycle` SpanFinished admission",
             "B18对两项应用B15 projection",
-            "Act finish已入该sink queue后",
+            "B14使act/generation authority过期",
+            "settlement hook确认authority expiry后",
+            "不得留下半过期authority或半seal queue",
             "B12/B17/B18汇合后的standalone full-chain owner",
             "已有session不重建、message/plan/tool/result/context/terminal usage canonical events",
             "standalone opt-in tool payload只到sink且没有store/file side effect",
@@ -1484,9 +1507,52 @@ def validate_sink_and_publication_contracts(text: str) -> None:
             "archive queries/serve/dump各自shared lease acquire/release",
         ),
         "W10": (
+            "在owned `client.ts`复用W01 decoder",
+            "每个Run/Views surface恰fetch一次",
+            "incompatible entry零query",
+            "整个surface进入local error且不保留partial catalog",
             "query generation key冻结run/view/selection/scope/W/viewport range",
             "pan/zoom或width变化时abort-or-ignore旧inflight response",
             "不得merge/rebucket不同width",
+        ),
+        "H01": (
+            "`after=A&through=W`返回exact dense `(A,W]`",
+            "`{api_schema_version,run_id,captured_watermark,events,next_after:null}`",
+            "不新增limit/API版本",
+            "through alone、after+tail、tail+through拒绝",
+        ),
+        "W08": (
+            "提供W05唯一调用的atomic hydrate",
+            "snapshot是materialized facts authority",
+            "不经ordinary `event_received`重放",
+            "设置tool/result refresh flags和`dropped_through=A`",
+        ),
+        "W05": (
+            "`A=max(0,W-4096)`",
+            "`GET /api/v1/events?after=A&through=W`",
+            "exact dense `(A,W]`",
+            "调用W08 atomic hydrate",
+            "native EventSource after W",
+            "不得发送limit或引入新API版本",
+        ),
+        "W15": (
+            "catalog严格保持manifest order",
+            "incompatible entry固定走W20",
+            "empty catalog显示empty surface且不发query",
+        ),
+        "B13": (
+            "必须先检查manifest声明的schema version",
+            "newer version保持opaque",
+            "绝不按current JSON schema解析",
+            "只有current-version record才执行decode/identity/canonical验证",
+        ),
+        "B14": (
+            "`RunBinding + act_id/generation + role/state` authority",
+            "caller、caller descendant、supervisor",
+            "只有registered child传播",
+            "绝不fallback到Cue scope、sink registry reverse lookup",
+            "staged/transactional commit",
+            "B16 settlement hook提交authority expiry",
         ),
         "V00": (
             "slow response制造pan/zoom viewport/derived-width race",
@@ -1551,6 +1617,13 @@ def validate_sink_and_publication_contracts(text: str) -> None:
     artifact_owners = contract_artifact_paths(text)
     required_owned_artifacts = {
         "rust/src/orchestration/actor.rs": {"F05", "B06"},
+        "rust/crates/troupe-diagnostics-perfetto/src/collect.rs": {"T01", "T03"},
+        "rust/crates/troupe-diagnostics-perfetto/src/tracks.rs": {"T01", "T03"},
+        "rust/src/diagnostic_runtime/sink_binding.rs": {"B18", "B16", "B14"},
+        "rust/src/diagnostic_sink/mod.rs": {"B16"},
+        "rust/src/orchestration/python_task.rs": {"F05", "B14"},
+        "rust/src/orchestration/scene_context.rs": {"F05", "B14"},
+        "tests/integration/test_actor_act_diagnostic_sink_binding.py": {"B18", "B14"},
         "README.md": {"O00"},
         "docs/diagnostics/index.md": {"O04"},
         "scripts/test_diagnostics_final.sh": {"V03"},
@@ -2946,6 +3019,19 @@ def run_self_test(text: str) -> None:
         moved_slot_behavior_owner,
         "slot behavior owner reassignment",
         "slot contract has an unexpected writer",
+    )
+    successor_as_primary_owner = mutate(
+        text,
+        "| T01 | `rust/crates/troupe-diagnostics-perfetto/src/{collect,identity,tracks,project}.rs` |\n"
+        "| T03 | `rust/crates/troupe-diagnostics-perfetto/src/dump.rs` |",
+        "| T01 | `rust/crates/troupe-diagnostics-perfetto/src/{identity,project}.rs` |\n"
+        "| T03 | `rust/crates/troupe-diagnostics-perfetto/src/{collect,tracks,dump}.rs` |",
+        "slot successor promoted to primary owner",
+    )
+    expect_failure(
+        successor_as_primary_owner,
+        "slot successor promoted to primary owner",
+        "slot primary behavior owner mismatch",
     )
     exclusive_schedule_overlap = mutate(
         text,

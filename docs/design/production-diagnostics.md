@@ -83,7 +83,7 @@ D16 单独定义。
 | D20 | Instance entry 只在 store/listener ready 后通过 same-directory temporary file 原子发布，并在 server 真正停止前先撤销发布；它不保存动态 Production 状态。客户端必须同时校验 owner process identity 与 server `run_id`，只自动删除能够证明 owner 已消失或 PID 已复用的 definite-stale entry；unreachable、identity mismatch、损坏或 newer-schema entry 按各自状态报告并保守保留。 |
 | D21 | V1 diagnostic server 不实现认证、授权、session 或 credential，部署边界明确限定为 trusted LAN；任何能连接 listener 的网络 peer 都能读取全部已采集诊断数据。UI、API 和 live stream 同源，server 不通过 CORS header 授权跨源浏览器读取；所有 endpoint 保持只读。 |
 | D22 | V1 直接服务使用 plain HTTP，不内置 TLS。可选显式 `advertise_url` 只用于 registry/identity 中的远端发现和展示，不改变 bind，也不由 Troupe 猜测 host IP/DNS；未配置时只发布从 bind 派生的本机可连接 endpoint（wildcard bind 使用 loopback），远端客户端显式提供 URL。跨不可信网络必须使用外部 VPN、SSH tunnel 或 TLS-terminating reverse proxy。 |
-| D23 | V1 live transport 使用同源 SSE + UTF-8 JSON，不提供 WebSocket。客户端先取得 committed snapshot watermark，再从持久化 store replay 该水位之后的 event 并进入 live committed tail；delivery 是 at-least-once，单连接内 canonical sequence 严格递增，客户端按 `(run_id, sequence)` 去重。 |
+| D23 | V1 live transport 使用同源 SSE + UTF-8 JSON，不提供 WebSocket。客户端先取得 committed snapshot watermark `W`，再以 finite exact range 取得 `(max(0,W-4096),W]` 的有界 canonical event suffix并与snapshot原子hydrate，最后从持久化 store replay `W` 之后的 event并进入live committed tail；delivery 是 at-least-once，单连接内 canonical sequence 严格递增，客户端按 `(run_id, sequence)` 去重。 |
 | D24 | SSE 每个 `diagnostic_event` frame 只携带一个 canonical event，并以十进制 sequence 作为 `id`。`stream_ready/heartbeat/delivery_gap/resync_required/stream_closed` 是无 `id`、不推进 cursor 的 transport control。所有 schema-declared `u64` wire value 使用 canonical decimal string；慢客户端 buffer overflow 时尽力发送 `delivery_gap` 后断开，不能静默跳过事件并继续。 |
 | D25 | 每个 Run 在 `.troupe/diagnostics/runs/<run-id>/diagnostics.sqlite3` 独占一个 SQLite database，使用 WAL、`synchronous=FULL` 和单一有序 writer；不同 Run 不共享 database、writer 或 WAL。Canonical event、committed watermark、Run metadata 和可重建 materialized read model 在同一 transaction 中提交。 |
 | D26 | Store 中可见的 event 始终构成 sequence `1..W` 的 dense committed prefix；snapshot、replay、live SSE 和 exporter 只能读取该 prefix。Writer 使用有界 group commit，只有 SQLite `COMMIT` 在 `FULL` durability boundary 成功后才推进 `W` 并发布 live notification。异常进程/机器终止可以丢失 accepted-but-uncommitted tail，但不得丢失已成功 commit 的 transaction（以 SQLite、OS、filesystem/hardware 实际提供的 durability guarantee 为边界）。 |
@@ -101,17 +101,17 @@ D16 单独定义。
 | D38 | 显式 tool input/output capture 只投影给该 sink，包含 ACP stable raw input/output、content 和 locations，排除 protocol envelope 与 `_meta`；payload 在来源选择后视为 opaque，Troupe 只执行类型/大小校验。P00 定义 immutable public `FrozenJsonArray`、`FrozenJsonObject`、closed `FrozenJsonValue` alias、`DiagnosticToolInput`、`DiagnosticToolOutput`和`DiagnosticToolLocation`；tool start/update detail 的 `captured_input`/`captured_output` 仅在相应 opt-in sink projection 中非 `None`，canonical store/Web/Perfetto projection 始终为 `None`，因此事件 hierarchy 与类型不分叉。Typed payload 最大 depth 32、nodes 65,536，每个 input/output snapshot 最大 256 KiB、每 Act tool payload 合计 4 MiB；agent message 最大每条 4 MiB/每 Act 16 MiB，plan snapshot 最大 256 KiB。超限原子省略字段或停止后续文本并显式标记 truncation，不生成非法 partial JSON。 |
 | D39 | `ActTokenUsageFinalized` 是 immutable、slotted、keyword-only canonical event，精确携带 `availability`、实际 `source`、仅 unavailable 时存在的 closed reason，以及 provider total/input/output/thought/cache 六个 optional token 字段。Public token value 的产品语义是排除 `bool` 的非负 Python `int`，不声明 `u64` 或其他 Troupe product maximum；零是 observation，`None` 是 unknown，分类之间不建立加和约束。 |
 | D40 | 每个 started Act 在 accounting 终态已知后、`act.lifecycle` finish 前恰好产生一个 usage event。唯一 finalization transition 必须在三类可证明边界之一线性化：prompt 未提交的 Act terminal、已提交但无 settlement 的 session terminal、或 authoritative turn settlement；第一类为 `prompt_not_submitted`，第二类为 `turn_settlement_unknown`，第三类再按 source qualification/report presence 决定。V1 只接受 whole-turn 验收通过的 `acp.prompt_response.usage` carrier。各 token 字段独立聚合 known sum 与 reported/finalized coverage，并统计 availability；`DiagnosticSinkSummary` 不重复 accounting。Token value 在 JSON wire 中使用 canonical decimal string 只是精确编码约定，不意味着 public `u64` 上限。 |
-| D41 | `troupe.diagnostics` 的 V1 publication surface 固定为同步 `event()`、绝对 gauge `counter()` 和同步 context-manager `span()`。参数立即校验、复制；`event()`/`counter()` call 与 span enter/exit 分别 admission 一个 custom event，自动继承 Runtime scope/当前 task 内 span，不允许覆盖 identity、时间、scope、parent 或 causality，也不返回 canonical identity。参数或 context 错误在 sequence 分配前同步抛出；成功只表示进入 mandatory pipeline，随后 core persistence/backpressure failure 仍会终止 Production。 |
+| D41 | `troupe.diagnostics` 的 V1 publication surface 固定为同步 `event()`、绝对 gauge `counter()` 和同步 context-manager `span()`。参数立即校验、复制；`event()`/`counter()` call 与 span enter/exit 分别 admission 一个 custom event，自动继承 Runtime scope/当前 task 内 span，不允许覆盖 identity、时间、scope、parent 或 causality，也不返回 canonical identity。Act scope只来自显式generation-bound task authority，区分caller、registered caller descendant和authorized supervisor；过期authority不得回退到Cue或通过sink registry反查Act。参数或 context 错误在 sequence 分配前同步抛出；成功只表示进入 mandatory pipeline，随后 core persistence/backpressure failure 仍会终止 Production。 |
 | D42 | Custom name 是至少两段的 lowercase ASCII dotted identifier，`troupe.*` 保留且 V1 不设 namespace registry。Custom value 使用受限 flat scalar/scalar-list model；name/key/unit、entry/list 数和单 event canonical bytes 受第 8.1 节固定上限约束。Counter 数值接受排除 `bool` 的 `int`、finite `float` 或 finite `Decimal`，并立即规范化为 decimal wire value；`NaN`/infinity 非法。Troupe 只校验结构和大小，不扫描、脱敏或改写业务内容。 |
 | D43 | V1 `ViewSpec` 是 `TimelineView | MetricView | TableView | TimeSeriesView` 的 final、frozen、slotted、keyword-only union。每种 renderer 只接受对应的 closed typed query descriptor；允许 exact built-in kind/custom name、severity/outcome、scalar attribute equality/existence、一个 closed group dimension 和 `count/sum/min/max/mean/latest`，禁止 SQL、regex、join、任意字段路径、用户函数及自定义 renderer。每个 view 独立声明 viewport/run 时间绑定和 selection/run scope 绑定。`TimeSeriesView` 由 server 按 Run-origin、左闭右开 bucket 和固定 `max_points=1024` 生成，width 为 `max(1, ceil(duration/1023))`；browser 不重分桶，watermark/viewport/width 变化使旧结果整体 stale。 |
-| D44 | `diagnostic_views` 必须是 Production class 上由 built-in ViewSpec 组成的 exact tuple。Runtime 在 Production class 解析后、constructor 前将每个 view 编译为 independently versioned pure JSON record 并持久化，之后 HTTP、live update、browser 与 archive serving 均不执行或导入 Production Python。Active Run 的无效/重复/不兼容 ViewSpec 阻止构造与启动；若 diagnostics 健康，Run 仍以 `outcome=failed, clean_shutdown=true` 完成并在执行 constructor 前释放 registry/listener/store/lease，只有 view-record commit 或 diagnostic finalization 自身失败才保持 incomplete。archive 中不受支持或损坏的 custom view record 只局部标记 unavailable，不能阻止访问 canonical diagnostics。单次 query/renderer failure 是 client-local；active server/query/store 系统性失效仍按 core-fatal，archive 同类失败只终止该 archive operation。 |
+| D44 | `diagnostic_views` 必须是 Production class 上由 built-in ViewSpec 组成的 exact tuple。Runtime 在 Production class 解析后、constructor 前将每个 view 编译为 independently versioned pure JSON record 并持久化，之后 HTTP、live update、browser 与 archive serving 均不执行或导入 Production Python。Active Run 的无效/重复/不兼容 ViewSpec 阻止构造与启动；若 diagnostics 健康，Run 仍以 `outcome=failed, clean_shutdown=true` 完成并在执行 constructor 前释放 registry/listener/store/lease，只有 view-record commit 或 diagnostic finalization 自身失败才保持 incomplete。HTTP以manifest顺序暴露最多64项的versioned catalog：compatible项携带完整record，archive incompatible项只携带manifest identity与normalized incompatibility；newer-schema record按manifest version作为opaque data分类，不按current schema解析。archive 中不受支持或损坏的 custom view record 只局部标记 unavailable，不能阻止访问 canonical diagnostics。单次 query/renderer failure 是 client-local；active server/query/store 系统性失效仍按 core-fatal，archive 同类失败只终止该 archive operation。 |
 | D45 | Production Web UI 固定使用 strict TypeScript、Preact、`@preact/signals`、Vite、tree-shaken `lucide-preact` 和 uPlot，配合手写 modular CSS/custom properties 与 system fonts。Preact DOM 负责 shell、控制、tree、inspector、transcript、table、usage 与 ViewSpec panel；framework-independent TypeScript module 负责 protocol/query state；一个 imperative Canvas2D renderer 负责层级 trace，uPlot 只负责 server-bucketed `TimeSeriesView`。V1 不引入 React compatibility、router、Redux/query framework、CSS framework/component kit、D3/ECharts、SSR 或 runtime template compilation。 |
-| D46 | 浏览器只保留可见 query window、当前 detail/展开状态和有界 adjacent-window LRU；native `fetch`/`EventSource` 推进 watermark、更新 live edge 并使相关 query 失效。Pause 不保存无界 raw-event backlog，恢复时对已淘汰范围重新 query。Schema `u64` identity/cursor/time 保持 decimal string 或 `bigint`，只有相对 viewport origin 的有界 elapsed delta 可转 JavaScript `number`。V1 不使用 Web Worker、WebGL、service worker、IndexedDB、localStorage diagnostic cache、CDN、external font 或其他 external asset；Canvas 同步 tree 纵向虚拟化并保留 keyboard-operable ARIA treegrid 与 text inspector 语义面。 |
+| D46 | 浏览器只保留可见 query window、当前 detail/展开状态和有界 adjacent-window LRU；native `fetch`/`EventSource` 推进 watermark、更新 live edge 并使相关 query 失效。Bootstrap/resync把snapshot作为materialized projection唯一authority，并以最多4096项、终点精确为snapshot `W`的raw suffix只补EventTable和snapshot未表达的instant-derived tool/result事实，不能把`<=W`事件经普通live reducer重放。Pause 不保存无界 raw-event backlog，恢复时对已淘汰范围重新 query。Schema `u64` identity/cursor/time 保持 decimal string 或 `bigint`，只有相对 viewport origin 的有界 elapsed delta 可转 JavaScript `number`。V1 不使用 Web Worker、WebGL、service worker、IndexedDB、localStorage diagnostic cache、CDN、external font 或其他 external asset；Canvas 同步 tree 纵向虚拟化并保留 keyboard-operable ARIA treegrid 与 text inspector 语义面。 |
 | D47 | Frontend source、exact lockfile 和 maintainer Node major 在 repository 中维护；唯一 release build 使用 pinned `npm ci`、strict checks/tests 和 deterministic Vite build，固定 relative base、ES2020、一个 JS entry、一个 CSS entry、无 dynamic chunk 和无 shipped source map。生成的 raw/Brotli/gzip assets、manifest/Rust include table 与 third-party notices checked in，CI regenerate 后要求 byte/hash equality。Rust 以 `include_bytes!` 嵌入这些 bytes；普通 maturin/sdist/wheel build 不运行 Node/npm、不访问网络，`pyproject.toml` build requirement 仍只有 maturin，wheel 不新增独立 static asset file，`.troupe` 与 Run archive 也不复制 UI asset。 |
 | D48 | Embedded UI 通过 relative、content-hashed URL、exact MIME、HEAD/conditional request、representation-specific strong ETag 和预生成 Brotli/gzip negotiation 提供。HTML 使用 `no-cache` + ETag，hashed assets 使用一年 `immutable`，API/bootstrap/query 使用 `no-store`，SSE 使用 `no-cache, no-transform`，encoding negotiation 使用 `Vary: Accept-Encoding`。页面在打开 live transport 前验证 UI/API/event/ViewSpec compatibility。禁止 inline/third-party script 和 `dangerouslySetInnerHTML`；固定 CSP、`nosniff`、`no-referrer` 与 same-origin resource policy。支持下限为 Chromium/Edge 111、Firefox 115 和 Safari 16.4 及相应 mobile engine，不提供 legacy/polyfill bundle；必要能力不满足时显示静态 compatibility state。 |
 | D49 | Release gate 固定为 logical uncompressed HTML+JS+CSS 不超过 512 KiB、其 first-load Brotli 总量不超过 160 KiB、全部 embedded raw/gzip/Brotli UI representations 加 notices 不超过 768 KiB。验证至少包含 strict TypeScript/unit test、Rust-browser shared canonical fixtures、Playwright Chromium/Firefox/WebKit、desktop/mobile screenshot 与 Canvas pixel check、keyboard/ARIA/axe、malformed/XSS、reconnect/gap/resync/pause、cache/CSP/compression、deterministic rebuild 和 wheel smoke。Pinned Chromium stress fixture 覆盖 long Run、10,000 visible primitives 与持续 live update，证明有界 cache/heap、无 read-model correctness loss、每 animation frame 最多一次 Canvas draw，并通过 checked-in explicit performance baseline。 |
 | D50 | Perfetto exporter 只增加 exact-pinned `prost 0.14.4` runtime crate，并私有声明实际使用的 stable-public protobuf subset。Schema provenance 固定到 official Perfetto v57.2 commit `da1d152cff27890903d158fe96751de3aab883cc`，repository 保存所需 upstream proto/license、逐文件 SHA-256 和 used-field manifest；升级必须显式 review 并重建 fixtures。普通 build/runtime 不使用 `prost-build`、`prost-types`、`protoc`、第三方 exporter、Perfetto SDK/FFI、Trace Processor、Node 或网络。最小 schema 是协议可审计边界，不是包体优化。 |
-| D51 | `.pftrace` 按 descriptor/metadata prelude 后接 event packet 的确定顺序流式写出，每次只编码一个 `TracePacket` 并作为 top-level `Trace.packet` field 1 写入 reusable buffer。Timestamp 一律是 explicit `BUILTIN_CLOCK_TRACE_FILE=11` 下的 Run-relative `elapsed_ns`，必须可被 Trace Processor 的 signed 64-bit nanosecond 表示；descriptor 无 timestamp。V1 只用 direct non-interned TrackEvent slice/instant/counter/flow/debug-annotation fields，不使用 packet sequence、incremental state/timestamp、compression、custom extension、legacy event 或 unstable Chrome/Android field。 |
+| D51 | `.pftrace` 按 descriptor/metadata prelude 后接 event packet 的确定顺序流式写出，每次只编码一个 `TracePacket` 并作为 top-level `Trace.packet` field 1 写入 reusable buffer。为完成D52全局排序/lane/backward attachment，允许two-pass captured-prefix读取和一个prefix-wide structural index；V1固定上限为1,000,000 entries及64 MiB owned payload，调用方不可覆盖且禁止filesystem spill，等于上限成功、下一次reservation在分配和首次writer poll前typed失败。Exporter不保留完整event prefix或trace bytes，输出阶段仍只保留一页source、一个packet和reusable buffer。Timestamp 一律是 explicit `BUILTIN_CLOCK_TRACE_FILE=11` 下的 Run-relative `elapsed_ns`，必须可被 Trace Processor 的 signed 64-bit nanosecond 表示；descriptor 无 timestamp。V1 只用 direct non-interned TrackEvent slice/instant/counter/flow/debug-annotation fields，不使用 packet sequence、incremental state/timestamp、compression、custom extension、legacy event 或 unstable Chrome/Android field。 |
 | D52 | Exporter 对 captured prefix 中规范化的 typed track 与 causal-link identity 排序，并分配 dense nonzero export-local track UUID/flow ID；canonical identity 同时保留在 annotation，ID-space exhaustion 明确失败。Descriptor parent-before-child，Actor 只建模为 logical group；不能在同一 Perfetto track 合法嵌套的 span 使用确定性 sibling lane，open span 不伪造 end。Exact int64 或 finite exactly-representable double 才可投影 counter；其他大整数/Decimal 保留 canonical decimal text 并标记 `counter_projection=not_exact`，missing usage 保持 absent，不能取整、截断或写成零。 |
 | D53 | Trace 内置确定性 Troupe metadata，至少包含 exporter/event schema、Run ID、captured watermark、Troupe version、outcome/clean-shutdown availability 和 content warning；不得依赖 v57.2 unstable `TraceAttributes` 承载必要身份。Invalid span/reference、ID/timestamp/numeric/resource overflow、protobuf encode 或 output write/sync/rename failure 都只使 on-demand dump exit 1，不影响 active Production/archive。Local publication 必须如实返回 `published`、`not_published` 或 `publication_indeterminate`：只有 durable success 或 identity-checked durable rollback 才能断言目标状态，无法证明 rollback/namespace durability 时保留现场并要求人工检查，不能虚构旧目标未变。Release 只硬性禁止新增 Python runtime dependency、loose wheel member、external executable/shared library/ELF `DT_NEEDED` 和 runtime service/tool requirement；CI 仅记录 exporter 前后的 wheel/native-module 体积，不设固定 byte gate。 |
 | D54 | Perfetto compatibility release gate 包含三层：由独立 protobuf implementation decode 的 byte-exact golden；按 release SHA-256 固定的 official v57.2 `trace_processor_shell` SQL assertions；以及 pinned official Perfetto UI browser screenshot/pixel smoke。Fixture 覆盖 empty/open/nested/multi-Cue/non-nested overlap、equal timestamp、Unicode、annotation/gap/flow/counter、numeric/ID boundary、malformed reference、active/archive watermark 和 repeated deterministic dump。工具只存在于 dedicated CI job，不进入 wheel；current public `ui.perfetto.dev` 只作为 non-blocking scheduled canary，网络或 upstream UI 变化不决定 release correctness。 |
@@ -742,8 +742,9 @@ Act terminal，以便summary给出最终Act outcome。普通queue淘汰/overflow
 `diagnostic.dropped_events` counter与summary drop fields是唯一事实。
 
 `act()` 返回、抛错或被取消时不等待慢 sink drain。Terminal 顺序固定为 B17 先把唯一
-`ActTokenUsageFinalized` admission 完成，B05 再生成 `SpanFinished(span_kind="act.lifecycle")`，B15 按
-capture matrix 投影这两个事实，最后 B16 只有在 Act finish 已进入该 sink queue 后才能 seal；即使
+`ActTokenUsageFinalized` admission 完成，B05 再生成 `SpanFinished(span_kind="act.lifecycle")`，B18 按
+B15 capture matrix 投影这两个事实并把Act finish送入sink queue，B14随后使该Act的task authority全局
+过期，最后 B16 才能 seal/retire；即使
 `usage=False` 过滤了 usage event，也必须先完成 canonical usage admission，再投递 Act finish、再 seal。
 Runtime 在当前 `SpanFinished(span_kind="act.lifecycle")` 入队后 seal queue；正常 `wait_closed()` 要等到 queue 排空且
 最后一个成功 callback 返回。该方法没有 timeout 参数，可以在绑定后重复 await，并始终返回同一个
@@ -1009,7 +1010,9 @@ Perfetto dump的唯一live/archive HTTP route是identity-checked read-only
 guard/capability并打开独立read transaction，绝不再次取得shared lease；archive profile先取得并在request
 结束时释放shared archive lease。两者都由reader transaction捕获committed head `W`，默认
 流式编码`1..W`，显式`through`必须canonical且不大于`W`；response metadata与trace内Run/W/schema/
-content warning一致。Request不能提供server output path、force或任何filesystem target，client disconnect
+content warning一致。Server在提交successful streaming response前必须完成T03 structural preflight；
+preflight failure返回closed error且不写response body，之后的第二遍source/encode/write/disconnect failure
+可以终止已经开始的stream。Request不能提供server output path、force或任何filesystem target，client disconnect
 只取消本request并仅释放request-owned archive lease/reader，不释放Runtime active guard。CLI的`--url`/resolved active dump使用该route并在调用方机器执行第7.2节的atomic file publish；
 local/archive CLI则对同一个captured-source/encoder core直接写本地文件。
 
@@ -1033,6 +1036,18 @@ GET /api/v1/snapshot
 读取到比 watermark 更新的半状态。`watermark_sequence` 是该 snapshot 已包含的最高 committed event。
 尚无 event 时它为 `"0"`；0 只是合法 resume cursor，不是 canonical event sequence。
 `earliest_available_sequence` 是当前仍可 replay 的最早 sequence，无 event 时为 `null`。
+
+Active UI取得snapshot水位`W`后，先用同一finite events endpoint取得一个固定有界suffix：
+
+```http
+GET /api/v1/events?after=A&through=W
+```
+
+其中`A=max(0,W-4096)`。`after+through`表示在一个captured transaction内读取精确`(A,W]`，response仍是
+既有`api_schema_version/run_id/captured_watermark/events/next_after`形状，`next_after`固定为`null`；不增加
+`limit`参数或新API版本。`through`单独出现非法，`tail+through`与`after+tail`冲突；既有`after`和`tail`
+语义不变。客户端必须验证Run identity、captured watermark不小于`W`，以及events严格、dense且精确覆盖
+`(A,W]`，再把snapshot与suffix原子交给browser read-model。
 
 取得 snapshot 水位 `W` 后，客户端订阅严格位于 `W` 之后的事件：
 
@@ -1202,6 +1217,12 @@ Production/Scene/Actor/Cue/Act/tool hierarchy、expand/collapse、状态与 sele
 Native `fetch` 用于 bootstrap/snapshot/query，native `EventSource` 用于 committed live tail；SSE 推进
 watermark、更新 live-edge projection 并 invalidate 受影响 query。页面不能把 active Run 从 sequence 1
 开始的全部 canonical history 镜像进内存。
+
+Bootstrap/resync hydration中，snapshot是spans/messages/plans/counters/usage/gaps等materialized事实的唯一
+authority；bounded suffix只填充raw EventTable，并补snapshot没有表达的`tool.updated`与result-validation
+instant transitions。Tool start/finish仍以snapshot span为准并可由suffix按sequence补更新。`A>0`时相应
+tool/result projection显式标记需要server refresh及`dropped_through=A`。禁止把suffix中的`<=W`事件逐条送入
+普通`event_received`路径，因为那会重复snapshot已经materialize的message/counter/gap事实。
 
 Pause 只冻结 presentation。客户端继续记录最新 committed watermark 和 unseen sequence count，并可更新
 有界 live-edge projection；hot data 被淘汰后，resume 通过 captured-range query 恢复，而不是依赖无界
@@ -1470,11 +1491,18 @@ golden/compatibility fixture，不能在 build 中自动取得 latest schema。
 Perfetto UI、Trace Processor 与 compatibility binary 只允许存在于 dedicated CI job。这个 minimal subset
 用于限制 Troupe 承诺和审计的 wire surface，不以减少 wheel bytes 为产品目标。
 
-原生`Trace`是repeated field 1的`TracePacket` stream。Exporter先按确定顺序写descriptor/metadata
-prelude，再按canonical order写event packet；每次只将一个packet编码为field-1 fragment，使用reusable
-scratch buffer立即写入调用方的bounded writer，不在内存构造完整trace。Local wrapper的writer是exclusive
-temporary file，HTTP route的writer是具备disconnect cancellation的response body。Peak encoder memory只随一个
-受event resource limit约束的packet和一页store query增长，不随整个Run长度增长。
+原生`Trace`是repeated field 1的`TracePacket` stream。Exporter先完整扫描同一个captured prefix，验证dense
+sequence/reference/timestamp/ID并建立D52所需的structural index；preflight成功后写descriptor/metadata
+prelude，再第二次扫描同一prefix并按canonical order写event packet。每次只将一个packet编码为field-1
+fragment，使用reusable scratch buffer立即写入调用方的bounded writer，不在内存构造完整event prefix或
+trace。Structural index同时受固定1,000,000 entries与64 MiB owned payload限制，计入validator sequence/span
+record、unique track、collected span、lane assignment、causal flow及其start/end attachment、Act usage、dense
+identity和descriptor order；每次reservation前checked arithmetic，等于上限成功，下一项返回typed
+`StructuralIndexLimitExceeded { dimension, limit, required }`且不得先分配。调用方不能覆盖上限，禁止
+filesystem spill/temp index。Invalid through、non-dense/reference/timestamp、ID exhaustion和structural limit
+必须在第一次writer poll前失败；第二遍source/encode/write/cancellation failure可以发生在partial stream后。
+Local wrapper的writer是exclusive temporary file，HTTP route的writer是具备disconnect cancellation的response
+body。Peak memory由fixed structural ceiling、一个source page、一个packet和reusable buffer共同约束。
 
 所有 timestamped packet 显式设置 `timestamp_clock_id=BUILTIN_CLOCK_TRACE_FILE(11)`，timestamp 直接使用
 canonical Run-relative `elapsed_ns`。Descriptor packet 无 timestamp；不生成 wall-clock、BOOTTIME/
@@ -1669,6 +1697,14 @@ Actor/Cue/Act scope；Production module import 和 constructor 不具备 publica
 Runtime built-in instrumentation 观察。线程、未登记 task、已经关闭的 Scene/Cue/Act scope 或 Run 结束后
 调用会同步抛 `DiagnosticContextError`。
 
+Act publication authority是绑定`RunBinding + act_id/generation`的显式token，并至少区分caller、registered
+caller descendant与authorized supervisor。成功Act admission在prompt submission前事务性把provisional
+authority绑定到current task；任何commit失败都恢复原lineage并清理未发布authority/subscriber/registry。
+Registered child只继承创建时可证明的authority；caller结束后caller descendant立即过期，只有已授权
+supervisor可继续完成remote settlement。Act finish已经canonical admission且sink terminal已入队后，全局
+失效该generation，再由sink settlement seal。携带过期Act token时必须同步报`DiagnosticContextError`，不能
+回退到同Cue中的后续Act，也不能通过Cue scope或sink registry反查Act。
+
 调用方不能传 timestamp、sequence、Run/Scene/Actor/Cue/Act ID、parent span ID、containing span ID 或
 `caused_by`。Runtime 从当前 lineage snapshot 填充 scope，并选择当前 task 中仍 open 的最内层 custom
 span，否则选择可以证明时间包含的最内层 built-in span。Custom span stack 只属于进入它的 asyncio
@@ -1779,11 +1815,21 @@ ViewSpec 来源；后续 query、SSE、browser interaction、`diagnostic serve` 
 Production，也不回调任何 Python。ViewSpec compile 发生时 diagnostic store/server 已按 D18 ready，因此
 module construction 或 full-tuple compile failure 会形成可观察的 failed startup archive。
 
+`GET /api/v1/views`无query时返回同一manifest的bounded immutable catalog，top-level固定为
+`api_schema_version/run_id/capabilities/views`。Catalog按manifest顺序、最多64项且允许为空；compatible项
+携带完整C05 `ViewRecord`，archive incompatible项只携带`status="incompatible"`、manifest的
+`view_id/renderer`和C05 `IncompatibleView`，不得伪造title、descriptor或query。带`view_id`时保持既有query
+response语义；其他无`view_id`参数fail closed。Catalog没有watermark、cursor或pagination，browser每个Run的
+Views surface只原子取得一次；malformed/duplicate/run-mismatch使整个surface local-error，不部分接受。
+Compatible项才发送query，incompatible项直接进入panel-local compatibility surface。
+
 Active Production 中任何 invalid field/type、duplicate ID、unsupported descriptor/version 或超限 ViewSpec
 都阻止 Production constructor/`start()` 并使进程非零，不能跳过一个声明视图后继续。读取 archive 时，
 server/UI 不支持某条 record 的更高 `view_schema_version`，或某条 current-version record 自身损坏，只使
 该 custom view 显示 normalized incompatible/corrupt reason；canonical event、内置 timeline、CLI query 和
-其他独立兼容 view 必须继续可用。Manifest/store identity 或 canonical event storage 损坏仍是 archive
+其他独立兼容 view 必须继续可用。Archive loader必须先检查manifest声明的`view_schema_version`；高于当前
+版本的record按opaque newer-schema data分类且不按current schema解析，只有current-version record的decode、
+identity或canonical encoding失败才是`corrupt_record`。Manifest/store identity 或 canonical event storage 损坏仍是 archive
 operation failure。任何 archive recovery 都不执行 Production Python。单次 invalid client query、断开或
 renderer exception 只影响该 request/panel；query/server/store execution context 的系统性失效仍是 D16
 的 Production-fatal core failure。

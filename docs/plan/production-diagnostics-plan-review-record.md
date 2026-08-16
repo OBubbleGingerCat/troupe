@@ -1,19 +1,18 @@
 # Production Diagnostics Plan Review Record
 
 - Plan: `docs/plan/production-diagnostics-implementation-plan.md`
-- Status: round 12 unanimously approved; ready for user acceptance
+- Status: round 13 user-authorized root self-review accepted; implementation may continue
 - Actor Design SHA-256: `acb963576a100e98415418dbc6f68cb4b605c642d06f2c06620ffc4e29a19021`
-- Diagnostics Design SHA-256: `4f8c72dec79f2df62a81d4a0f1b46dbdca74511771058844668c2181975698f6`
-- Plan SHA-256: `cfb13c1d302bcb81bc59ac6ca2083547fd699c281a12e8e5aaa7dcb74d589bbe`
-- Validator SHA-256: `836dcd9d133a289d687c0f3db1ecd316c62b9c7475d79bccfad3acf2ec0dde57`
-- Validator: `145 nodes; 256 direct edges; 109 subprojects; 141 slots; 41 shared paths; 130 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
-- Baseline: `434 passed in 15.40s`; locked Cargo metadata, root-executable fmt/check, validator normal/self-test,
-  balanced Markdown fences, local-link/conflict/whitespace, zero-bytecode, and one-worktree/no-diagnostics-branch
-  checks passed
-- Review round: current 12 (frozen)
+- Diagnostics Design SHA-256: `c0e7afdc1b5661e21c5142860b8f83a397843e9d32391d209bf1a9cd4e54b46d`
+- Plan SHA-256: `b5d151e1326a2947ab82c2b8620dd15cf5a83f6d5ba403b4b3e957fd28a39020`
+- Validator SHA-256: `7ea28f559a67f75459a3fc305304be4485ac5dfe1159de5ec46c876219b85ad4`
+- Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 46 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
+- Baseline: validator normal/mutation self-test, derived DAG/schedule, ownership closure, balanced planning diffs,
+  conflict-marker scan, and whitespace checks passed; no product code changed, so product build/Gates were not rerun
+- Review round: current 13 (frozen by explicit user-authorized root self-review)
 
-No approval has been recorded yet. Round 9 and later must refer to one exact four-input tuple: Actor design,
-diagnostics design, plan, and validator. Any byte change in those inputs invalidates all approvals from prior rounds.
+Round 13 supersedes Round 12 for implementation dispatch. Its explicit one-time review waiver does not carry to
+another planning hash and does not waive the independent final implementation reviews.
 
 ## Round 1
 
@@ -363,3 +362,42 @@ the focused convergence criteria. In particular, B18 now proves only ancestor-cl
 B16 owns the first real standalone full-chain Gate after joining B12/B17/B18, and V02 proves the Production
 observer plus per-turn payload sidecar without leaking captured payload into canonical store/Web/Perfetto facts.
 No scheduling, utilization, or maximum-parallelism note was used as an acceptance condition.
+
+## Round 13
+
+Frozen input tuple:
+
+- Actor Design: `acb963576a100e98415418dbc6f68cb4b605c642d06f2c06620ffc4e29a19021`
+- Diagnostics Design: `c0e7afdc1b5661e21c5142860b8f83a397843e9d32391d209bf1a9cd4e54b46d`
+- Plan: `b5d151e1326a2947ab82c2b8620dd15cf5a83f6d5ba403b4b3e957fd28a39020`
+- Validator: `7ea28f559a67f75459a3fc305304be4485ac5dfe1159de5ec46c876219b85ad4`
+
+After 100 of 145 nodes had merged, implementation audits found four contract blockers: T03's impossible
+Run-length-independent memory claim, missing Act-authority settlement ordering, an incomplete live
+snapshot-to-SSE handoff, and no bounded View catalog contract. The user explicitly authorized root to repair the
+five-file planning bundle, self-review it, skip four independent Round-13 plan votes, and resume implementation.
+
+Root self-review evidence:
+
+- normal validator and full mutation self-test passed with 145 nodes, 254 direct edges, 109 subprojects, 141
+  slots, 46 shared paths, and 131 behavior owners;
+- the derived 52-tick reference schedule and unchanged 34-node critical path match the revised direct DAG;
+- T03 now performs a fixed 1,000,000-entry/64-MiB structural preflight before first writer poll, while H05 waits
+  for that preflight before committing a successful response;
+- B14/B16 use the explicit `F05 -> B18 -> B16 -> B14` sink-binding writer chain and the terminal order
+  usage admission -> Act finish admission -> sink enqueue -> authority expiry -> seal/retire;
+- W05 uses snapshot W -> exact bounded `(max(0,W-4096),W]` suffix -> atomic W08 hydrate -> SSE after W, without
+  adding a limit parameter or API version;
+- H03/W10/W15 and B13 agree on a max-64 manifest-ordered catalog, current compatible records, and opaque newer
+  archive records;
+- the ownership validator now distinguishes a slot's primary behavior owner from explicit ordered successor
+  writers, and mutation coverage rejects promoting a successor to primary owner;
+- A08's already-realized direct Gate explicitly retains `agent-test-support`, matching its descriptor and real
+  Result MCP state-machine fixture without selecting a native/maturin wheel path;
+- T04 keeps its repeatable descriptor offline; the one-time proxy-backed provision remains a post-Gate root action
+  and no longer appears in projected descriptor argv;
+- Actor design stayed byte-identical, no authentication/CORS/content-redaction scope was added, and no product
+  implementation or package dependency changed in this round.
+
+Verdict: `ACCEPT` for continued implementation with zero known planning blockers. This is a user-authorized root
+self-review, not four independent votes. Final implementation review remains mandatory.
