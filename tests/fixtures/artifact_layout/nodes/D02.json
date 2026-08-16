@@ -1,7 +1,14 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/tests/diagnostic_cli_status.rs",
+    "tests/fixtures/diagnostics/cli/status-human.txt",
+    "tests/fixtures/diagnostics/cli/status-v1.json",
+    "tests/integration/test_diagnostic_cli_status.py"
+  ],
+  "modified": [
+    "rust/src/application/diagnostic_cli/status.rs"
+  ],
   "removed": [],
   "generated": []
 }
