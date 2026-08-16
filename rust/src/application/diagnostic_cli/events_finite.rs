@@ -106,6 +106,14 @@ pub(crate) struct EventsDocument {
 }
 
 impl EventsDocument {
+    pub(crate) const fn captured_watermark(&self) -> SchemaU64 {
+        self.response.captured_watermark
+    }
+
+    pub(crate) fn events(&self) -> &[DiagnosticEvent] {
+        &self.response.events
+    }
+
     pub(crate) fn render(&self, format: EventsFormat) -> String {
         match format {
             EventsFormat::Human => self.render_human(),
