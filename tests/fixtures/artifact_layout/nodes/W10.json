@@ -1,6 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/query/binding.ts",
+    "frontend/diagnostics/src/query/cache.ts",
+    "frontend/diagnostics/src/query/client.ts",
+    "frontend/diagnostics/src/query/pagination.ts",
+    "frontend/diagnostics/tests/integration/query-invalidation.test.ts",
+    "frontend/diagnostics/tests/integration/query-pagination.test.ts"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
