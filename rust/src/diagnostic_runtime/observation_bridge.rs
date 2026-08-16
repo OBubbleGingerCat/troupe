@@ -54,7 +54,7 @@ mod active {
         time::{ElapsedNs, RunClock},
     };
 
-    use crate::diagnostic_runtime::act_producer;
+    use crate::diagnostic_runtime::{act_producer, hooks::DiagnosticActSubscriberLookup};
 
     const ADMISSION_FAILED: AgentDiagnosticErrorCode =
         AgentDiagnosticErrorCode::new("canonical_admission_failed");
@@ -134,10 +134,6 @@ mod active {
         Buffered,
         DeferredUsage,
         SinkOnlyPayload,
-    }
-
-    pub(crate) trait ActObservationSubscriberLookup: Send + Sync + 'static {
-        fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>>;
     }
 
     #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -252,7 +248,7 @@ mod active {
 
     pub(crate) struct CanonicalObservationBridge {
         admission: Arc<dyn CanonicalObservationAdmission>,
-        subscribers: Option<Arc<dyn ActObservationSubscriberLookup>>,
+        subscribers: Option<Arc<dyn DiagnosticActSubscriberLookup>>,
         clock: RunClock,
         state: Mutex<BridgeState>,
     }
@@ -278,7 +274,7 @@ mod active {
 
         pub(crate) fn production_with_subscribers<R>(
             hub: Arc<ProductionDiagnosticHub<R>>,
-            subscribers: Arc<dyn ActObservationSubscriberLookup>,
+            subscribers: Arc<dyn DiagnosticActSubscriberLookup>,
             clock: RunClock,
         ) -> Arc<Self>
         where
@@ -1720,6 +1716,4 @@ mod active {
 
 #[cfg(not(test))]
 #[allow(unused_imports)]
-pub(crate) use active::{
-    ActObservationSubscriberLookup, CanonicalObservationBridge, ObservationDisposition,
-};
+pub(crate) use active::{CanonicalObservationBridge, ObservationDisposition};

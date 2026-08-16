@@ -6,6 +6,7 @@ use pyo3::class::gc::{PyTraverseError, PyVisit};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use troupe_agent_runtime::AgentTurnControl;
+use troupe_diagnostics_core::hub::{ActEventSubscriber, DeliveryFailure};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DiagnosticAdmissionProfile {
@@ -119,6 +120,22 @@ pub(crate) trait DiagnosticAdmissionCapability: Any + Send + Sync {
         control: &Arc<AgentTurnControl>,
         binding: DiagnosticActBinding,
     ) -> PyResult<()>;
+}
+
+pub(crate) trait DiagnosticActSubscriberLookup: Send + Sync + 'static {
+    fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NoopDiagnosticActSubscriber;
+
+impl ActEventSubscriber for NoopDiagnosticActSubscriber {
+    fn deliver(
+        &self,
+        _event: troupe_diagnostics_core::hub::AcceptedDiagnosticEvent,
+    ) -> Result<(), DeliveryFailure> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

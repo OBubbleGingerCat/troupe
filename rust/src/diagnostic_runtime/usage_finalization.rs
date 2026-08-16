@@ -324,9 +324,8 @@ mod active {
             self, UsageFinalizationAck, UsageFinalizationBridge, UsageFinalizationSettlement,
             UsageFinalizationSlot,
         },
-        observation_bridge::{
-            ActObservationSubscriberLookup, CanonicalObservationBridge, ObservationDisposition,
-        },
+        hooks::DiagnosticActSubscriberLookup,
+        observation_bridge::{CanonicalObservationBridge, ObservationDisposition},
     };
 
     use super::machine::{
@@ -408,7 +407,7 @@ mod active {
 
     struct UsageDestinationContext {
         admission: Arc<dyn UsageAdmission>,
-        subscribers: Option<Arc<dyn ActObservationSubscriberLookup>>,
+        subscribers: Option<Arc<dyn DiagnosticActSubscriberLookup>>,
         clock: RunClock,
         failure_owner: Arc<dyn UsageFinalizationFailureOwner>,
     }
@@ -844,7 +843,7 @@ mod active {
 
         pub(crate) fn production_with_subscribers<R>(
             hub: Arc<ProductionDiagnosticHub<R>>,
-            subscribers: Arc<dyn ActObservationSubscriberLookup>,
+            subscribers: Arc<dyn DiagnosticActSubscriberLookup>,
             clock: RunClock,
             failure_owner: Arc<dyn UsageFinalizationFailureOwner>,
         ) -> Result<Arc<Self>, AgentDiagnosticErrorCode>
