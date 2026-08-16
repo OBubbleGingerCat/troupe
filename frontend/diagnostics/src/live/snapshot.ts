@@ -83,10 +83,10 @@ export async function fetchDiagnosticSnapshotWindow(
   if (response.run_id !== snapshot.run_id) {
     throw new DiagnosticTransportError("identity", "snapshot suffix belongs to another Run");
   }
-  if (response.captured_watermark !== snapshot.watermark_sequence) {
+  if (compareU64(response.captured_watermark, snapshot.watermark_sequence) < 0) {
     throw new DiagnosticTransportError(
       "protocol",
-      "snapshot suffix watermark differs from the snapshot watermark",
+      "snapshot suffix was captured before the snapshot watermark",
     );
   }
   if (response.next_after !== null) {

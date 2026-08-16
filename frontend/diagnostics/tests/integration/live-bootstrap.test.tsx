@@ -265,6 +265,32 @@ describe("live diagnostics bootstrap", () => {
     );
   });
 
+  it("accepts a suffix captured after the snapshot while hydrating only through W", async () => {
+    const suffix = { ...EVENTS_RESPONSE, captured_watermark: "3" };
+    const requests = routedFetch(
+      identity(),
+      status(),
+      loadHttpFixture("snapshot-v1.json"),
+      suffix,
+    );
+    const controller = await startLiveDiagnostics({
+      baseUrl: BASE_URL,
+      fetch: requests.fetch,
+      EventSource: FakeEventSource as EventSourceConstructor,
+    });
+
+    expect(controller.state.phase).toBe("connecting");
+    expect(controller.state.diagnostics?.cursor).toEqual({
+      delivered_through: "2",
+      committed_watermark: "2",
+    });
+    expect(controller.state.diagnostics?.windows.visible?.events.map((event) => event.sequence))
+      .toEqual(["1", "2"]);
+    expect(FakeEventSource.instances[0]?.url).toBe(
+      "http://diagnostics.test/troupe/api/v1/events?after=2",
+    );
+  });
+
   it.each([
     [
       "another Run",
@@ -277,11 +303,6 @@ describe("live diagnostics bootstrap", () => {
         })),
       },
       "identity",
-    ],
-    [
-      "a different watermark",
-      { ...EVENTS_RESPONSE, captured_watermark: "3" },
-      "protocol",
     ],
     [
       "a continuation cursor",
