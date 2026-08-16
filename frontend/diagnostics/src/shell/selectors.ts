@@ -6,6 +6,7 @@ import type {
 } from "../state/model.ts";
 import { presentedLiveEdge } from "../state/reducer.ts";
 import {
+  hierarchyScopeReference,
   sameSelectionReference,
   scopeReference,
   spanReference,
@@ -265,12 +266,7 @@ function cueNode(
       )),
   ];
   const key = scopeKey("cue", sceneId, actorId, cue.id);
-  const selection = scopeReference(
-    firstWait?.start.scope
-      ?? firstExecution?.start.scope
-      ?? acts[0]?.start.scope
-      ?? sparseScope(sceneId, actorId, cue.id),
-  );
+  const selection = hierarchyScopeReference(sparseScope(sceneId, actorId, cue.id), "cue_id");
   const expanded = state.presentation.expanded.includes(key);
   return {
     key,
@@ -319,7 +315,7 @@ function actorNode(
     .map((cue) => cueNode(state, sceneId, actor.id, cue))
     .sort((left, right) => left.label.localeCompare(right.label));
   const key = scopeKey("actor", sceneId, actor.id);
-  const selection = scopeReference(actorSpan?.start.scope ?? sparseScope(sceneId, actor.id));
+  const selection = hierarchyScopeReference(sparseScope(sceneId, actor.id), "actor_id");
   const displayName = actorSpan === null ? null : detailString(actorSpan, "display_name");
   return {
     key,
@@ -343,7 +339,7 @@ function sceneNode(state: DiagnosticState, scene: SceneBuilder): ExecutionNode {
     .map((actor) => actorNode(state, scene.id, actor))
     .sort((left, right) => left.label.localeCompare(right.label));
   const key = scopeKey("scene", scene.id);
-  const selection = scopeReference(sceneSpan?.start.scope ?? sparseScope(scene.id));
+  const selection = hierarchyScopeReference(sparseScope(scene.id), "scene_id");
   return {
     key,
     kind: "scene",

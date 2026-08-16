@@ -15,6 +15,8 @@ import { cacheQueryResult, queryDependsOnEvent } from "../../src/state/queries.t
 import {
   createPresentationState,
   eventReference,
+  hierarchyScope,
+  hierarchyScopeReference,
   messageReference,
   scopeFromReference,
   scopeReference,
@@ -59,6 +61,24 @@ describe("diagnostic state reducer", () => {
     expect(spanReference(decodeU64("7"))).toEqual({ kind: "span", id: "7" });
     expect(messageReference("message-1")).toEqual({ kind: "message", id: "message-1" });
     expect(scopeFromReference(scopeReference(SCOPE))).toEqual(SCOPE);
+    expect(scopeFromReference(hierarchyScopeReference(SCOPE, "actor_id"))).toEqual({
+      scene_id: "scene-1",
+      actor_id: "actor-1",
+      cue_id: null,
+      effect_id: null,
+      act_id: null,
+      tool_call_id: null,
+      session_generation: null,
+    });
+    expect(hierarchyScope(SCOPE, "cue_id")).toEqual({
+      scene_id: "scene-1",
+      actor_id: "actor-1",
+      cue_id: "cue-1",
+      effect_id: null,
+      act_id: null,
+      tool_call_id: null,
+      session_generation: null,
+    });
     expect(scopeFromReference({ kind: "scope", id: "not-json" })).toBeNull();
     expect(scopeFromReference({ kind: "scope", id: "[null]" })).toBeNull();
   });

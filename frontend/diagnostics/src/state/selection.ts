@@ -22,6 +22,14 @@ const SCOPE_REFERENCE_FIELDS = [
   "session_generation",
 ] as const;
 
+export type ScopeHierarchyField =
+  | "scene_id"
+  | "actor_id"
+  | "cue_id"
+  | "effect_id"
+  | "act_id"
+  | "tool_call_id";
+
 export function eventReference(sequence: U64String): SelectionReference {
   return { kind: "event", id: sequence };
 }
@@ -42,6 +50,47 @@ export function scopeReference(scope: DiagnosticScope): SelectionReference {
     kind: "scope",
     id: JSON.stringify(SCOPE_REFERENCE_FIELDS.map((field) => scope[field])),
   };
+}
+
+export function hierarchyScope(
+  scope: DiagnosticScope,
+  through: ScopeHierarchyField,
+): DiagnosticScope {
+  const scene: DiagnosticScope = {
+    scene_id: scope.scene_id,
+    actor_id: null,
+    cue_id: null,
+    effect_id: null,
+    act_id: null,
+    tool_call_id: null,
+    session_generation: null,
+  };
+  if (through === "scene_id") {
+    return scene;
+  }
+  const actor = { ...scene, actor_id: scope.actor_id };
+  if (through === "actor_id") {
+    return actor;
+  }
+  const cue = { ...actor, cue_id: scope.cue_id };
+  if (through === "cue_id") {
+    return cue;
+  }
+  if (through === "effect_id") {
+    return { ...cue, effect_id: scope.effect_id };
+  }
+  const act = { ...cue, act_id: scope.act_id };
+  if (through === "act_id") {
+    return act;
+  }
+  return { ...act, tool_call_id: scope.tool_call_id };
+}
+
+export function hierarchyScopeReference(
+  scope: DiagnosticScope,
+  through: ScopeHierarchyField,
+): SelectionReference {
+  return scopeReference(hierarchyScope(scope, through));
 }
 
 export function scopeFromReference(reference: SelectionReference): DiagnosticScope | null {
