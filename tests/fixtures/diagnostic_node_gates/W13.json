@@ -1,8 +1,25 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "node",
+      "frontend/diagnostics/scripts/maintain.mjs",
+      "--npm-cache",
+      "${TROUPE_NPM_CACHE:?}",
+      "--typecheck",
+      "--unit",
+      "tests/component/timeseries-renderer.test.tsx",
+      "--browser",
+      "tests/e2e/timeseries.spec.ts",
+      "--browser-cache",
+      "${TROUPE_PLAYWRIGHT_CACHE:?}"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm",
+    "playwright"
+  ],
   "exclusive_resources": []
 }

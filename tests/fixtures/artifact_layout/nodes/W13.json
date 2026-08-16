@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/timeseries/model.ts",
+    "frontend/diagnostics/src/timeseries/renderer.ts",
+    "frontend/diagnostics/src/timeseries/resize.ts",
+    "frontend/diagnostics/tests/component/timeseries-renderer.test.tsx",
+    "frontend/diagnostics/tests/e2e/timeseries.spec.ts"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
