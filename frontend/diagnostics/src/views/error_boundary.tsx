@@ -65,7 +65,7 @@ class RendererBoundary extends Component<RendererBoundaryProps, RendererBoundary
     this.state = { error: null, retry_generation: 0 };
   }
 
-  static getDerivedStateFromError(error: unknown): Partial<RendererBoundaryState> {
+  static override getDerivedStateFromError(error: unknown): Partial<RendererBoundaryState> {
     return { error: normalizeRendererError(error) };
   }
 
