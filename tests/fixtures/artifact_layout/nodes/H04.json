@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/server_assembly.rs",
+    "tests/fixtures/diagnostics/http/route-matrix.json"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/server/assembly.rs"
+  ],
   "removed": [],
   "generated": []
 }
