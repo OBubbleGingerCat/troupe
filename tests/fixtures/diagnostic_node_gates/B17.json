@@ -1,6 +1,22 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/integration/test_diagnostic_act_usage.py"
+    ],
+    [
+      "cargo",
+      "test",
+      "--locked",
+      "--manifest-path",
+      "rust/Cargo.toml",
+      "--package",
+      "troupe",
+      "diagnostic_runtime::usage_finalization"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
