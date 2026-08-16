@@ -1,6 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/shell/AppShell.tsx",
+    "frontend/diagnostics/src/shell/ExecutionTree.tsx",
+    "frontend/diagnostics/src/shell/PrimaryToolbar.tsx",
+    "frontend/diagnostics/src/shell/selectors.ts",
+    "frontend/diagnostics/src/shell/shell.css",
+    "frontend/diagnostics/tests/component/shell.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
