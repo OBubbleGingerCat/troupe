@@ -8,8 +8,11 @@ import type { U64String } from "../protocol/decimal.ts";
 import type { DiagnosticEvent } from "../protocol/event.ts";
 import type { SelectionReference } from "../state/model.ts";
 import {
+  eventReference,
+  sameSelectionReference,
+} from "../state/selection.ts";
+import {
   eventSelectionHighlight,
-  eventSelectionReference,
   selectionReferenceForEvent,
 } from "./selection.ts";
 import "./inspector.css";
@@ -109,8 +112,7 @@ function isIssue(event: DiagnosticEvent): boolean {
 
 function semanticReference(event: DiagnosticEvent): SelectionReference | null {
   const reference = selectionReferenceForEvent(event);
-  const eventReference = eventSelectionReference(event.sequence);
-  return reference.kind === eventReference.kind && reference.id === eventReference.id
+  return sameSelectionReference(reference, eventReference(event.sequence))
     ? null
     : reference;
 }
@@ -166,7 +168,7 @@ export function EventTable({
                       type="button"
                       class="diagnostic-link-button diagnostic-number"
                       aria-label={`Select event ${event.sequence}`}
-                      onClick={() => onSelectionChange(eventSelectionReference(event.sequence))}
+                      onClick={() => onSelectionChange(eventReference(event.sequence))}
                     >
                       {event.sequence}
                     </button>

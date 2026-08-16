@@ -17,10 +17,12 @@ import type {
 } from "../protocol/event.ts";
 import type { SelectionReference } from "../state/model.ts";
 import {
-  eventSelectionReference,
-  messageSelectionReference,
-  scopeFieldSelectionReference,
-  spanSelectionReference,
+  eventReference,
+  messageReference,
+  spanReference,
+} from "../state/selection.ts";
+import {
+  hierarchyScopeReference,
 } from "./selection.ts";
 import "./inspector.css";
 
@@ -180,7 +182,7 @@ function ScopeDetails({
           value={scope.scene_id}
           reference={scope.scene_id === null
             ? null
-            : scopeFieldSelectionReference("scene_id", scope.scene_id)}
+            : hierarchyScopeReference(scope, "scene_id")}
           onSelectionChange={onSelectionChange}
         />
       </DetailRow>
@@ -189,7 +191,7 @@ function ScopeDetails({
           value={scope.actor_id}
           reference={scope.actor_id === null
             ? null
-            : scopeFieldSelectionReference("actor_id", scope.actor_id)}
+            : hierarchyScopeReference(scope, "actor_id")}
           onSelectionChange={onSelectionChange}
         />
       </DetailRow>
@@ -198,7 +200,7 @@ function ScopeDetails({
           value={scope.cue_id}
           reference={scope.cue_id === null
             ? null
-            : scopeFieldSelectionReference("cue_id", scope.cue_id)}
+            : hierarchyScopeReference(scope, "cue_id")}
           onSelectionChange={onSelectionChange}
         />
       </DetailRow>
@@ -207,7 +209,7 @@ function ScopeDetails({
           value={scope.effect_id}
           reference={scope.effect_id === null
             ? null
-            : scopeFieldSelectionReference("effect_id", scope.effect_id)}
+            : hierarchyScopeReference(scope, "effect_id")}
           onSelectionChange={onSelectionChange}
         />
       </DetailRow>
@@ -216,7 +218,7 @@ function ScopeDetails({
           value={scope.act_id}
           reference={scope.act_id === null
             ? null
-            : scopeFieldSelectionReference("act_id", scope.act_id)}
+            : hierarchyScopeReference(scope, "act_id")}
           onSelectionChange={onSelectionChange}
         />
       </DetailRow>
@@ -225,7 +227,7 @@ function ScopeDetails({
           value={scope.tool_call_id}
           reference={scope.tool_call_id === null
             ? null
-            : scopeFieldSelectionReference("tool_call_id", scope.tool_call_id)}
+            : hierarchyScopeReference(scope, "tool_call_id")}
           onSelectionChange={onSelectionChange}
         />
       </DetailRow>
@@ -246,7 +248,7 @@ function SpanReference({
   return (
     <ReferenceValue
       value={value}
-      reference={value === null ? null : spanSelectionReference(value)}
+      reference={value === null ? null : spanReference(value)}
       onSelectionChange={onSelectionChange}
       numeric
     />
@@ -320,7 +322,7 @@ function EventDetail({
           <DetailRow label="Message">
             <ReferenceValue
               value={event.message_id}
-              reference={messageSelectionReference(event.message_id)}
+              reference={messageReference(event.message_id)}
               onSelectionChange={onSelectionChange}
             />
           </DetailRow>
@@ -329,7 +331,7 @@ function EventDetail({
               value={event.source_message_id}
               reference={event.source_message_id === null
                 ? null
-                : messageSelectionReference(event.source_message_id)}
+                : messageReference(event.source_message_id)}
               onSelectionChange={onSelectionChange}
             />
           </DetailRow>
@@ -344,7 +346,7 @@ function EventDetail({
           <DetailRow label="Message">
             <ReferenceValue
               value={event.message_id}
-              reference={messageSelectionReference(event.message_id)}
+              reference={messageReference(event.message_id)}
               onSelectionChange={onSelectionChange}
             />
           </DetailRow>
@@ -501,7 +503,7 @@ export function EventInspector({
         </div>
         <ReferenceValue
           value={event.sequence}
-          reference={eventSelectionReference(event.sequence)}
+          reference={eventReference(event.sequence)}
           onSelectionChange={onSelectionChange}
           numeric
         />
@@ -529,7 +531,7 @@ export function EventInspector({
               <li key={`${link.source_sequence}:${link.relation}`}>
                 <ReferenceValue
                   value={link.source_sequence}
-                  reference={eventSelectionReference(link.source_sequence)}
+                  reference={eventReference(link.source_sequence)}
                   onSelectionChange={onSelectionChange}
                   numeric
                 />

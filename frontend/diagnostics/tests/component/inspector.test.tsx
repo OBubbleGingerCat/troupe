@@ -36,11 +36,16 @@ import {
 } from "../../src/inspector/FilterBar.tsx";
 import {
   eventSelectionHighlight,
-  messageSelectionReference,
   resolveSelection,
   selectionHighlightsScope,
   selectionOverlapsElapsedRange,
 } from "../../src/inspector/selection.ts";
+import {
+  eventReference,
+  messageReference,
+  scopeReference,
+  spanReference,
+} from "../../src/state/selection.ts";
 import {
   loadAllValidEventFixtures,
   loadEventFixture,
@@ -141,7 +146,7 @@ describe("diagnostic event table, inspector, and query linkage", () => {
           previous: { after: null },
           next: { after: decodeU64("3") },
         }}
-        selection={messageSelectionReference("message-1")}
+        selection={messageReference("message-1")}
         onSelectionChange={onSelectionChange}
         onPageRequest={onPageRequest}
       />,
@@ -153,10 +158,13 @@ describe("diagnostic event table, inspector, and query linkage", () => {
     expect(screen.getByText("Observation gap: unknown_source_loss")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Select event 3" }));
-    expect(onSelectionChange).toHaveBeenLastCalledWith({ kind: "event", id: "sequence:3" });
+    expect(onSelectionChange).toHaveBeenLastCalledWith(eventReference(events[2]!.sequence));
 
     fireEvent.click(screen.getByRole("button", { name: "streaming text" }));
-    expect(onSelectionChange).toHaveBeenLastCalledWith({ kind: "message", id: "message-1" });
+    expect(onSelectionChange).toHaveBeenLastCalledWith(messageReference("message-1"));
+
+    fireEvent.click(screen.getByRole("button", { name: "tool.updated" }));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(scopeReference(events[1]!.scope));
 
     fireEvent.click(screen.getByRole("button", { name: "Previous event page" }));
     fireEvent.click(screen.getByRole("button", { name: "Next event page" }));
@@ -238,6 +246,37 @@ describe("diagnostic event table, inspector, and query linkage", () => {
     }
   });
 
+  it("emits W02-compatible canonical scope and span references from the inspector", () => {
+    const tool = toolUpdate("2", "15");
+    const onSelectionChange = vi.fn();
+    const view = render(
+      <EventInspector event={tool} onSelectionChange={onSelectionChange} />,
+    );
+    const actorScope: DiagnosticScope = {
+      scene_id: tool.scope.scene_id,
+      actor_id: tool.scope.actor_id,
+      cue_id: null,
+      effect_id: null,
+      act_id: null,
+      tool_call_id: null,
+      session_generation: tool.scope.session_generation,
+    };
+
+    fireEvent.click(screen.getByRole("button", { name: "actor-1" }));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(scopeReference(actorScope));
+
+    const spanEvents = (loadEventFixture("span-finished.json") as readonly unknown[]).map(decode);
+    const finish = spanEvents.find((event) => event.kind === "span_finished")!;
+    if (finish.kind !== "span_finished") {
+      throw new Error("span fixture did not decode as span_finished");
+    }
+    view.rerender(
+      <EventInspector event={finish} onSelectionChange={onSelectionChange} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: finish.span_id }));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(spanReference(finish.span_id));
+  });
+
   it("keeps gaps, truncation, unknown optionals, and arbitrary token integers readable", () => {
     const limits = (loadEventFixture("limits.json") as readonly unknown[]).map(decode);
     const usage = limits.find((event) => event.kind === "act_token_usage_finalized")!;
@@ -300,7 +339,7 @@ describe("diagnostic event table, inspector, and query linkage", () => {
       toolUpdate("2", "15"),
       messageDelta("3", "20", "second"),
     ];
-    const selection = messageSelectionReference("message-1");
+    const selection = messageReference("message-1");
     const resolved = resolveSelection(selection, events);
     const actorScope: DiagnosticScope = {
       scene_id: null,

@@ -8,6 +8,14 @@ import type {
   PresentationFilters,
   SelectionReference,
 } from "../state/model.ts";
+import {
+  eventReference,
+  messageReference,
+  sameSelectionReference,
+  scopeFromReference,
+  scopeReference,
+  spanReference,
+} from "../state/selection.ts";
 
 
 const SCOPE_FIELDS = [
@@ -20,7 +28,13 @@ const SCOPE_FIELDS = [
   "session_generation",
 ] as const;
 
-type ScopeStringField = Exclude<typeof SCOPE_FIELDS[number], "session_generation">;
+export type ScopeHierarchyField =
+  | "scene_id"
+  | "actor_id"
+  | "cue_id"
+  | "effect_id"
+  | "act_id"
+  | "tool_call_id";
 
 export type SelectionHighlight = "none" | "related" | "selected";
 export type EventErrorFilter = "all" | "errors_only" | "errors_and_gaps";
@@ -58,82 +72,59 @@ export interface ResolvedSelection {
   readonly event_sequences: readonly U64String[];
 }
 
-export function eventSelectionReference(sequence: U64String): SelectionReference {
-  return { kind: "event", id: `sequence:${sequence}` };
+export function hierarchyScope(
+  scope: DiagnosticScope,
+  through: ScopeHierarchyField,
+): DiagnosticScope {
+  const base: DiagnosticScope = {
+    scene_id: scope.scene_id,
+    actor_id: null,
+    cue_id: null,
+    effect_id: null,
+    act_id: null,
+    tool_call_id: null,
+    session_generation: scope.session_generation,
+  };
+  if (through === "scene_id") {
+    return base;
+  }
+  const actor = { ...base, actor_id: scope.actor_id };
+  if (through === "actor_id") {
+    return actor;
+  }
+  const cue = { ...actor, cue_id: scope.cue_id };
+  if (through === "cue_id") {
+    return cue;
+  }
+  if (through === "effect_id") {
+    return { ...cue, effect_id: scope.effect_id };
+  }
+  const act = { ...cue, act_id: scope.act_id };
+  if (through === "act_id") {
+    return act;
+  }
+  return {
+    ...act,
+    effect_id: scope.effect_id,
+    tool_call_id: scope.tool_call_id,
+  };
 }
 
-export function spanSelectionReference(spanId: U64String): SelectionReference {
-  return { kind: "span", id: `span:${spanId}` };
-}
-
-export function messageSelectionReference(messageId: string): SelectionReference {
-  return { kind: "message", id: messageId };
-}
-
-export function scopeFieldSelectionReference(
-  field: ScopeStringField,
-  id: string,
+export function hierarchyScopeReference(
+  scope: DiagnosticScope,
+  through: ScopeHierarchyField,
 ): SelectionReference {
-  return { kind: "scope", id: `${field}:${id}` };
-}
-
-export function scopeSelectionReference(scope: DiagnosticScope): SelectionReference {
-  const values = SCOPE_FIELDS.map((field) => scope[field]);
-  return { kind: "scope", id: `scope:${encodeURIComponent(JSON.stringify(values))}` };
+  return scopeReference(hierarchyScope(scope, through));
 }
 
 export function selectionReferenceForEvent(event: DiagnosticEvent): SelectionReference {
   if (event.kind === "agent_message_delta" || event.kind === "agent_message_completed") {
-    return messageSelectionReference(event.message_id);
+    return messageReference(event.message_id);
   }
   if (event.scope.tool_call_id !== null) {
-    return scopeFieldSelectionReference("tool_call_id", event.scope.tool_call_id);
+    return hierarchyScopeReference(event.scope, "tool_call_id");
   }
-  return eventSelectionReference(event.sequence);
-}
-
-function referenceValue(reference: SelectionReference, prefix: string): string | null {
-  return reference.id.startsWith(prefix) ? reference.id.slice(prefix.length) : null;
-}
-
-function decodeFullScope(reference: SelectionReference): DiagnosticScope | null {
-  const encoded = referenceValue(reference, "scope:");
-  if (reference.kind !== "scope" || encoded === null) {
-    return null;
-  }
-  try {
-    const values = JSON.parse(decodeURIComponent(encoded)) as unknown;
-    if (!Array.isArray(values) || values.length !== SCOPE_FIELDS.length) {
-      return null;
-    }
-    const [
-      sceneId,
-      actorId,
-      cueId,
-      effectId,
-      actId,
-      toolCallId,
-      sessionGeneration,
-    ] = values;
-    if (
-      ![sceneId, actorId, cueId, effectId, actId, toolCallId]
-        .every((value) => value === null || typeof value === "string")
-      || (sessionGeneration !== null && typeof sessionGeneration !== "string")
-    ) {
-      return null;
-    }
-    return {
-      scene_id: sceneId as string | null,
-      actor_id: actorId as string | null,
-      cue_id: cueId as string | null,
-      effect_id: effectId as string | null,
-      act_id: actId as string | null,
-      tool_call_id: toolCallId as string | null,
-      session_generation: sessionGeneration as U64String | null,
-    };
-  } catch {
-    return null;
-  }
+  return eventReference(event.sequence);
 }
 
 function sameScope(left: DiagnosticScope, right: DiagnosticScope): boolean {
@@ -141,33 +132,24 @@ function sameScope(left: DiagnosticScope, right: DiagnosticScope): boolean {
 }
 
 function scopeReferenceMatches(scope: DiagnosticScope, reference: SelectionReference): boolean {
-  if (reference.kind !== "scope") {
-    return false;
-  }
-  const fullScope = decodeFullScope(reference);
-  if (fullScope !== null) {
-    return sameScope(scope, fullScope);
-  }
-  for (const field of SCOPE_FIELDS.slice(0, 6) as readonly ScopeStringField[]) {
-    const value = referenceValue(reference, `${field}:`);
-    if (value !== null) {
-      return scope[field] === value;
-    }
-  }
-  return false;
+  const selectedScope = scopeFromReference(reference);
+  return selectedScope !== null
+    && (sameScope(scope, selectedScope) || sparseScopeContains(selectedScope, scope));
 }
 
-function isSpanEvent(event: DiagnosticEvent, spanId: string): boolean {
+function spanEventReference(event: DiagnosticEvent): SelectionReference | null {
   if (event.kind === "span_started" || event.kind === "custom_span_started") {
-    return event.sequence === spanId;
+    return spanReference(event.sequence);
   }
-  return (event.kind === "span_finished" || event.kind === "custom_span_finished")
-    && event.span_id === spanId;
+  return event.kind === "span_finished" || event.kind === "custom_span_finished"
+    ? spanReference(event.span_id)
+    : null;
 }
 
-function isMessageEvent(event: DiagnosticEvent, messageId: string): boolean {
-  return (event.kind === "agent_message_delta" || event.kind === "agent_message_completed")
-    && event.message_id === messageId;
+function messageEventReference(event: DiagnosticEvent): SelectionReference | null {
+  return event.kind === "agent_message_delta" || event.kind === "agent_message_completed"
+    ? messageReference(event.message_id)
+    : null;
 }
 
 function eventDirectlyMatches(
@@ -175,14 +157,13 @@ function eventDirectlyMatches(
   reference: SelectionReference,
 ): boolean {
   if (reference.kind === "event") {
-    return event.sequence === referenceValue(reference, "sequence:");
+    return sameSelectionReference(eventReference(event.sequence), reference);
   }
   if (reference.kind === "span") {
-    const spanId = referenceValue(reference, "span:");
-    return spanId !== null && isSpanEvent(event, spanId);
+    return sameSelectionReference(spanEventReference(event), reference);
   }
   if (reference.kind === "message") {
-    return isMessageEvent(event, reference.id);
+    return sameSelectionReference(messageEventReference(event), reference);
   }
   return scopeReferenceMatches(event.scope, reference);
 }
