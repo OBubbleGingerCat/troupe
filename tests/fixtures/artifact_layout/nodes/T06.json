@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/test_perfetto_sql_compatibility.sh",
+    "tests/perfetto/sql/assertions.sql",
+    "tests/perfetto/sql/expected.json",
+    "tests/perfetto/sql/fixtures.manifest.json",
+    "tests/unit/test_perfetto_sql_harness.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
