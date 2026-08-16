@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "rust/crates/troupe-diagnostics-runtime/tests/registry_discovery.rs"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/registry/discover.rs",
+    "rust/crates/troupe-diagnostics-runtime/src/registry/revalidate.rs"
+  ],
   "removed": [],
   "generated": []
 }
