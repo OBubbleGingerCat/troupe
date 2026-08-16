@@ -18,12 +18,10 @@ import type {
 import type { SelectionReference } from "../state/model.ts";
 import {
   eventReference,
+  hierarchyScopeReference,
   messageReference,
   spanReference,
 } from "../state/selection.ts";
-import {
-  hierarchyScopeReference,
-} from "./selection.ts";
 import "./inspector.css";
 
 

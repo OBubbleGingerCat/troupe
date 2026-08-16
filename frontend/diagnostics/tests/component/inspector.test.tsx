@@ -42,8 +42,8 @@ import {
 } from "../../src/inspector/selection.ts";
 import {
   eventReference,
+  hierarchyScopeReference,
   messageReference,
-  scopeReference,
   spanReference,
 } from "../../src/state/selection.ts";
 import {
@@ -164,7 +164,9 @@ describe("diagnostic event table, inspector, and query linkage", () => {
     expect(onSelectionChange).toHaveBeenLastCalledWith(messageReference("message-1"));
 
     fireEvent.click(screen.getByRole("button", { name: "tool.updated" }));
-    expect(onSelectionChange).toHaveBeenLastCalledWith(scopeReference(events[1]!.scope));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(
+      hierarchyScopeReference(events[1]!.scope, "tool_call_id"),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Previous event page" }));
     fireEvent.click(screen.getByRole("button", { name: "Next event page" }));
@@ -252,18 +254,10 @@ describe("diagnostic event table, inspector, and query linkage", () => {
     const view = render(
       <EventInspector event={tool} onSelectionChange={onSelectionChange} />,
     );
-    const actorScope: DiagnosticScope = {
-      scene_id: tool.scope.scene_id,
-      actor_id: tool.scope.actor_id,
-      cue_id: null,
-      effect_id: null,
-      act_id: null,
-      tool_call_id: null,
-      session_generation: tool.scope.session_generation,
-    };
-
     fireEvent.click(screen.getByRole("button", { name: "actor-1" }));
-    expect(onSelectionChange).toHaveBeenLastCalledWith(scopeReference(actorScope));
+    expect(onSelectionChange).toHaveBeenLastCalledWith(
+      hierarchyScopeReference(tool.scope, "actor_id"),
+    );
 
     const spanEvents = (loadEventFixture("span-finished.json") as readonly unknown[]).map(decode);
     const finish = spanEvents.find((event) => event.kind === "span_finished")!;

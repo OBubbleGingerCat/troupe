@@ -10,10 +10,10 @@ import type {
 } from "../state/model.ts";
 import {
   eventReference,
+  hierarchyScopeReference,
   messageReference,
   sameSelectionReference,
   scopeFromReference,
-  scopeReference,
   spanReference,
 } from "../state/selection.ts";
 
@@ -27,14 +27,6 @@ const SCOPE_FIELDS = [
   "tool_call_id",
   "session_generation",
 ] as const;
-
-export type ScopeHierarchyField =
-  | "scene_id"
-  | "actor_id"
-  | "cue_id"
-  | "effect_id"
-  | "act_id"
-  | "tool_call_id";
 
 export type SelectionHighlight = "none" | "related" | "selected";
 export type EventErrorFilter = "all" | "errors_only" | "errors_and_gaps";
@@ -70,51 +62,6 @@ export interface ResolvedSelection {
   readonly scope: DiagnosticScope;
   readonly elapsed_range: SelectionElapsedRange;
   readonly event_sequences: readonly U64String[];
-}
-
-export function hierarchyScope(
-  scope: DiagnosticScope,
-  through: ScopeHierarchyField,
-): DiagnosticScope {
-  const base: DiagnosticScope = {
-    scene_id: scope.scene_id,
-    actor_id: null,
-    cue_id: null,
-    effect_id: null,
-    act_id: null,
-    tool_call_id: null,
-    session_generation: scope.session_generation,
-  };
-  if (through === "scene_id") {
-    return base;
-  }
-  const actor = { ...base, actor_id: scope.actor_id };
-  if (through === "actor_id") {
-    return actor;
-  }
-  const cue = { ...actor, cue_id: scope.cue_id };
-  if (through === "cue_id") {
-    return cue;
-  }
-  if (through === "effect_id") {
-    return { ...cue, effect_id: scope.effect_id };
-  }
-  const act = { ...cue, act_id: scope.act_id };
-  if (through === "act_id") {
-    return act;
-  }
-  return {
-    ...act,
-    effect_id: scope.effect_id,
-    tool_call_id: scope.tool_call_id,
-  };
-}
-
-export function hierarchyScopeReference(
-  scope: DiagnosticScope,
-  through: ScopeHierarchyField,
-): SelectionReference {
-  return scopeReference(hierarchyScope(scope, through));
 }
 
 export function selectionReferenceForEvent(event: DiagnosticEvent): SelectionReference {
