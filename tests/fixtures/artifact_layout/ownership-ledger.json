@@ -2137,6 +2137,16 @@
       ]
     },
     {
+      "path": "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/counter_descriptor.proto",
+      "baseline_state": "planned",
+      "writers": [
+        {
+          "node": "T00",
+          "role": "create"
+        }
+      ]
+    },
+    {
       "path": "rust/crates/troupe-diagnostics-perfetto/schema/upstream/protos/perfetto/trace/track_event/debug_annotation.proto",
       "baseline_state": "planned",
       "writers": [
