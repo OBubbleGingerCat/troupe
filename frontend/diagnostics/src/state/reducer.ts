@@ -6,7 +6,13 @@ import type {
   DiagnosticEvent,
   DiagnosticScope,
 } from "../protocol/event.ts";
-import type { UsageSnapshot } from "../protocol/http.ts";
+import type {
+  ProjectedCounterSnapshot,
+  ProjectedMessageSnapshot,
+  ProjectedSpanSnapshot,
+  SnapshotResponse,
+  UsageSnapshot,
+} from "../protocol/http.ts";
 import type {
   CachedQueryResult,
   DiagnosticState,
@@ -64,6 +70,7 @@ import { activateWindow, appendLiveEvent, createWindowState } from "./windows.ts
 
 export type DiagnosticStateAction =
   | { readonly type: "event_received"; readonly event: DiagnosticEvent }
+  | { readonly type: "snapshot_received"; readonly snapshot: SnapshotResponse }
   | { readonly type: "watermark_observed"; readonly through_sequence: U64String }
   | { readonly type: "pause" }
   | { readonly type: "resume" }
@@ -186,6 +193,17 @@ function upsertBounded<T>(
 
 function markRefresh<T>(bucket: ProjectionBucket<T>): ProjectionBucket<T> {
   return bucket.needs_server_refresh ? bucket : { ...bucket, needs_server_refresh: true };
+}
+
+function markDropped<T>(
+  bucket: ProjectionBucket<T>,
+  sequence: U64String,
+): ProjectionBucket<T> {
+  return {
+    ...bucket,
+    dropped_through: later(bucket.dropped_through, sequence),
+    needs_server_refresh: true,
+  };
 }
 
 function scopeKey(scope: DiagnosticScope): string {
@@ -792,6 +810,269 @@ function receiveUsageSnapshot(
   };
 }
 
+function snapshotSpanStart(
+  row: ProjectedSpanSnapshot,
+): NonNullable<ProjectedSpan["start"]> {
+  const common = {
+    schema_version: 1 as const,
+    run_id: row.run_id,
+    sequence: row.span_id,
+    elapsed_ns: row.started_at_ns,
+    scope: row.scope,
+    caused_by: row.started_caused_by,
+    parent_span_id: row.parent_span_id,
+  };
+  return row.definition.family === "built_in"
+    ? {
+      ...common,
+      kind: "span_started",
+      span_kind: row.definition.detail.span_kind,
+      detail: row.definition.detail.detail,
+    }
+    : {
+      ...common,
+      kind: "custom_span_started",
+      name: row.definition.name,
+      attributes: row.definition.attributes,
+    };
+}
+
+function snapshotSpanFinish(
+  row: ProjectedSpanSnapshot,
+): NonNullable<ProjectedSpan["finish"]> | null {
+  const completion = row.completion;
+  if (completion === null) {
+    return null;
+  }
+  const common = {
+    schema_version: 1 as const,
+    run_id: row.run_id,
+    sequence: completion.finish_sequence,
+    elapsed_ns: completion.finished_at_ns,
+    scope: row.scope,
+    caused_by: completion.caused_by,
+    span_id: row.span_id,
+    outcome: completion.outcome,
+  };
+  return row.definition.family === "built_in"
+    ? { ...common, kind: "span_finished", error_code: completion.error_code }
+    : { ...common, kind: "custom_span_finished" };
+}
+
+function snapshotMessageCompletion(
+  row: ProjectedMessageSnapshot,
+): AgentMessageCompletedEvent | null {
+  const completion = row.completion;
+  return completion === null ? null : {
+    kind: "agent_message_completed",
+    schema_version: 1,
+    run_id: row.run_id,
+    sequence: completion.sequence,
+    elapsed_ns: completion.elapsed_ns,
+    scope: row.scope,
+    caused_by: completion.caused_by,
+    message_id: row.message_id,
+    utf8_bytes: completion.utf8_bytes,
+    unicode_scalar_count: completion.unicode_scalar_count,
+    truncated: completion.truncated,
+  };
+}
+
+function snapshotCounterEvent(
+  row: ProjectedCounterSnapshot,
+): ProjectedCounter["event"] {
+  const common = {
+    schema_version: 1 as const,
+    run_id: row.run_id,
+    sequence: row.sequence,
+    elapsed_ns: row.elapsed_ns,
+    scope: row.identity.scope,
+    caused_by: row.caused_by,
+  };
+  if (row.identity.family === "built_in") {
+    if (row.value.type !== "unsigned") {
+      throw new RangeError("decoded built-in counter snapshot has a non-unsigned value");
+    }
+    return {
+      ...common,
+      kind: "counter_sampled",
+      counter_kind: row.identity.counter_kind,
+      value: row.value.value,
+    };
+  }
+  if (row.value.type === "unsigned") {
+    throw new RangeError("decoded custom counter snapshot has an unsigned value");
+  }
+  return {
+    ...common,
+    kind: "custom_counter_sampled",
+    name: row.identity.name,
+    unit: row.identity.unit,
+    dimensions: row.identity.dimensions,
+    value: row.value,
+  };
+}
+
+function hydrateSnapshotSpans(
+  projection: LiveProjection,
+  rows: readonly ProjectedSpanSnapshot[],
+): Pick<LiveProjection, "spans" | "tools"> {
+  const materialized = rows.map((row): ProjectedSpan => ({
+    span_id: row.span_id,
+    start: snapshotSpanStart(row),
+    finish: snapshotSpanFinish(row),
+  }));
+  let spans = projection.spans;
+  for (const span of materialized) {
+    spans = upsertBounded(
+      spans,
+      span,
+      SPAN_CAPACITY,
+      (candidate) => candidate.span_id,
+      spanSequence,
+    );
+  }
+
+  const completeSpanInventory: ProjectionBucket<ProjectedSpan> = {
+    base_through: projection.spans.base_through,
+    items: materialized,
+    dropped_through: null,
+    needs_server_refresh: false,
+  };
+  const spanEvents = materialized.flatMap((span): DiagnosticEvent[] => (
+    span.finish === null ? [span.start!] : [span.start!, span.finish]
+  )).sort((left, right) => compareU64(left.sequence, right.sequence));
+  let tools = projection.tools;
+  for (const event of spanEvents) {
+    tools = projectTool(tools, completeSpanInventory, event);
+  }
+  return { spans, tools };
+}
+
+function messageTruncationKey(
+  messageId: string,
+  scope: DiagnosticScope,
+  sequence: U64String,
+): string {
+  return JSON.stringify([messageId, scopeKey(scope), sequence]);
+}
+
+function hydrateSnapshotMessages(
+  projection: LiveProjection,
+  snapshot: SnapshotResponse,
+): ProjectionBucket<ProjectedMessage> {
+  const truncations = new Set(snapshot.state.truncations.flatMap((truncation): string[] => (
+    truncation.source === "agent_message"
+      ? [messageTruncationKey(truncation.message_id, truncation.scope, truncation.sequence)]
+      : []
+  )));
+  const ordered = [...snapshot.state.messages.messages]
+    .sort((left, right) => compareU64(left.latest_sequence, right.latest_sequence));
+  let messages = projection.messages;
+  for (const row of ordered) {
+    const trimmed = trimMessageText(row.text);
+    const completion = snapshotMessageCompletion(row);
+    const resourceTruncated = completion !== null && truncations.has(messageTruncationKey(
+      row.message_id,
+      row.scope,
+      completion.sequence,
+    ));
+    const incomplete = trimmed.truncated || resourceTruncated;
+    const message: ProjectedMessage = {
+      message_id: row.message_id,
+      scope: row.scope,
+      first_sequence: row.first_sequence,
+      latest_sequence: row.latest_sequence,
+      latest_elapsed_ns: row.latest_elapsed_ns,
+      source_message_id: row.source_message_id,
+      text: trimmed.text,
+      text_complete_from_start: !incomplete,
+      text_truncated_before: incomplete,
+      completion,
+    };
+    messages = upsertBounded(
+      messages,
+      message,
+      MESSAGE_CAPACITY,
+      (candidate) => candidate.message_id,
+      messageSequence,
+      true,
+    );
+    if (incomplete) {
+      messages = markDropped(messages, completion?.sequence ?? row.latest_sequence);
+    }
+  }
+  return messages;
+}
+
+function hydrateSnapshotProjection(snapshot: SnapshotResponse): LiveProjection {
+  let projection = createLiveProjection(snapshot.watermark_sequence);
+  const spanProjection = hydrateSnapshotSpans(projection, snapshot.state.spans.spans);
+  projection = { ...projection, ...spanProjection };
+  projection = {
+    ...projection,
+    messages: hydrateSnapshotMessages(projection, snapshot),
+  };
+
+  const counters = [...snapshot.state.counters.series]
+    .sort((left, right) => compareU64(left.sequence, right.sequence));
+  for (const counter of counters) {
+    projection = {
+      ...projection,
+      counters: projectCounter(projection.counters, snapshotCounterEvent(counter)),
+    };
+  }
+  const contexts = [...snapshot.state.usage.contexts]
+    .sort((left, right) => compareU64(left.sequence, right.sequence));
+  for (const context of contexts) {
+    projection = {
+      ...projection,
+      context_usage: projectContextUsage(projection.context_usage, context),
+    };
+  }
+  for (const gap of snapshot.state.gaps) {
+    projection = projectEvent(projection, gap);
+  }
+  return projection;
+}
+
+export function createDiagnosticStateFromSnapshot(
+  snapshot: SnapshotResponse,
+  previous: DiagnosticState | null = null,
+): DiagnosticState {
+  if (previous !== null && previous.run_id !== snapshot.run_id) {
+    throw new RangeError("snapshot belongs to another Run");
+  }
+  const initial = createDiagnosticState(
+    snapshot.run_id,
+    snapshot.watermark_sequence,
+    snapshot.state.through_elapsed_ns,
+  );
+  const live: LiveEdgeState = {
+    ...initial.live,
+    projection: hydrateSnapshotProjection(snapshot),
+  };
+  let state = receiveUsageSnapshot({ ...initial, live }, snapshot.state.usage);
+  if (previous === null) {
+    return state;
+  }
+  const pausedAt = previous.pause.paused_at;
+  const unseen = pausedAt === null ? 0n : BigInt(snapshot.watermark_sequence) - BigInt(pausedAt);
+  const pause: PauseState = previous.pause.paused
+    ? {
+      ...previous.pause,
+      unseen_count: unseen > 0n ? unseen : 0n,
+      frozen_live: previous.pause.frozen_live ?? previous.live,
+    }
+    : initial.pause;
+  state = {
+    ...state,
+    presentation: previous.presentation,
+    pause,
+  };
+  return state;
+}
+
 function staleAt(result: CachedQueryResult, sequence: U64String): CachedQueryResult {
   return {
     ...result,
@@ -833,6 +1114,8 @@ export function reduceDiagnosticState(
   action: DiagnosticStateAction,
 ): DiagnosticState {
   switch (action.type) {
+    case "snapshot_received":
+      return createDiagnosticStateFromSnapshot(action.snapshot, state);
     case "event_received":
       return receiveEvent(state, action.event);
     case "watermark_observed": {

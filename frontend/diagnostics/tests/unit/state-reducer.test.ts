@@ -6,9 +6,14 @@ import {
   type DiagnosticScope,
   decodeDiagnosticEvent,
 } from "../../src/protocol/event.ts";
-import { type UsageSnapshot, decodeSnapshotResponse } from "../../src/protocol/http.ts";
+import {
+  type SnapshotResponse,
+  type UsageSnapshot,
+  decodeSnapshotResponse,
+} from "../../src/protocol/http.ts";
 import {
   createDiagnosticState,
+  createDiagnosticStateFromSnapshot,
   presentedLiveEdge,
   reduceDiagnosticState,
   selectUsagePanelFacts,
@@ -16,6 +21,11 @@ import {
 import { cacheQueryResult, queryDependsOnEvent } from "../../src/state/queries.ts";
 import {
   ACT_USAGE_CAPACITY,
+  CONTEXT_USAGE_CAPACITY,
+  COUNTER_SERIES_CAPACITY,
+  GAP_CAPACITY,
+  MESSAGE_CAPACITY,
+  SPAN_CAPACITY,
   USAGE_SCOPE_AGGREGATE_CAPACITY,
 } from "../../src/state/model.ts";
 import {
@@ -44,6 +54,123 @@ const SCOPE: DiagnosticScope = {
 };
 const TOOL_SCOPE: DiagnosticScope = { ...SCOPE, tool_call_id: "tool-1" };
 
+function loadSnapshotFixture(): unknown {
+  const fixture = structuredClone(loadHttpFixture("snapshot-v1.json")) as {
+    state: { usage: Record<string, unknown> };
+  };
+  if (!Object.prototype.hasOwnProperty.call(fixture.state.usage, "contexts")) {
+    fixture.state.usage.contexts = [];
+  }
+  return fixture;
+}
+
+function loadMaterializedSnapshotFixture(): unknown {
+  const fixture = loadSnapshotFixture() as Record<string, unknown>;
+  const state = fixture.state as Record<string, unknown>;
+  fixture.watermark_sequence = "9";
+  state.through_sequence = "9";
+  state.through_elapsed_ns = "90";
+  for (const name of ["spans", "messages", "plans", "counters", "usage"]) {
+    const child = state[name] as Record<string, unknown>;
+    child.through_sequence = "9";
+    child.through_elapsed_ns = "90";
+  }
+  const usage = state.usage as Record<string, unknown>;
+  const terminalUsage = (usage.usages as Record<string, unknown>[])[0]!;
+  const scope = terminalUsage.scope as Record<string, unknown>;
+  usage.contexts = [{
+    run_id: RUN_ID,
+    scope,
+    sequence: "2",
+    elapsed_ns: "20",
+    caused_by: [],
+    context_used_tokens: "500",
+    context_window_tokens: "1000",
+    cumulative_cost_amount: "0.25",
+    cumulative_cost_currency: "USD",
+    sample_origin: "provider",
+    observed_elapsed_ns: null,
+  }];
+  (state.spans as Record<string, unknown>).spans = [{
+    run_id: RUN_ID,
+    span_id: "3",
+    started_at_ns: "30",
+    scope: { ...scope, tool_call_id: "tool-1" },
+    parent_span_id: null,
+    started_caused_by: [],
+    definition: {
+      family: "built_in",
+      detail: {
+        span_kind: "tool.call",
+        detail: {
+          title: "Read source",
+          tool_kind: "read",
+          status: "in_progress",
+          error_code: null,
+        },
+      },
+    },
+    completion: {
+      finish_sequence: "4",
+      finished_at_ns: "40",
+      outcome: "completed",
+      error_code: null,
+      caused_by: [{ source_sequence: "3", relation: "follows_from" }],
+    },
+  }];
+  (state.messages as Record<string, unknown>).messages = [{
+    run_id: RUN_ID,
+    message_id: "message-1",
+    scope,
+    first_sequence: "5",
+    first_elapsed_ns: "50",
+    latest_sequence: "6",
+    latest_elapsed_ns: "60",
+    source_message_id: "provider-message-1",
+    text: "hello",
+    completion: {
+      sequence: "6",
+      elapsed_ns: "60",
+      utf8_bytes: "5",
+      unicode_scalar_count: "5",
+      truncated: true,
+      caused_by: [{ source_sequence: "5", relation: "follows_from" }],
+    },
+  }];
+  (state.plans as Record<string, unknown>).plans = [{
+    run_id: RUN_ID,
+    scope,
+    sequence: "7",
+    elapsed_ns: "70",
+    entries: [{ content: "Inspect source", priority: "high", status: "in_progress" }],
+    truncated: true,
+    caused_by: [],
+  }];
+  const counter = ((state.counters as Record<string, unknown>).series as Record<string, unknown>[])[0]!;
+  counter.sequence = "8";
+  counter.elapsed_ns = "80";
+  state.gaps = [{
+    schema_version: 1,
+    run_id: RUN_ID,
+    sequence: "9",
+    elapsed_ns: "90",
+    scope,
+    caused_by: [],
+    producer: "acp-normalizer",
+    component: "message-stream",
+    reason: "provider_sequence_gap",
+    dropped_count: "2",
+    affected_elapsed: { start_ns: "50", end_ns: "60" },
+    affected_kind: "agent_message_delta",
+    affected_scope: scope,
+  }];
+  state.truncations = [
+    { source: "agent_message", sequence: "6", scope, message_id: "message-1" },
+    { source: "agent_plan", sequence: "7", scope },
+  ];
+  return fixture;
+}
+
 function event(sequence: number, fields: Record<string, unknown>): DiagnosticEvent {
   return decodeDiagnosticEvent({
     schema_version: 1,
@@ -65,7 +192,7 @@ function ingest(state: ReturnType<typeof createDiagnosticState>, events: readonl
 
 describe("diagnostic state reducer", () => {
   it("retains bounded validated usage snapshots and invalidates aggregates without recomputing", () => {
-    const response = decodeSnapshotResponse(loadHttpFixture("snapshot-v1.json"));
+    const response = decodeSnapshotResponse(loadSnapshotFixture());
     let state = createDiagnosticState(RUN_ID, response.watermark_sequence);
     state = reduceDiagnosticState(state, {
       type: "usage_snapshot_received",
@@ -128,7 +255,7 @@ describe("diagnostic state reducer", () => {
   });
 
   it("bounds retained usage records and scoped aggregates", () => {
-    const response = decodeSnapshotResponse(loadHttpFixture("snapshot-v1.json"));
+    const response = decodeSnapshotResponse(loadSnapshotFixture());
     const baseUsage = response.state.usage.usages[0]!;
     const baseScoped = response.state.usage.scoped_aggregates[0]!;
     const usageCount = ACT_USAGE_CAPACITY + 1;
@@ -166,6 +293,216 @@ describe("diagnostic state reducer", () => {
     expect(state.usage_snapshot?.scoped_aggregates).toHaveLength(USAGE_SCOPE_AGGREGATE_CAPACITY);
     expect(state.usage_snapshot?.truncated).toBe(true);
     expect(selectUsagePanelFacts(state).needs_server_refresh).toBe(true);
+  });
+
+  it("atomically restores typed snapshot facts without synthesizing raw history", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const initialized = createDiagnosticStateFromSnapshot(snapshot);
+    expect(initialized.cursor).toEqual({ delivered_through: "9", committed_watermark: "9" });
+
+    let previous = ingest(createDiagnosticState(RUN_ID, decodeU64("0")), [
+      event(1, { kind: "counter_sampled", counter_kind: "cue.active", value: "1" }),
+    ]);
+    previous = reduceDiagnosticState(previous, {
+      type: "select",
+      selection: spanReference(decodeU64("3")),
+    });
+    previous = {
+      ...previous,
+      queries: cacheQueryResult(previous.queries, {
+        key: "old-query",
+        captured_through: decodeU64("1"),
+        value: { stale: true },
+        stale: false,
+        invalidated_through: null,
+        dependency: { event_kinds: null, scope: null, elapsed_range: null },
+      }),
+    };
+    previous = reduceDiagnosticState(previous, { type: "pause" });
+    const frozen = previous.pause.frozen_live;
+
+    const state = reduceDiagnosticState(previous, { type: "snapshot_received", snapshot });
+    expect(state.cursor).toEqual({ delivered_through: "9", committed_watermark: "9" });
+    expect(state.delivery_issue).toBeNull();
+    expect(state.live.base_through).toBe("9");
+    expect(state.live.observed_elapsed_ns).toBe("90");
+    expect(state.live.events).toEqual([]);
+    expect(state.queries.entries.size).toBe(0);
+    expect(state.presentation.selection).toEqual(spanReference(decodeU64("3")));
+    expect(state.pause).toMatchObject({ paused: true, paused_at: "1", unseen_count: 8n });
+    expect(state.pause.frozen_live).toBe(frozen);
+
+    expect(state.live.projection.spans.items[0]).toMatchObject({
+      span_id: "3",
+      start: { kind: "span_started", span_kind: "tool.call" },
+      finish: { kind: "span_finished", sequence: "4", outcome: "completed" },
+    });
+    expect(state.live.projection.tools.items.map((fact) => fact.phase)).toEqual([
+      "started",
+      "finished",
+    ]);
+    expect(state.live.projection.messages.items[0]).toMatchObject({
+      message_id: "message-1",
+      text: "hello",
+      text_complete_from_start: false,
+      text_truncated_before: true,
+      completion: { sequence: "6", truncated: true },
+    });
+    expect(state.live.projection.messages.dropped_through).toBe("6");
+    expect(state.live.projection.messages.needs_server_refresh).toBe(true);
+    expect(state.live.projection.counters.items[0]?.event.sequence).toBe("8");
+    expect(state.live.projection.context_usage.items[0]?.event).toMatchObject({
+      sequence: "2",
+      context_used_tokens: "500",
+    });
+    expect(state.usage_snapshot?.usages[0]?.event.sequence).toBe("1");
+    expect(state.live.projection.gaps.items[0]?.sequence).toBe("9");
+    expect(state.live.projection.gaps.declared_dropped_count).toBe(2n);
+    expect("plans" in state.live.projection).toBe(false);
+    expect(presentedLiveEdge(state)).toBe(frozen);
+  });
+
+  it("records snapshot capacity loss while retaining complete gap totals", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const through = decodeU64("5000");
+    const elapsed = decodeU64("50000");
+    const baseSpan = snapshot.state.spans.spans[0]!;
+    const baseMessage = snapshot.state.messages.messages[0]!;
+    const baseCounter = snapshot.state.counters.series[0]!;
+    const baseContext = snapshot.state.usage.contexts[0]!;
+    const baseGap = snapshot.state.gaps[0]!;
+    const spans = Array.from({ length: SPAN_CAPACITY + 1 }, (_, index): typeof baseSpan => {
+      const ordinal = index + 1;
+      return {
+        ...baseSpan,
+        span_id: decodeU64(String(ordinal)),
+        started_at_ns: decodeU64(String(ordinal * 10)),
+        scope: { ...baseSpan.scope, tool_call_id: null },
+        definition: {
+          family: "built_in",
+          detail: {
+            span_kind: "act.lifecycle",
+            detail: { provider: "codex", effective_model: "gpt-5", effective_effort: "high" },
+          },
+        },
+        completion: null,
+      };
+    });
+    const messages = Array.from(
+      { length: MESSAGE_CAPACITY + 1 },
+      (_, index): typeof baseMessage => {
+        const ordinal = index + 1;
+        const sequence = decodeU64(String(3000 + ordinal));
+        return {
+          ...baseMessage,
+          message_id: `message-${ordinal}`,
+          first_sequence: sequence,
+          first_elapsed_ns: decodeU64(String((3000 + ordinal) * 10)),
+          latest_sequence: sequence,
+          latest_elapsed_ns: decodeU64(String((3000 + ordinal) * 10)),
+          completion: baseMessage.completion === null ? null : {
+            ...baseMessage.completion,
+            sequence,
+            elapsed_ns: decodeU64(String((3000 + ordinal) * 10)),
+            truncated: false,
+          },
+        };
+      },
+    );
+    const counters = Array.from(
+      { length: COUNTER_SERIES_CAPACITY + 1 },
+      (_, index): typeof baseCounter => {
+        const ordinal = index + 1;
+        return {
+          ...baseCounter,
+          series_key: `typed-series-${ordinal}`,
+          identity: {
+            ...baseCounter.identity,
+            scope: { ...baseCounter.identity.scope, cue_id: `counter-cue-${ordinal}` },
+          },
+          sequence: decodeU64(String(1000 + ordinal)),
+          elapsed_ns: decodeU64(String((1000 + ordinal) * 10)),
+        };
+      },
+    );
+    const contexts = Array.from(
+      { length: CONTEXT_USAGE_CAPACITY + 1 },
+      (_, index): typeof baseContext => {
+        const ordinal = index + 1;
+        return {
+          ...baseContext,
+          scope: { ...baseContext.scope, cue_id: `context-cue-${ordinal}` },
+          sequence: decodeU64(String(2000 + ordinal)),
+          elapsed_ns: decodeU64(String((2000 + ordinal) * 10)),
+        };
+      },
+    );
+    const gaps = Array.from({ length: GAP_CAPACITY + 1 }, (_, index): typeof baseGap => {
+      const ordinal = index + 1;
+      return {
+        ...baseGap,
+        sequence: decodeU64(String(4000 + ordinal)),
+        elapsed_ns: decodeU64(String((4000 + ordinal) * 10)),
+      };
+    });
+    const boundedSnapshot: SnapshotResponse = {
+      ...snapshot,
+      watermark_sequence: through,
+      state: {
+        ...snapshot.state,
+        through_sequence: through,
+        through_elapsed_ns: elapsed,
+        spans: {
+          ...snapshot.state.spans,
+          through_sequence: through,
+          through_elapsed_ns: elapsed,
+          spans,
+        },
+        messages: {
+          ...snapshot.state.messages,
+          through_sequence: through,
+          through_elapsed_ns: elapsed,
+          messages,
+        },
+        plans: {
+          ...snapshot.state.plans,
+          through_sequence: through,
+          through_elapsed_ns: elapsed,
+          plans: snapshot.state.plans.plans.map((plan) => ({ ...plan, truncated: false })),
+        },
+        counters: {
+          ...snapshot.state.counters,
+          through_sequence: through,
+          through_elapsed_ns: elapsed,
+          series: counters,
+        },
+        usage: {
+          ...snapshot.state.usage,
+          through_sequence: through,
+          through_elapsed_ns: elapsed,
+          contexts,
+        },
+        gaps,
+        truncations: [],
+      },
+    };
+
+    const state = createDiagnosticStateFromSnapshot(boundedSnapshot);
+    expect(state.live.projection.spans.items).toHaveLength(SPAN_CAPACITY);
+    expect(state.live.projection.spans.dropped_through).toBe("1");
+    expect(state.live.projection.spans.needs_server_refresh).toBe(true);
+    expect(state.live.projection.messages.items).toHaveLength(MESSAGE_CAPACITY);
+    expect(state.live.projection.messages.dropped_through).toBe("3001");
+    expect(state.live.projection.messages.needs_server_refresh).toBe(true);
+    expect(state.live.projection.counters.items).toHaveLength(COUNTER_SERIES_CAPACITY);
+    expect(state.live.projection.counters.dropped_through).toBe("1001");
+    expect(state.live.projection.context_usage.items).toHaveLength(CONTEXT_USAGE_CAPACITY);
+    expect(state.live.projection.context_usage.dropped_through).toBe("2001");
+    expect(state.live.projection.gaps.items).toHaveLength(GAP_CAPACITY);
+    expect(state.live.projection.gaps.dropped_through).toBe("4001");
+    expect(state.live.projection.gaps.declared_dropped_count).toBe(
+      BigInt(GAP_CAPACITY + 1) * 2n,
+    );
   });
 
   it("shares one canonical event, span, message, and scope selection contract", () => {

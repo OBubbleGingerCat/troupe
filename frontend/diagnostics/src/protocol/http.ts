@@ -1,5 +1,7 @@
 import {
+  type CanonicalIntegerString,
   type CanonicalUuid,
+  type DecimalString,
   type JsonObject,
   type TokenIntegerString,
   type U64String,
@@ -16,9 +18,18 @@ import {
 } from "./decimal.ts";
 import {
   type ActTokenUsageFinalizedEvent,
+  type AgentMessageCompletedEvent,
+  type AgentPlanSnapshotEvent,
+  type CausalLink,
+  type ContextUsageSampledEvent,
+  type CounterSampledEvent,
+  type CustomCounterSampledEvent,
+  type CustomSpanStartedEvent,
   type DiagnosticEvent,
   type DiagnosticScope,
   type ObservationGapEvent,
+  type SpanFinishedEvent,
+  type SpanStartedEvent,
   decodeDiagnosticScope,
   decodeDiagnosticEvent,
   decodeRunLocalId,
@@ -44,13 +55,127 @@ export interface SnapshotState {
   readonly run_id: CanonicalUuid;
   readonly through_sequence: U64String;
   readonly through_elapsed_ns: U64String;
-  readonly spans: JsonObject;
-  readonly messages: JsonObject;
-  readonly plans: JsonObject;
-  readonly counters: JsonObject;
+  readonly spans: SpanSnapshot;
+  readonly messages: MessageSnapshot;
+  readonly plans: PlanSnapshot;
+  readonly counters: CounterSnapshot;
   readonly usage: UsageSnapshot;
   readonly gaps: readonly ObservationGapEvent[];
   readonly truncations: readonly SnapshotTruncation[];
+}
+
+export interface MaterializedSnapshotModel {
+  readonly model_schema_version: 1;
+  readonly run_id: CanonicalUuid;
+  readonly through_sequence: U64String;
+  readonly through_elapsed_ns: U64String;
+}
+
+export type ProjectedSpanDefinition =
+  | {
+    readonly family: "built_in";
+    readonly detail: Pick<SpanStartedEvent, "span_kind" | "detail">;
+  }
+  | {
+    readonly family: "custom";
+    readonly name: string;
+    readonly attributes: CustomSpanStartedEvent["attributes"];
+  };
+
+export interface ProjectedSpanCompletion {
+  readonly finish_sequence: U64String;
+  readonly finished_at_ns: U64String;
+  readonly outcome: SpanFinishedEvent["outcome"];
+  readonly error_code: string | null;
+  readonly caused_by: readonly CausalLink[];
+}
+
+export interface ProjectedSpanSnapshot {
+  readonly run_id: CanonicalUuid;
+  readonly span_id: U64String;
+  readonly started_at_ns: U64String;
+  readonly scope: DiagnosticScope;
+  readonly parent_span_id: U64String | null;
+  readonly started_caused_by: readonly CausalLink[];
+  readonly definition: ProjectedSpanDefinition;
+  readonly completion: ProjectedSpanCompletion | null;
+}
+
+export interface SpanSnapshot extends MaterializedSnapshotModel {
+  readonly spans: readonly ProjectedSpanSnapshot[];
+}
+
+export interface ProjectedMessageCompletion {
+  readonly sequence: U64String;
+  readonly elapsed_ns: U64String;
+  readonly utf8_bytes: U64String;
+  readonly unicode_scalar_count: U64String;
+  readonly truncated: boolean;
+  readonly caused_by: readonly CausalLink[];
+}
+
+export interface ProjectedMessageSnapshot {
+  readonly run_id: CanonicalUuid;
+  readonly message_id: string;
+  readonly scope: DiagnosticScope;
+  readonly first_sequence: U64String;
+  readonly first_elapsed_ns: U64String;
+  readonly latest_sequence: U64String;
+  readonly latest_elapsed_ns: U64String;
+  readonly source_message_id: string | null;
+  readonly text: string;
+  readonly completion: ProjectedMessageCompletion | null;
+}
+
+export interface MessageSnapshot extends MaterializedSnapshotModel {
+  readonly messages: readonly ProjectedMessageSnapshot[];
+}
+
+export interface ProjectedPlanSnapshot {
+  readonly run_id: CanonicalUuid;
+  readonly scope: DiagnosticScope;
+  readonly sequence: U64String;
+  readonly elapsed_ns: U64String;
+  readonly entries: AgentPlanSnapshotEvent["entries"];
+  readonly truncated: boolean;
+  readonly caused_by: readonly CausalLink[];
+}
+
+export interface PlanSnapshot extends MaterializedSnapshotModel {
+  readonly plans: readonly ProjectedPlanSnapshot[];
+}
+
+export type ProjectedCounterIdentity =
+  | {
+    readonly family: "built_in";
+    readonly scope: DiagnosticScope;
+    readonly counter_kind: CounterSampledEvent["counter_kind"];
+  }
+  | {
+    readonly family: "custom";
+    readonly scope: DiagnosticScope;
+    readonly name: string;
+    readonly unit: string | null;
+    readonly dimensions: CustomCounterSampledEvent["dimensions"];
+  };
+
+export type ProjectedCounterValue =
+  | { readonly type: "unsigned"; readonly value: U64String }
+  | { readonly type: "integer"; readonly value: CanonicalIntegerString }
+  | { readonly type: "decimal"; readonly value: DecimalString };
+
+export interface ProjectedCounterSnapshot {
+  readonly run_id: CanonicalUuid;
+  readonly series_key: string;
+  readonly identity: ProjectedCounterIdentity;
+  readonly sequence: U64String;
+  readonly elapsed_ns: U64String;
+  readonly value: ProjectedCounterValue;
+  readonly caused_by: readonly CausalLink[];
+}
+
+export interface CounterSnapshot extends MaterializedSnapshotModel {
+  readonly series: readonly ProjectedCounterSnapshot[];
 }
 
 export type SnapshotTruncation =
@@ -101,6 +226,7 @@ export interface UsageSnapshot {
   readonly run_id: CanonicalUuid;
   readonly through_sequence: U64String;
   readonly through_elapsed_ns: U64String;
+  readonly contexts: readonly ContextUsageSampledEvent[];
   readonly usages: readonly ProjectedActUsageSnapshot[];
   readonly aggregate: UsageAggregateSnapshot;
   readonly scoped_aggregates: readonly ScopedUsageAggregateSnapshot[];
@@ -354,7 +480,7 @@ function decodeProjectedActUsage(value: unknown, path: string): ProjectedActUsag
     ],
     path,
   );
-  const actId = expectString(projected.act_id, `${path}.act_id`);
+  const actId = decodeRunLocalId(projected.act_id, `${path}.act_id`);
   const { act_id: _actId, ...eventFields } = projected;
   const event = decodeDiagnosticEvent({
     schema_version: 1,
@@ -365,6 +491,36 @@ function decodeProjectedActUsage(value: unknown, path: string): ProjectedActUsag
     failProtocol("usage_identity", path, "projected Act identity does not match its scope");
   }
   return { act_id: actId, event };
+}
+
+function decodeProjectedContextUsage(value: unknown, path: string): ContextUsageSampledEvent {
+  const projected = expectObject(value, path);
+  expectExactFields(
+    projected,
+    [
+      "run_id",
+      "scope",
+      "sequence",
+      "elapsed_ns",
+      "caused_by",
+      "context_used_tokens",
+      "context_window_tokens",
+      "cumulative_cost_amount",
+      "cumulative_cost_currency",
+      "sample_origin",
+      "observed_elapsed_ns",
+    ],
+    path,
+  );
+  const event = decodeDiagnosticEvent({
+    kind: "context_usage_sampled",
+    schema_version: 1,
+    ...projected,
+  }, path);
+  if (event.kind !== "context_usage_sampled") {
+    failProtocol("usage_context", path, "expected a context usage sample");
+  }
+  return event;
 }
 
 function decodeScopedUsageAggregate(
@@ -405,6 +561,7 @@ export function decodeUsageSnapshot(
       "run_id",
       "through_sequence",
       "through_elapsed_ns",
+      "contexts",
       "usages",
       "aggregate",
       "scoped_aggregates",
@@ -417,6 +574,33 @@ export function decodeUsageSnapshot(
   const elapsed = decodeU64(usage.through_elapsed_ns, `${path}.through_elapsed_ns`);
   if (runId !== expectedRunId || through !== expectedThrough || elapsed !== expectedElapsed) {
     failProtocol("usage_identity", path, "usage snapshot differs from its response envelope");
+  }
+  const contexts = expectArray(usage.contexts, `${path}.contexts`).map((item, index) => (
+    decodeProjectedContextUsage(item, `${path}.contexts[${index}]`)
+  ));
+  const contextScopes = new Set<string>();
+  const materializedSequences = new Set<string>();
+  let previousContextSequence = 0n;
+  for (const context of contexts) {
+    const identity = JSON.stringify(canonicalScope(context.scope));
+    const sequence = BigInt(context.sequence);
+    if (
+      context.run_id !== runId
+      || sequence <= previousContextSequence
+      || sequence > BigInt(through)
+      || BigInt(context.elapsed_ns) > BigInt(elapsed)
+      || contextScopes.has(identity)
+      || materializedSequences.has(context.sequence)
+    ) {
+      failProtocol(
+        "usage_context",
+        `${path}.contexts`,
+        "context samples are not a unique captured projection",
+      );
+    }
+    previousContextSequence = sequence;
+    contextScopes.add(identity);
+    materializedSequences.add(context.sequence);
   }
   const usages = expectArray(usage.usages, `${path}.usages`).map((item, index) => (
     decodeProjectedActUsage(item, `${path}.usages[${index}]`)
@@ -431,11 +615,13 @@ export function decodeUsageSnapshot(
       || sequence > BigInt(through)
       || BigInt(item.event.elapsed_ns) > BigInt(elapsed)
       || actIds.has(item.act_id)
+      || materializedSequences.has(item.event.sequence)
     ) {
       failProtocol("usage_identity", `${path}.usages`, "projected usages are not a unique ordered prefix");
     }
     previous = sequence;
     actIds.add(item.act_id);
+    materializedSequences.add(item.event.sequence);
   }
   const aggregate = decodeUsageAggregate(usage.aggregate, `${path}.aggregate`);
   if (!sameUsageAggregate(aggregate, aggregateUsages(usages))) {
@@ -471,20 +657,28 @@ export function decodeUsageSnapshot(
     run_id: runId,
     through_sequence: through,
     through_elapsed_ns: elapsed,
+    contexts,
     usages,
     aggregate,
     scoped_aggregates: scopedAggregates,
   };
 }
 
-function decodeMaterializedModel(
+interface MaterializedEnvelope {
+  readonly run_id: CanonicalUuid;
+  readonly through_sequence: U64String;
+  readonly through_elapsed_ns: U64String;
+  readonly items: readonly unknown[];
+}
+
+function decodeMaterializedEnvelope(
   value: unknown,
   collection: string,
   expectedRunId: CanonicalUuid,
   expectedThrough: U64String,
   expectedElapsed: U64String,
   path: string,
-): JsonObject {
+): MaterializedEnvelope {
   const model = expectObject(value, path);
   expectExactFields(
     model,
@@ -498,10 +692,613 @@ function decodeMaterializedModel(
   if (runId !== expectedRunId || through !== expectedThrough || elapsed !== expectedElapsed) {
     failProtocol("snapshot_identity", path, "materialized model differs from its snapshot envelope");
   }
-  expectArray(model[collection], `${path}.${collection}`).forEach((item, index) => {
-    decodeJsonValue(item, `${path}.${collection}[${index}]`);
-  });
-  return decodeJsonValue(model, path) as JsonObject;
+  return {
+    run_id: runId,
+    through_sequence: through,
+    through_elapsed_ns: elapsed,
+    items: expectArray(model[collection], `${path}.${collection}`),
+  };
+}
+
+function canonicalScope(scope: DiagnosticScope): DiagnosticScope {
+  return {
+    scene_id: scope.scene_id,
+    actor_id: scope.actor_id,
+    cue_id: scope.cue_id,
+    effect_id: scope.effect_id,
+    act_id: scope.act_id,
+    tool_call_id: scope.tool_call_id,
+    session_generation: scope.session_generation,
+  };
+}
+
+function materializedEventPosition(
+  event: DiagnosticEvent,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): void {
+  if (
+    event.run_id !== expectedRunId
+    || BigInt(event.sequence) > BigInt(expectedThrough)
+    || BigInt(event.elapsed_ns) > BigInt(expectedElapsed)
+  ) {
+    failProtocol("snapshot_fact", path, "materialized fact is outside the captured prefix");
+  }
+}
+
+function decodeProjectedSpan(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): ProjectedSpanSnapshot {
+  const row = expectObject(value, path);
+  expectExactFields(
+    row,
+    [
+      "run_id",
+      "span_id",
+      "started_at_ns",
+      "scope",
+      "parent_span_id",
+      "started_caused_by",
+      "definition",
+      "completion",
+    ],
+    path,
+  );
+  const runId = decodeCanonicalUuid(row.run_id, `${path}.run_id`);
+  const spanId = decodeU64(row.span_id, `${path}.span_id`);
+  const startedAt = decodeU64(row.started_at_ns, `${path}.started_at_ns`);
+  const scope = canonicalScope(decodeDiagnosticScope(row.scope, `${path}.scope`));
+  const definition = expectObject(row.definition, `${path}.definition`);
+  const family = expectEnum(
+    definition.family,
+    ["built_in", "custom"],
+    `${path}.definition.family`,
+  );
+  const common = {
+    schema_version: 1,
+    run_id: runId,
+    sequence: spanId,
+    elapsed_ns: startedAt,
+    scope,
+    caused_by: row.started_caused_by,
+    parent_span_id: row.parent_span_id,
+  } as const;
+  let start: SpanStartedEvent | CustomSpanStartedEvent;
+  let decodedDefinition: ProjectedSpanDefinition;
+  if (family === "built_in") {
+    expectExactFields(definition, ["family", "detail"], `${path}.definition`);
+    const detail = expectObject(definition.detail, `${path}.definition.detail`);
+    expectExactFields(detail, ["span_kind", "detail"], `${path}.definition.detail`);
+    const event = decodeDiagnosticEvent({
+      ...common,
+      kind: "span_started",
+      span_kind: detail.span_kind,
+      detail: detail.detail,
+    }, path);
+    if (event.kind !== "span_started") {
+      failProtocol("snapshot_span", path, "expected a built-in span start");
+    }
+    start = event;
+    decodedDefinition = {
+      family,
+      detail: { span_kind: event.span_kind, detail: event.detail },
+    };
+  } else {
+    expectExactFields(definition, ["family", "name", "attributes"], `${path}.definition`);
+    const event = decodeDiagnosticEvent({
+      ...common,
+      kind: "custom_span_started",
+      name: definition.name,
+      attributes: definition.attributes,
+    }, path);
+    if (event.kind !== "custom_span_started") {
+      failProtocol("snapshot_span", path, "expected a custom span start");
+    }
+    start = event;
+    decodedDefinition = {
+      family,
+      name: event.name,
+      attributes: event.attributes,
+    };
+  }
+  materializedEventPosition(start, expectedRunId, expectedThrough, expectedElapsed, path);
+  if (
+    start.parent_span_id !== null
+    && (start.parent_span_id === "0" || BigInt(start.parent_span_id) >= BigInt(spanId))
+  ) {
+    failProtocol("snapshot_span", `${path}.parent_span_id`, "parent span is not earlier");
+  }
+
+  let completion: ProjectedSpanCompletion | null = null;
+  if (row.completion !== null) {
+    const rawCompletion = expectObject(row.completion, `${path}.completion`);
+    expectExactFields(
+      rawCompletion,
+      ["finish_sequence", "finished_at_ns", "outcome", "error_code", "caused_by"],
+      `${path}.completion`,
+    );
+    const finishCommon = {
+      schema_version: 1,
+      run_id: runId,
+      sequence: rawCompletion.finish_sequence,
+      elapsed_ns: rawCompletion.finished_at_ns,
+      scope,
+      caused_by: rawCompletion.caused_by,
+      span_id: spanId,
+      outcome: rawCompletion.outcome,
+    } as const;
+    const finish = decodeDiagnosticEvent(family === "built_in"
+      ? { ...finishCommon, kind: "span_finished", error_code: rawCompletion.error_code }
+      : { ...finishCommon, kind: "custom_span_finished" }, `${path}.completion`);
+    if (
+      finish.kind !== "span_finished"
+      && finish.kind !== "custom_span_finished"
+    ) {
+      failProtocol("snapshot_span", `${path}.completion`, "expected a span completion");
+    }
+    if (
+      (family === "built_in" && finish.kind !== "span_finished")
+      || (family === "custom" && (
+        finish.kind !== "custom_span_finished" || rawCompletion.error_code !== null
+      ))
+    ) {
+      failProtocol("snapshot_span", `${path}.completion`, "completion family does not match span");
+    }
+    materializedEventPosition(finish, expectedRunId, expectedThrough, expectedElapsed, path);
+    if (
+      BigInt(finish.sequence) <= BigInt(spanId)
+      || BigInt(finish.elapsed_ns) < BigInt(startedAt)
+    ) {
+      failProtocol("snapshot_span", `${path}.completion`, "completion is not after its start");
+    }
+    completion = {
+      finish_sequence: finish.sequence,
+      finished_at_ns: finish.elapsed_ns,
+      outcome: finish.outcome,
+      error_code: finish.kind === "span_finished" ? finish.error_code : null,
+      caused_by: finish.caused_by,
+    };
+  }
+  return {
+    run_id: start.run_id,
+    span_id: start.sequence,
+    started_at_ns: start.elapsed_ns,
+    scope: start.scope,
+    parent_span_id: start.parent_span_id,
+    started_caused_by: start.caused_by,
+    definition: decodedDefinition,
+    completion,
+  };
+}
+
+function decodeSpanSnapshot(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): SpanSnapshot {
+  const envelope = decodeMaterializedEnvelope(
+    value, "spans", expectedRunId, expectedThrough, expectedElapsed, path,
+  );
+  const spans = envelope.items.map((item, index) => decodeProjectedSpan(
+    item,
+    expectedRunId,
+    expectedThrough,
+    expectedElapsed,
+    `${path}.spans[${index}]`,
+  ));
+  const spanIds = new Set<string>();
+  const sequences = new Set<string>();
+  for (const span of spans) {
+    if (spanIds.has(span.span_id) || sequences.has(span.span_id)) {
+      failProtocol("snapshot_span", `${path}.spans`, "span identities are not unique");
+    }
+    spanIds.add(span.span_id);
+    sequences.add(span.span_id);
+    if (span.completion !== null) {
+      if (sequences.has(span.completion.finish_sequence)) {
+        failProtocol("snapshot_span", `${path}.spans`, "span event sequences are not unique");
+      }
+      sequences.add(span.completion.finish_sequence);
+    }
+  }
+  for (const span of spans) {
+    if (span.parent_span_id !== null && !spanIds.has(span.parent_span_id)) {
+      failProtocol("snapshot_span", `${path}.spans`, "parent span is absent from the read model");
+    }
+  }
+  return {
+    model_schema_version: 1,
+    run_id: envelope.run_id,
+    through_sequence: envelope.through_sequence,
+    through_elapsed_ns: envelope.through_elapsed_ns,
+    spans,
+  };
+}
+
+function decodeProjectedMessage(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): ProjectedMessageSnapshot {
+  const row = expectObject(value, path);
+  expectExactFields(
+    row,
+    [
+      "run_id",
+      "message_id",
+      "scope",
+      "first_sequence",
+      "first_elapsed_ns",
+      "latest_sequence",
+      "latest_elapsed_ns",
+      "source_message_id",
+      "text",
+      "completion",
+    ],
+    path,
+  );
+  const runId = decodeCanonicalUuid(row.run_id, `${path}.run_id`);
+  const messageId = decodeRunLocalId(row.message_id, `${path}.message_id`);
+  const scope = canonicalScope(decodeDiagnosticScope(row.scope, `${path}.scope`));
+  const firstSequence = decodeU64(row.first_sequence, `${path}.first_sequence`);
+  const firstElapsed = decodeU64(row.first_elapsed_ns, `${path}.first_elapsed_ns`);
+  const latestSequence = decodeU64(row.latest_sequence, `${path}.latest_sequence`);
+  const latestElapsed = decodeU64(row.latest_elapsed_ns, `${path}.latest_elapsed_ns`);
+  if (
+    runId !== expectedRunId
+    || firstSequence === "0"
+    || BigInt(firstSequence) > BigInt(latestSequence)
+    || BigInt(latestSequence) > BigInt(expectedThrough)
+    || BigInt(firstElapsed) > BigInt(latestElapsed)
+    || BigInt(latestElapsed) > BigInt(expectedElapsed)
+  ) {
+    failProtocol("snapshot_message", path, "message is outside the captured prefix");
+  }
+  const sourceMessageId = row.source_message_id === null
+    ? null
+    : expectString(row.source_message_id, `${path}.source_message_id`);
+  const text = expectString(row.text, `${path}.text`);
+  let completion: ProjectedMessageCompletion | null = null;
+  if (row.completion !== null) {
+    const rawCompletion = expectObject(row.completion, `${path}.completion`);
+    expectExactFields(
+      rawCompletion,
+      ["sequence", "elapsed_ns", "utf8_bytes", "unicode_scalar_count", "truncated", "caused_by"],
+      `${path}.completion`,
+    );
+    const event = decodeDiagnosticEvent({
+      kind: "agent_message_completed",
+      schema_version: 1,
+      run_id: runId,
+      sequence: rawCompletion.sequence,
+      elapsed_ns: rawCompletion.elapsed_ns,
+      scope,
+      caused_by: rawCompletion.caused_by,
+      message_id: messageId,
+      utf8_bytes: rawCompletion.utf8_bytes,
+      unicode_scalar_count: rawCompletion.unicode_scalar_count,
+      truncated: rawCompletion.truncated,
+    }, `${path}.completion`);
+    if (
+      event.kind !== "agent_message_completed"
+      || event.sequence !== latestSequence
+      || event.elapsed_ns !== latestElapsed
+    ) {
+      failProtocol("snapshot_message", `${path}.completion`, "completion is not the latest message fact");
+    }
+    materializedEventPosition(event, expectedRunId, expectedThrough, expectedElapsed, path);
+    completion = {
+      sequence: event.sequence,
+      elapsed_ns: event.elapsed_ns,
+      utf8_bytes: event.utf8_bytes,
+      unicode_scalar_count: event.unicode_scalar_count,
+      truncated: event.truncated,
+      caused_by: event.caused_by,
+    };
+  }
+  return {
+    run_id: runId,
+    message_id: messageId,
+    scope,
+    first_sequence: firstSequence,
+    first_elapsed_ns: firstElapsed,
+    latest_sequence: latestSequence,
+    latest_elapsed_ns: latestElapsed,
+    source_message_id: sourceMessageId,
+    text,
+    completion,
+  };
+}
+
+function decodeMessageSnapshot(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): MessageSnapshot {
+  const envelope = decodeMaterializedEnvelope(
+    value, "messages", expectedRunId, expectedThrough, expectedElapsed, path,
+  );
+  const messages = envelope.items.map((item, index) => decodeProjectedMessage(
+    item,
+    expectedRunId,
+    expectedThrough,
+    expectedElapsed,
+    `${path}.messages[${index}]`,
+  ));
+  const messageIds = new Set<string>();
+  const endpointSequences = new Set<string>();
+  for (const message of messages) {
+    if (
+      messageIds.has(message.message_id)
+      || endpointSequences.has(message.first_sequence)
+      || (message.latest_sequence !== message.first_sequence
+        && endpointSequences.has(message.latest_sequence))
+    ) {
+      failProtocol(
+        "snapshot_message",
+        `${path}.messages`,
+        "message identities and endpoint sequences are not unique",
+      );
+    }
+    messageIds.add(message.message_id);
+    endpointSequences.add(message.first_sequence);
+    endpointSequences.add(message.latest_sequence);
+  }
+  return {
+    model_schema_version: 1,
+    run_id: envelope.run_id,
+    through_sequence: envelope.through_sequence,
+    through_elapsed_ns: envelope.through_elapsed_ns,
+    messages,
+  };
+}
+
+function decodeProjectedPlan(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): ProjectedPlanSnapshot {
+  const row = expectObject(value, path);
+  expectExactFields(
+    row,
+    ["run_id", "scope", "sequence", "elapsed_ns", "entries", "truncated", "caused_by"],
+    path,
+  );
+  const event = decodeDiagnosticEvent({
+    kind: "agent_plan_snapshot",
+    schema_version: 1,
+    run_id: row.run_id,
+    sequence: row.sequence,
+    elapsed_ns: row.elapsed_ns,
+    scope: canonicalScope(decodeDiagnosticScope(row.scope, `${path}.scope`)),
+    caused_by: row.caused_by,
+    entries: row.entries,
+    truncated: row.truncated,
+  }, path);
+  if (event.kind !== "agent_plan_snapshot") {
+    failProtocol("snapshot_plan", path, "expected a plan snapshot");
+  }
+  materializedEventPosition(event, expectedRunId, expectedThrough, expectedElapsed, path);
+  return {
+    run_id: event.run_id,
+    scope: event.scope,
+    sequence: event.sequence,
+    elapsed_ns: event.elapsed_ns,
+    entries: event.entries,
+    truncated: event.truncated,
+    caused_by: event.caused_by,
+  };
+}
+
+function scopeKey(scope: DiagnosticScope): string {
+  return JSON.stringify(canonicalScope(scope));
+}
+
+function decodePlanSnapshot(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): PlanSnapshot {
+  const envelope = decodeMaterializedEnvelope(
+    value, "plans", expectedRunId, expectedThrough, expectedElapsed, path,
+  );
+  const plans = envelope.items.map((item, index) => decodeProjectedPlan(
+    item,
+    expectedRunId,
+    expectedThrough,
+    expectedElapsed,
+    `${path}.plans[${index}]`,
+  ));
+  const scopes = new Set<string>();
+  const actScopes = new Map<string, string>();
+  const sequences = new Set<string>();
+  for (const plan of plans) {
+    const key = scopeKey(plan.scope);
+    if (scopes.has(key) || sequences.has(plan.sequence)) {
+      failProtocol("snapshot_plan", `${path}.plans`, "plan scopes and sequences are not unique");
+    }
+    scopes.add(key);
+    sequences.add(plan.sequence);
+    const actId = plan.scope.act_id;
+    if (actId !== null) {
+      const previous = actScopes.get(actId);
+      if (previous !== undefined && previous !== key) {
+        failProtocol("snapshot_plan", `${path}.plans`, "one Act has multiple plan scopes");
+      }
+      actScopes.set(actId, key);
+    }
+  }
+  return {
+    model_schema_version: 1,
+    run_id: envelope.run_id,
+    through_sequence: envelope.through_sequence,
+    through_elapsed_ns: envelope.through_elapsed_ns,
+    plans,
+  };
+}
+
+function canonicalDimensions(
+  dimensions: CustomCounterSampledEvent["dimensions"],
+): CustomCounterSampledEvent["dimensions"] {
+  const ordered: Record<string, CustomCounterSampledEvent["dimensions"][string]> = {};
+  for (const key of Object.keys(dimensions).sort()) {
+    const scalar = dimensions[key]!;
+    ordered[key] = { type: scalar.type, value: scalar.value } as typeof scalar;
+  }
+  return ordered;
+}
+
+function decodeProjectedCounter(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): ProjectedCounterSnapshot {
+  const row = expectObject(value, path);
+  expectExactFields(
+    row,
+    ["run_id", "series_key", "identity", "sequence", "elapsed_ns", "value", "caused_by"],
+    path,
+  );
+  const identity = expectObject(row.identity, `${path}.identity`);
+  const family = expectEnum(identity.family, ["built_in", "custom"], `${path}.identity.family`);
+  const projectedValue = expectObject(row.value, `${path}.value`);
+  expectExactFields(projectedValue, ["type", "value"], `${path}.value`);
+  const valueType = expectEnum(
+    projectedValue.type,
+    ["unsigned", "integer", "decimal"],
+    `${path}.value.type`,
+  );
+  const common = {
+    schema_version: 1,
+    run_id: row.run_id,
+    sequence: row.sequence,
+    elapsed_ns: row.elapsed_ns,
+    caused_by: row.caused_by,
+  } as const;
+  let event: CounterSampledEvent | CustomCounterSampledEvent;
+  let decodedIdentity: ProjectedCounterIdentity;
+  let decodedValue: ProjectedCounterValue;
+  if (family === "built_in") {
+    expectExactFields(identity, ["family", "scope", "counter_kind"], `${path}.identity`);
+    if (valueType !== "unsigned") {
+      failProtocol("snapshot_counter", `${path}.value`, "built-in counter requires unsigned value");
+    }
+    const candidate = decodeDiagnosticEvent({
+      ...common,
+      kind: "counter_sampled",
+      scope: canonicalScope(decodeDiagnosticScope(identity.scope, `${path}.identity.scope`)),
+      counter_kind: identity.counter_kind,
+      value: projectedValue.value,
+    }, path);
+    if (candidate.kind !== "counter_sampled") {
+      failProtocol("snapshot_counter", path, "expected a built-in counter sample");
+    }
+    event = candidate;
+    decodedIdentity = {
+      family,
+      scope: event.scope,
+      counter_kind: event.counter_kind,
+    };
+    decodedValue = { type: "unsigned", value: event.value };
+  } else {
+    expectExactFields(
+      identity,
+      ["family", "scope", "name", "unit", "dimensions"],
+      `${path}.identity`,
+    );
+    if (valueType === "unsigned") {
+      failProtocol("snapshot_counter", `${path}.value`, "custom counter requires integer or decimal value");
+    }
+    const candidate = decodeDiagnosticEvent({
+      ...common,
+      kind: "custom_counter_sampled",
+      scope: canonicalScope(decodeDiagnosticScope(identity.scope, `${path}.identity.scope`)),
+      name: identity.name,
+      unit: identity.unit,
+      dimensions: identity.dimensions,
+      value: { type: valueType, value: projectedValue.value },
+    }, path);
+    if (candidate.kind !== "custom_counter_sampled") {
+      failProtocol("snapshot_counter", path, "expected a custom counter sample");
+    }
+    event = candidate;
+    const dimensions = canonicalDimensions(event.dimensions);
+    decodedIdentity = {
+      family,
+      scope: event.scope,
+      name: event.name,
+      unit: event.unit,
+      dimensions,
+    };
+    decodedValue = event.value;
+  }
+  materializedEventPosition(event, expectedRunId, expectedThrough, expectedElapsed, path);
+  const seriesKey = expectString(row.series_key, `${path}.series_key`);
+  if (seriesKey !== JSON.stringify(decodedIdentity)) {
+    failProtocol("snapshot_counter", `${path}.series_key`, "series key is not canonical for identity");
+  }
+  return {
+    run_id: event.run_id,
+    series_key: seriesKey,
+    identity: decodedIdentity,
+    sequence: event.sequence,
+    elapsed_ns: event.elapsed_ns,
+    value: decodedValue,
+    caused_by: event.caused_by,
+  };
+}
+
+function decodeCounterSnapshot(
+  value: unknown,
+  expectedRunId: CanonicalUuid,
+  expectedThrough: U64String,
+  expectedElapsed: U64String,
+  path: string,
+): CounterSnapshot {
+  const envelope = decodeMaterializedEnvelope(
+    value, "series", expectedRunId, expectedThrough, expectedElapsed, path,
+  );
+  const series = envelope.items.map((item, index) => decodeProjectedCounter(
+    item,
+    expectedRunId,
+    expectedThrough,
+    expectedElapsed,
+    `${path}.series[${index}]`,
+  ));
+  const keys = new Set<string>();
+  const sequences = new Set<string>();
+  for (const sample of series) {
+    if (keys.has(sample.series_key) || sequences.has(sample.sequence)) {
+      failProtocol("snapshot_counter", `${path}.series`, "counter identities and sequences must be unique");
+    }
+    keys.add(sample.series_key);
+    sequences.add(sample.sequence);
+  }
+  return {
+    model_schema_version: 1,
+    run_id: envelope.run_id,
+    through_sequence: envelope.through_sequence,
+    through_elapsed_ns: envelope.through_elapsed_ns,
+    series,
+  };
 }
 
 function decodeSnapshotTruncation(
@@ -522,7 +1319,7 @@ function decodeSnapshotTruncation(
   if (sequence === "0" || BigInt(sequence) > BigInt(expectedThrough)) {
     failProtocol("snapshot_truncation", `${path}.sequence`, "truncation is outside the captured prefix");
   }
-  const scope = decodeDiagnosticScope(truncation.scope, `${path}.scope`);
+  const scope = canonicalScope(decodeDiagnosticScope(truncation.scope, `${path}.scope`));
   if (source === "agent_message") {
     return {
       source,
@@ -623,17 +1420,17 @@ export function decodeSnapshotResponse(value: unknown, path = "snapshot"): Snaps
   if (earliest !== null && (earliest === "0" || BigInt(earliest) > BigInt(watermark))) {
     failProtocol("snapshot", `${path}.earliest_available_sequence`, "replay range is invalid");
   }
-  const spans = decodeMaterializedModel(
-    state.spans, "spans", runId, watermark, stateElapsed, `${path}.state.spans`,
+  const spans = decodeSpanSnapshot(
+    state.spans, runId, watermark, stateElapsed, `${path}.state.spans`,
   );
-  const messages = decodeMaterializedModel(
-    state.messages, "messages", runId, watermark, stateElapsed, `${path}.state.messages`,
+  const messages = decodeMessageSnapshot(
+    state.messages, runId, watermark, stateElapsed, `${path}.state.messages`,
   );
-  const plans = decodeMaterializedModel(
-    state.plans, "plans", runId, watermark, stateElapsed, `${path}.state.plans`,
+  const plans = decodePlanSnapshot(
+    state.plans, runId, watermark, stateElapsed, `${path}.state.plans`,
   );
-  const counters = decodeMaterializedModel(
-    state.counters, "series", runId, watermark, stateElapsed, `${path}.state.counters`,
+  const counters = decodeCounterSnapshot(
+    state.counters, runId, watermark, stateElapsed, `${path}.state.counters`,
   );
   const usage = decodeUsageSnapshot(
     state.usage, runId, watermark, stateElapsed, `${path}.state.usage`,
@@ -677,6 +1474,39 @@ export function decodeSnapshotResponse(value: unknown, path = "snapshot"): Snaps
       previousTruncationSequence = sequence;
       return truncation;
     });
+  const expectedTruncations: SnapshotTruncation[] = [
+    ...messages.messages.flatMap((message): SnapshotTruncation[] => (
+      message.completion?.truncated === true
+        ? [{
+          source: "agent_message",
+          sequence: message.completion.sequence,
+          scope: message.scope,
+          message_id: message.message_id,
+        }]
+        : []
+    )),
+    ...plans.plans.flatMap((plan): SnapshotTruncation[] => (
+      plan.truncated
+        ? [{ source: "agent_plan", sequence: plan.sequence, scope: plan.scope }]
+        : []
+    )),
+  ].sort((left, right) => {
+    const leftSequence = BigInt(left.sequence);
+    const rightSequence = BigInt(right.sequence);
+    return leftSequence < rightSequence ? -1 : leftSequence > rightSequence ? 1 : 0;
+  });
+  if (
+    truncations.length !== expectedTruncations.length
+    || truncations.some((truncation, index) => (
+      JSON.stringify(truncation) !== JSON.stringify(expectedTruncations[index])
+    ))
+  ) {
+    failProtocol(
+      "snapshot_truncation",
+      `${path}.state.truncations`,
+      "truncations do not match materialized message and plan facts",
+    );
+  }
   return {
     api_schema_version: 1,
     run_id: runId,
