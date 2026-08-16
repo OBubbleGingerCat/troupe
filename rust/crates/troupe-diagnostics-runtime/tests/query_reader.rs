@@ -214,6 +214,34 @@ fn archive_reader_holds_and_releases_its_request_owned_shared_lease() {
 }
 
 #[test]
+fn identified_archive_reader_uses_the_stored_run_identity_and_holds_its_lease() {
+    let directory = TestRunDirectory::new("identified-copied-archive");
+    let active_lease = ActiveArchiveLease::acquire(directory.path()).expect("active lease");
+    drop(create_store(directory.path()));
+    drop(active_lease);
+
+    let mut reader = DiagnosticReader::open_identified_archive(directory.path())
+        .expect("identify an archive whose directory name is unrelated to its Run identity");
+    assert_eq!(reader.profile(), ReaderProfile::Archive);
+    assert_eq!(reader.run_directory(), directory.path());
+    assert_eq!(
+        CleanupArchiveLease::acquire(directory.path())
+            .expect_err("identified reader-owned shared lease blocks cleanup")
+            .code(),
+        ArchiveLeaseErrorCode::Contended
+    );
+
+    let captured = reader.capture().expect("capture the identified archive");
+    assert_eq!(captured.metadata().run_id(), run_id());
+    assert_eq!(captured.captured_watermark().get(), 0);
+    drop(captured);
+    drop(reader);
+
+    CleanupArchiveLease::acquire(directory.path())
+        .expect("dropping identified reader releases its shared lease");
+}
+
+#[test]
 fn a_capture_keeps_one_stable_typed_prefix_across_concurrent_commits() {
     let directory = TestRunDirectory::new("stable-prefix");
     let active_lease = ActiveArchiveLease::acquire(directory.path()).expect("active lease");

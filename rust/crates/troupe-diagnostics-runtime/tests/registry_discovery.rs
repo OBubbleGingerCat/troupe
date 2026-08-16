@@ -14,8 +14,9 @@ use troupe_diagnostics_runtime::{
     registry::{
         codec::encode_registry_entry,
         discover::{
-            CandidateClassification, CandidateSource, ProcessIdentityProbe, ServerIdentityProbe,
-            ServerProbeError, discover_with,
+            CandidateClassification, CandidateSource, ProcessIdentityProbe,
+            ServerIdentityDecodeErrorCode, ServerIdentityProbe, ServerProbeError,
+            decode_server_identity, discover_with,
         },
         model::{BindEndpoint, RegistryEntry},
         process_identity::{ObservedProcessIdentity, ProcessIdentity},
@@ -143,6 +144,38 @@ fn server_identity(entry: &RegistryEntry) -> Value {
         "security_scope": "trusted_network",
         "operational_limits": {"max_page_rows": "500"},
     })
+}
+
+#[test]
+fn strict_server_identity_decoder_is_reusable_without_a_registry_entry() {
+    let production = TestProduction::new("typed-server-identity");
+    let entry = registry_entry(&production, run_id(42), 8_042);
+    let bytes = serde_json::to_vec(&server_identity(&entry)).unwrap();
+
+    let identity = decode_server_identity(&bytes).expect("decode typed server identity");
+    assert_eq!(identity.identity_schema_version(), 1);
+    assert_eq!(identity.server_protocol_version(), 1);
+    assert_eq!(identity.event_schema_version(), 1);
+    assert_eq!(identity.view_schema_version(), 1);
+    assert_eq!(identity.api_schema_version(), 1);
+    assert_eq!(identity.run_id(), entry.run_id());
+    assert_eq!(identity.owner_pid(), entry.owner_pid());
+    assert_eq!(identity.process_identity(), entry.process_identity());
+    assert_eq!(identity.local_endpoint(), entry.local_endpoint());
+    assert_eq!(identity.identity_path(), "/api/v1/identity");
+    assert_eq!(identity.operational_limits()["max_page_rows"].get(), 500);
+
+    let mut future = server_identity(&entry);
+    future["identity_schema_version"] = json!(2);
+    let error = decode_server_identity(&serde_json::to_vec(&future).unwrap())
+        .expect_err("reject a newer identity schema before full decode");
+    assert_eq!(error.code(), ServerIdentityDecodeErrorCode::Incompatible);
+
+    let mut extra = server_identity(&entry);
+    extra["unexpected"] = json!(true);
+    let error = decode_server_identity(&serde_json::to_vec(&extra).unwrap())
+        .expect_err("strict decoding rejects unknown fields");
+    assert_eq!(error.code(), ServerIdentityDecodeErrorCode::Invalid);
 }
 
 #[derive(Default)]

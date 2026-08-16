@@ -365,6 +365,52 @@ impl DiagnosticReader<'static> {
             SharedArchiveLease::acquire(run_directory).map_err(ReaderFailure::archive_lease)?;
         Self::open(expected_run_id, run_directory, HeldLease::Archive(lease))
     }
+
+    pub fn open_identified_archive(run_directory: &Path) -> Result<Self, ReaderFailure> {
+        let lease =
+            SharedArchiveLease::acquire(run_directory).map_err(ReaderFailure::archive_lease)?;
+        let profile = ReaderProfile::Archive;
+        let database_path = run_directory.join(DIAGNOSTIC_DATABASE_FILENAME);
+        let connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| {
+            ReaderFailure::sqlite(profile, ReaderErrorCode::SqliteOpen, &database_path, error)
+        })?;
+        configure_read_only(&connection, profile, &database_path)?;
+        let encoded_run_id = connection
+            .query_row(
+                "SELECT run_id FROM run_metadata WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| {
+                ReaderFailure::sqlite(
+                    profile,
+                    ReaderErrorCode::MetadataRead,
+                    &database_path,
+                    error,
+                )
+            })?;
+        let expected_run_id = CanonicalUuid::parse(&encoded_run_id).map_err(|error| {
+            ReaderFailure::detail(
+                profile,
+                ReaderErrorCode::StoreValidation,
+                &database_path,
+                format!("diagnostic store Run identity is invalid: {error}"),
+            )
+        })?;
+        let mut reader = Self {
+            connection,
+            expected_run_id,
+            run_directory: run_directory.to_path_buf(),
+            database_path,
+            lease: HeldLease::Archive(lease),
+        };
+        drop(reader.capture()?);
+        Ok(reader)
+    }
 }
 
 fn configure_read_only(

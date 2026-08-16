@@ -548,63 +548,30 @@ fn classify_server_identity(
     entry: &RegistryEntry,
     bytes: &[u8],
 ) -> (CandidateClassification, Option<String>) {
-    if bytes.len() > MAX_SERVER_IDENTITY_BYTES {
-        return (
-            CandidateClassification::Unhealthy,
-            Some("server identity response exceeds the size limit".to_owned()),
-        );
-    }
-    let envelope: ServerIdentityEnvelope = match serde_json::from_slice(bytes) {
-        Ok(envelope) => envelope,
-        Err(error) => {
-            return (
-                CandidateClassification::Unhealthy,
-                Some(format!("server identity response is invalid: {error}")),
-            );
-        }
-    };
-    if envelope.identity_schema_version > SERVER_IDENTITY_SCHEMA_VERSION {
-        return (
-            CandidateClassification::Incompatible,
-            Some(format!(
-                "server identity schema {} is newer than {}",
-                envelope.identity_schema_version, SERVER_IDENTITY_SCHEMA_VERSION
-            )),
-        );
-    }
-    if envelope.identity_schema_version != SERVER_IDENTITY_SCHEMA_VERSION {
-        return (
-            CandidateClassification::Unhealthy,
-            Some("server identity schema is unsupported".to_owned()),
-        );
-    }
-
-    let identity: ServerIdentityWire = match serde_json::from_slice(bytes) {
+    let identity = match decode_server_identity(bytes) {
         Ok(identity) => identity,
         Err(error) => {
-            return (
-                CandidateClassification::Unhealthy,
-                Some(format!("server identity response is invalid: {error}")),
-            );
+            let classification = match error.code() {
+                ServerIdentityDecodeErrorCode::Incompatible => {
+                    CandidateClassification::Incompatible
+                }
+                ServerIdentityDecodeErrorCode::ResponseTooLarge
+                | ServerIdentityDecodeErrorCode::Invalid => CandidateClassification::Unhealthy,
+            };
+            return (classification, Some(error.to_string()));
         }
     };
-    if identity.identity_schema_version != SERVER_IDENTITY_SCHEMA_VERSION {
-        return (
-            CandidateClassification::Unhealthy,
-            Some("server identity schema changed during decode".to_owned()),
-        );
-    }
-    if identity.run_id != entry.run_id()
-        || identity.owner_pid != entry.owner_pid()
-        || identity.process_identity != *entry.process_identity()
+    if identity.run_id() != entry.run_id()
+        || identity.owner_pid() != entry.owner_pid()
+        || identity.process_identity() != entry.process_identity()
     {
         return (
             CandidateClassification::IdentityMismatch,
             Some("server Run or process identity differs from the registry entry".to_owned()),
         );
     }
-    if identity.server_protocol_version != u64::from(entry.server_protocol_version())
-        || identity.server_protocol_version != u64::from(SERVER_PROTOCOL_VERSION)
+    if identity.server_protocol_version() != u64::from(entry.server_protocol_version())
+        || identity.server_protocol_version() != u64::from(SERVER_PROTOCOL_VERSION)
     {
         return (
             CandidateClassification::Incompatible,
@@ -616,14 +583,14 @@ fn classify_server_identity(
     let expected_api_path = join_base_path(&expected_base_path, "/api/v1");
     let expected_identity_path = join_base_path(&expected_base_path, "/api/v1/identity");
     let bind = entry.bind();
-    if identity.bind_host != bind.host()
-        || identity.port != bind.port()
-        || identity.local_endpoint != *entry.local_endpoint()
-        || identity.advertise_url.as_ref() != entry.advertise_url()
-        || identity.security_scope != entry.security_scope()
-        || identity.base_path != expected_base_path
-        || identity.api_base_path != expected_api_path
-        || identity.identity_path != expected_identity_path
+    if identity.bind_host() != bind.host()
+        || identity.port() != bind.port()
+        || identity.local_endpoint() != entry.local_endpoint()
+        || identity.advertise_url() != entry.advertise_url()
+        || identity.security_scope() != entry.security_scope()
+        || identity.base_path() != expected_base_path
+        || identity.api_base_path() != expected_api_path
+        || identity.identity_path() != expected_identity_path
     {
         return (
             CandidateClassification::IdentityMismatch,
@@ -632,6 +599,77 @@ fn classify_server_identity(
     }
 
     (CandidateClassification::Active, None)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerIdentityDecodeErrorCode {
+    ResponseTooLarge,
+    Invalid,
+    Incompatible,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerIdentityDecodeError {
+    code: ServerIdentityDecodeErrorCode,
+    detail: String,
+}
+
+impl ServerIdentityDecodeError {
+    pub const fn code(&self) -> ServerIdentityDecodeErrorCode {
+        self.code
+    }
+}
+
+impl fmt::Display for ServerIdentityDecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for ServerIdentityDecodeError {}
+
+pub fn decode_server_identity(
+    bytes: &[u8],
+) -> Result<DecodedServerIdentity, ServerIdentityDecodeError> {
+    if bytes.len() > MAX_SERVER_IDENTITY_BYTES {
+        return Err(ServerIdentityDecodeError {
+            code: ServerIdentityDecodeErrorCode::ResponseTooLarge,
+            detail: "server identity response exceeds the size limit".to_owned(),
+        });
+    }
+    let envelope: ServerIdentityEnvelope =
+        serde_json::from_slice(bytes).map_err(|error| ServerIdentityDecodeError {
+            code: ServerIdentityDecodeErrorCode::Invalid,
+            detail: format!("server identity response is invalid: {error}"),
+        })?;
+    if envelope.identity_schema_version > SERVER_IDENTITY_SCHEMA_VERSION {
+        return Err(ServerIdentityDecodeError {
+            code: ServerIdentityDecodeErrorCode::Incompatible,
+            detail: format!(
+                "server identity schema {} is newer than {}",
+                envelope.identity_schema_version, SERVER_IDENTITY_SCHEMA_VERSION
+            ),
+        });
+    }
+    if envelope.identity_schema_version != SERVER_IDENTITY_SCHEMA_VERSION {
+        return Err(ServerIdentityDecodeError {
+            code: ServerIdentityDecodeErrorCode::Invalid,
+            detail: "server identity schema is unsupported".to_owned(),
+        });
+    }
+
+    let identity: DecodedServerIdentity =
+        serde_json::from_slice(bytes).map_err(|error| ServerIdentityDecodeError {
+            code: ServerIdentityDecodeErrorCode::Invalid,
+            detail: format!("server identity response is invalid: {error}"),
+        })?;
+    if identity.identity_schema_version != SERVER_IDENTITY_SCHEMA_VERSION {
+        return Err(ServerIdentityDecodeError {
+            code: ServerIdentityDecodeErrorCode::Invalid,
+            detail: "server identity schema changed during decode".to_owned(),
+        });
+    }
+    Ok(identity)
 }
 
 fn registry_base_path(entry: &RegistryEntry) -> String {
@@ -663,9 +701,9 @@ struct ServerIdentityEnvelope {
     identity_schema_version: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ServerIdentityWire {
+pub struct DecodedServerIdentity {
     identity_schema_version: u64,
     server_protocol_version: u64,
     #[serde(rename = "event_schema_version")]
@@ -687,6 +725,76 @@ struct ServerIdentityWire {
     security_scope: SecurityScope,
     #[serde(rename = "operational_limits")]
     _operational_limits: BTreeMap<String, SchemaU64>,
+}
+
+impl DecodedServerIdentity {
+    pub const fn identity_schema_version(&self) -> u64 {
+        self.identity_schema_version
+    }
+
+    pub const fn server_protocol_version(&self) -> u64 {
+        self.server_protocol_version
+    }
+
+    pub const fn event_schema_version(&self) -> u64 {
+        self._event_schema_version
+    }
+
+    pub const fn view_schema_version(&self) -> u64 {
+        self._view_schema_version
+    }
+
+    pub const fn api_schema_version(&self) -> u64 {
+        self._api_schema_version
+    }
+
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    pub const fn owner_pid(&self) -> u32 {
+        self.owner_pid
+    }
+
+    pub const fn process_identity(&self) -> &super::process_identity::ProcessIdentity {
+        &self.process_identity
+    }
+
+    pub fn bind_host(&self) -> &str {
+        &self.bind_host
+    }
+
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub const fn local_endpoint(&self) -> &WebBaseUrl {
+        &self.local_endpoint
+    }
+
+    pub const fn advertise_url(&self) -> Option<&WebBaseUrl> {
+        self.advertise_url.as_ref()
+    }
+
+    pub fn base_path(&self) -> &str {
+        &self.base_path
+    }
+
+    pub fn api_base_path(&self) -> &str {
+        &self.api_base_path
+    }
+
+    pub fn identity_path(&self) -> &str {
+        &self.identity_path
+    }
+
+    pub const fn security_scope(&self) -> SecurityScope {
+        self.security_scope
+    }
+
+    pub const fn operational_limits(&self) -> &BTreeMap<String, SchemaU64> {
+        &self._operational_limits
+    }
 }
 
 fn classify_archive(
