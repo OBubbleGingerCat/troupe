@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/src/views/timeline.tsx",
+    "frontend/diagnostics/tests/component/view-timeline.test.tsx"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
