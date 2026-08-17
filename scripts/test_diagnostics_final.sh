@@ -505,9 +505,12 @@ def run() -> int:
     verify_zero_audit = not verify_dispatch or (
         environment.pop("TROUPE_FINAL_FAKE_ZERO_AUDIT", None) == "1"
     )
-    product_base_sha = environment.get("PRODUCT_BASE_SHA", "0" * 40)
-    plan_bundle_sha = environment.get("PLAN_BUNDLE_SHA", "0" * 40)
-    if not verify_dispatch:
+    if verify_dispatch:
+        product_base_sha = "0" * 40
+        plan_bundle_sha = "0" * 40
+    else:
+        product_base_sha = environment.get("PRODUCT_BASE_SHA", "0" * 40)
+        plan_bundle_sha = environment.get("PLAN_BUNDLE_SHA", "0" * 40)
         if publisher.COMMIT_RE.fullmatch(product_base_sha) is None:
             fail("PRODUCT_BASE_SHA is required")
         if publisher.COMMIT_RE.fullmatch(plan_bundle_sha) is None:

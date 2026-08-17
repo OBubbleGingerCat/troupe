@@ -215,6 +215,8 @@ def _environment(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
             environment.pop(name)
     environment.update(
         {
+            "PLAN_BUNDLE_SHA": "2" * 40,
+            "PRODUCT_BASE_SHA": "3" * 40,
             "PYTHONDONTWRITEBYTECODE": "1",
             "TMPDIR": str(temporary),
             "TROUPE_FINAL_FAKE_CHILD_LOG": str(child_log),
