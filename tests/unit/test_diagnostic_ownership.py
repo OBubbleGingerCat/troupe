@@ -1093,6 +1093,21 @@ def test_generated_grant_rejects_manifest_member_expansion_drift(
         audit._generated_members(repository, grant)
 
 
+def test_all_realized_post_plan_repairs_are_exact_content_and_commit_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit = _ownership_module()
+
+    repairs = audit._validated_post_plan_repairs(ROOT)
+
+    assert repairs == {path: "M" for path in audit.POST_PLAN_REPAIRS}
+    path = next(iter(audit.POST_PLAN_REPAIRS))
+    commit, _sha256 = audit.POST_PLAN_REPAIRS[path]
+    monkeypatch.setitem(audit.POST_PLAN_REPAIRS, path, (commit, "0" * 64))
+    with pytest.raises(audit.OwnershipAuditError, match="post-plan repair content differs"):
+        audit._validated_post_plan_repairs(ROOT)
+
+
 @pytest.mark.parametrize(
     ("path_value", "message"),
     [
