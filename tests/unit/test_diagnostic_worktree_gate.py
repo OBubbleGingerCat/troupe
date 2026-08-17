@@ -135,6 +135,54 @@ def test_workspace_environment_is_fully_owned_and_ignores_shared_caches(
         gate.cleanup_owned_workspace(workspace)
 
 
+def test_v05_uses_only_an_exact_external_gate_tmp(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    external = tmp_path / "evidence"
+    external.mkdir()
+    workspace = gate.create_owned_workspace(repository, "V05")
+    try:
+        selected = gate.external_gate_tmp(
+            repository,
+            "V05",
+            {"TROUPE_GATE_TMP": str(external)},
+        )
+        environment = gate.gate_environment(workspace, {}, gate_tmp=selected)
+        assert selected == external
+        assert environment["TROUPE_GATE_TMP"] == str(external)
+        assert Path(environment["TMPDIR"]).is_relative_to(workspace.root)
+    finally:
+        gate.cleanup_owned_workspace(workspace)
+
+
+def test_non_v05_node_ignores_external_gate_tmp_override(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    assert gate.external_gate_tmp(
+        repository,
+        "V06",
+        {"TROUPE_GATE_TMP": str(tmp_path)},
+    ) is None
+
+
+def test_v05_rejects_missing_relative_symlinked_or_repository_gate_tmp(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    inside = repository / "evidence"
+    inside.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(external, target_is_directory=True)
+
+    for value in (None, "relative", str(linked), str(inside)):
+        caller = {} if value is None else {"TROUPE_GATE_TMP": value}
+        with pytest.raises(gate.GateError, match="TROUPE_GATE_TMP"):
+            gate.external_gate_tmp(repository, "V05", caller)
+
+
 def test_managed_python_runtime_binds_home_and_precedes_inherited_loader_paths(
     tmp_path: Path,
 ) -> None:

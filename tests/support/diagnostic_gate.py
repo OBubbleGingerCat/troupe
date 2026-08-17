@@ -36,6 +36,7 @@ PERSISTENT_EVIDENCE_ENV = frozenset(
     {"TROUPE_DIAGNOSTICS_EVIDENCE", "TROUPE_FINAL_ATTEMPT_ID"}
 )
 PERSISTENT_EVIDENCE_NODES = frozenset({"V03", "V16"})
+EXTERNAL_GATE_TMP_NODES = frozenset({"V05"})
 GATE_ENV_NAMES = frozenset(
     {
         "INTEGRATION_SHA",
@@ -237,6 +238,8 @@ def owned_workspace(repository_root: Path, node_id: str) -> Iterator[OwnedWorksp
 def gate_environment(
     workspace: OwnedWorkspace,
     caller: Mapping[str, str],
+    *,
+    gate_tmp: Path | None = None,
 ) -> dict[str, str]:
     environment = dict(caller)
     caller_home = caller.get("HOME")
@@ -280,7 +283,7 @@ def gate_environment(
             "PYTEST_ADDOPTS": "-p no:cacheprovider",
             "TMP": str(workspace.tmp),
             "TMPDIR": str(workspace.tmp),
-            "TROUPE_GATE_TMP": str(workspace.tmp),
+            "TROUPE_GATE_TMP": str(workspace.tmp if gate_tmp is None else gate_tmp),
             "UV_CACHE_DIR": str(workspace.uv_cache),
             "UV_PROJECT_ENVIRONMENT": str(workspace.venv),
             "XDG_CACHE_HOME": str(workspace.home / ".cache"),
@@ -289,6 +292,36 @@ def gate_environment(
     if rustup_home is not None:
         environment["RUSTUP_HOME"] = rustup_home
     return environment
+
+
+def external_gate_tmp(
+    repository: Path,
+    node_id: str,
+    caller: Mapping[str, str],
+) -> Path | None:
+    if node_id not in EXTERNAL_GATE_TMP_NODES:
+        return None
+    raw = caller.get("TROUPE_GATE_TMP")
+    if not raw:
+        raise GateError(f"{node_id} requires external TROUPE_GATE_TMP")
+    candidate = Path(raw)
+    if not candidate.is_absolute() or str(candidate) != os.path.abspath(candidate):
+        raise GateError("external TROUPE_GATE_TMP must be canonical and absolute")
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+        repository_resolved = repository.resolve(strict=True)
+    except OSError as error:
+        raise GateError(f"external TROUPE_GATE_TMP is unavailable: {error}") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or resolved != candidate
+    ):
+        raise GateError("external TROUPE_GATE_TMP must be an exact real directory")
+    if _is_within(resolved, repository_resolved):
+        raise GateError("external TROUPE_GATE_TMP must be outside the repository")
+    return resolved
 
 
 def bind_managed_python_runtime(
@@ -832,8 +865,9 @@ def _bootstrap_run(repository: Path, node_id: str, caller: Mapping[str, str]) ->
     uv = shutil.which("uv", path=caller.get("PATH"))
     if uv is None:
         raise GateError("native gate requires uv")
+    gate_tmp = external_gate_tmp(repository, node_id, caller)
     with owned_workspace(repository, node_id) as workspace:
-        environment = gate_environment(workspace, caller)
+        environment = gate_environment(workspace, caller, gate_tmp=gate_tmp)
         _run(
             [uv, "sync", "--frozen", "--all-groups", "--no-install-project"],
             cwd=repository,
