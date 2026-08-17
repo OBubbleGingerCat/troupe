@@ -1,6 +1,20 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_diagnostics_traceability.py"
+    ],
+    [
+      "python",
+      "scripts/verify_diagnostics_traceability.py",
+      "--design",
+      "docs/design/production-diagnostics.md",
+      "--plan",
+      "docs/plan/production-diagnostics-implementation-plan.md"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
