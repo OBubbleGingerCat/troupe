@@ -1,12 +1,12 @@
 # Production Diagnostics Plan Review Record
 
 - Plan: `docs/plan/production-diagnostics-implementation-plan.md`
-- Status: round 13 plus the user-authorized implementation-time corrections, including the X01 supervisor call surface, are root-self-reviewed; implementation may continue
+- Status: round 13 plus the user-authorized implementation-time corrections, including the X01 supervisor and X02 ordered-shutdown call surfaces, are root-self-reviewed; implementation may continue
 - Actor Design SHA-256: `acb963576a100e98415418dbc6f68cb4b605c642d06f2c06620ffc4e29a19021`
 - Diagnostics Design SHA-256: `b06d3a8097780787fce3d73f7b623526ef0f4ec30b09c2c9277227b5c74a454d`
-- Plan SHA-256: `cbb222c5ebf9c53158cc13d233095b67ad4fa71f08370f3a2740d1c58e94d2f2`
-- Validator SHA-256: `e877c8236c236e5696661333cb68ab672f6bbbd48612e393d25b50de46dc8d02`
-- Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 47 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
+- Plan SHA-256: `297dc9d231fbd7ca6016f3483e7be17d2192a174279dab6cef4eca8cb3fb0a77`
+- Validator SHA-256: `d640124503e370b8597e81f914e82824ce3b1798e12dea82c6aea99ef390cab8`
+- Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 49 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
 - Baseline: validator normal/mutation self-test, derived DAG/schedule, ownership closure, balanced planning diffs,
   conflict-marker scan, and whitespace checks passed; no product code changed, so product build/Gates were not rerun
 - Review round: current 13 plus implementation-time corrections (frozen by explicit user-authorized root self-review)
@@ -434,4 +434,24 @@ ownership audit, JSON/whitespace checks, and exact five-path ownership review ar
 amendment.
 
 Verdict: `ACCEPT` for X01 implementation on the hash tuple at the top of this record. This is a user-authorized
+root self-review, not four independent votes.
+
+## X02 Implementation-Time Amendment
+
+At 124/145 merged nodes, the X02 implementation audit found the same reachability defect as X01: the frozen
+product list owned only `diagnostic_runtime/shutdown.rs`, but a real ordered shutdown must be invoked by the CLI,
+retain the X01 producer and SSE commit signal through activation, stage the B00 writer/registry/server/lease
+resources, read B01's already-closed terminal outcome, and commit final metadata on S03's sole writer connection.
+Without ordered successor writers on those existing call sites, X02 could only produce an unused coordinator and
+could not make any archive clean.
+
+The user explicitly authorized rapid repair, root self-review, and continued implementation without four new
+votes. The plan and ledger therefore add X02 only as the ordered successor writer for `application/cli.rs`,
+`diagnostic_runtime/{activation,bootstrap,runtime_producer}.rs`, and
+`troupe-diagnostics-runtime/src/store/writer.rs`. X02 remains the sole behavior owner of `shutdown.rs`; the DAG,
+dependencies, Gate, event schema, public Python API, S03 canonical batch semantics, B01 lifecycle-fact ownership,
+and no-daemon/resource-order contract are unchanged. The normal validator, mutation self-test, plan-only ownership
+audit, JSON/whitespace checks, and exact five-path ownership review are the blocking evidence for this amendment.
+
+Verdict: `ACCEPT` for X02 implementation on the hash tuple at the top of this record. This is a user-authorized
 root self-review, not four independent votes.

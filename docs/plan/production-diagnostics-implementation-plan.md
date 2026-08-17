@@ -785,13 +785,14 @@ parent、template、cardinality和SHA绑定。任何其他artifact placeholder�
 | `rust/crates/troupe-diagnostics-runtime/src/lib.rs` | F01 -> F04 | placeholder后只接module declaration |
 | `rust/crates/troupe-diagnostics-perfetto/src/lib.rs` | F01 -> F04 | placeholder后只接module declaration |
 | `rust/crates/troupe-diagnostics-perfetto/src/{collect,tracks}.rs` | F04 -> T01 -> T03 | T01完成projection；T03只增加fixed structural-index preflight |
+| `rust/crates/troupe-diagnostics-runtime/src/store/writer.rs` | F04 -> S03 -> X02 | S03拥有canonical batch transaction；X02只增加同一writer上的final metadata transaction |
 | `rust/Cargo.toml` | F01 -> F05 | F05只加入`diagnostics-test-support`feature，不加dependency |
 | `rust/src/lib.rs` | F05 | 一次性调用private installer seam；P04只填`install.rs` |
 | `rust/src/act_call.rs` | F05 -> B06 | F05接no-op lifecycle hooks；B06唯一修改public sink signature/preflight |
 | `rust/src/application/loader.rs` | L00 | 等价迁移后由L00在fragment的`removed`登记 |
 | `rust/src/application/invocation.rs` | L00 -> D07 | loader return type后才接diagnostic CLI dispatch |
 | `rust/src/application/mod.rs` | F05 -> D07 | private module declaration后才公开dispatch |
-| `rust/src/application/cli.rs` | D07 -> X00 -> X01 | CLI family join后接mandatory Runtime activation；X01只接fatal supervisor与独立exit surface |
+| `rust/src/application/cli.rs` | D07 -> X00 -> X01 -> X02 | CLI family join后接mandatory Runtime activation；X01接fatal supervisor与独立exit surface；X02只选择terminal outcome并调用ordered shutdown |
 | `rust/src/orchestration/{mod,actor_handle,actor_registry,cue,cue_future,effect,mailbox,production}.rs` | F05 | F05一次性放置typed no-op calls；B节点只填`diagnostic_runtime/`slot |
 | `rust/src/orchestration/runtime.rs` | F05 -> X01 | F05建立Runtime cancellation seam；X01只让`start()` hook响应同一core cancellation |
 | `rust/src/orchestration/python_task.rs` | F05 -> B14 -> X01 | F05建立lineage seam；B14加入generation-bound Act task authority；X01只增加hook task cancellation/settlement |
@@ -801,8 +802,9 @@ parent、template、cardinality和SHA绑定。任何其他artifact placeholder�
 | `rust/src/diagnostic_runtime/sink_binding.rs` | F05 -> B18 -> B16 -> B14 | binding、settlement hook、authority transaction按DAG有序接线 |
 | `rust/crates/troupe-agent-runtime/src/{lib.rs,session/mod.rs,session/supervisor.rs,session/turn.rs}` | F06 | F06一次性放置typed optional observer calls；A节点只填`diagnostics/`slot |
 | `rust/src/diagnostic_python/install.rs` | F05 -> P04 | P04唯一组装Python module |
-| `rust/src/diagnostic_runtime/activation.rs` | F05 -> X00 -> X01 | X00唯一启用mandatory Runtime path；X01只接active failure reporters与guard probe |
-| `rust/src/diagnostic_runtime/bootstrap.rs` | F05 -> B00 -> X01 | F05创建slot，B00拥有bootstrap/guard；X01只暴露fatal后seal normal ingress的guard操作 |
+| `rust/src/diagnostic_runtime/activation.rs` | F05 -> X00 -> X01 -> X02 | X00启用mandatory Runtime path；X01接active failure reporters与guard probe；X02保留terminal producer/commit signal并调用ordered shutdown |
+| `rust/src/diagnostic_runtime/bootstrap.rs` | F05 -> B00 -> X01 -> X02 | F05创建slot，B00拥有bootstrap/guard；X01暴露fatal seal；X02只增加两阶段writer finalization与ordered resource handoff |
+| `rust/src/diagnostic_runtime/runtime_producer.rs` | F05 -> B01 -> X02 | B01拥有Runtime lifecycle facts；X02只读取已关闭Run的terminal outcome |
 | `rust/src/application/diagnostic_cli/{mod,dispatch}.rs` | F05 -> D07 | D07唯一组装command families |
 | `rust/crates/troupe-diagnostics-runtime/src/server/assembly.rs` | F04 -> H04 | H04唯一组装active/archive route matrix |
 | `src/troupe/__init__.py` | P04 | Python re-export |
@@ -1828,7 +1830,7 @@ tests以byte-exact fixture验收，任何warning/progress只允许stderr。
 
 #### X02 - Terminal facts、drain、stream close、registry/store shutdown
 
-- **产物**：`rust/src/diagnostic_runtime/shutdown.rs`；`tests/fixtures/diagnostics/shutdown-phase-matrix.json`；`tests/integration/test_diagnostic_shutdown.py`。
+- **产物**：填充`rust/src/diagnostic_runtime/shutdown.rs`，并按第4.2节修改`rust/src/application/cli.rs`、`rust/src/diagnostic_runtime/{activation,bootstrap,runtime_producer}.rs`和`rust/crates/troupe-diagnostics-runtime/src/store/writer.rs`接terminal outcome、两阶段writer finalization、stream close与ordered resource teardown；`tests/fixtures/diagnostics/shutdown-phase-matrix.json`；`tests/integration/test_diagnostic_shutdown.py`。
 - **验收**：顺序固定为stop new work -> settle/cancel -> persist all lifecycle/outcome/usage/sink terminal facts -> seal ingress -> bounded writer drain/final metadata+`clean_shutdown=true` -> best-effort stream_closed(final W) -> durable registry unpublish -> close listener/readers/writer/SQLite -> release lease/thread；用户Production failed但diagnostics完整可`outcome=failed,clean_shutdown=true,exit1`；任一core finalization/unpublish/close failure使非零且clean_shutdown保持false（若final transaction未成功）；peer断开不降级archive；server不daemonize，Run directory不删除；sink先seal/尽力terminal，慢sync callback可abandon且不阻塞；hard crash重开显示incomplete。
 - **Gate**：`scripts/run_diagnostic_node_gate.sh X02`，descriptor执行`pytest -q tests/integration/test_diagnostic_shutdown.py`。
 - **边界**：不执行cleanup或archive serve；只关闭active Runtime拥有的资源。

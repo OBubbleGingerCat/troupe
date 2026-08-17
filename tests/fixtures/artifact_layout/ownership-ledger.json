@@ -3173,6 +3173,10 @@
         {
           "node": "S03",
           "role": "implement"
+        },
+        {
+          "node": "X02",
+          "role": "seam"
         }
       ]
     },
@@ -3504,6 +3508,10 @@
         },
         {
           "node": "X01",
+          "role": "seam"
+        },
+        {
+          "node": "X02",
           "role": "seam"
         }
       ]
@@ -3943,6 +3951,10 @@
         {
           "node": "X01",
           "role": "seam"
+        },
+        {
+          "node": "X02",
+          "role": "seam"
         }
       ]
     },
@@ -3988,6 +4000,10 @@
         },
         {
           "node": "X01",
+          "role": "seam"
+        },
+        {
+          "node": "X02",
           "role": "seam"
         }
       ]
@@ -4107,6 +4123,10 @@
         {
           "node": "B01",
           "role": "implement"
+        },
+        {
+          "node": "X02",
+          "role": "seam"
         }
       ]
     },
