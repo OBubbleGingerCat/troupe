@@ -22,6 +22,10 @@ function rowLabel(row: TimelineRow): string {
   return `${row.node.label}, ${row.node.kind}, ${status}`;
 }
 
+function isCollapsible(row: TimelineRow): boolean {
+  return row.has_children && (row.node.kind === "cue" || row.node.kind === "act");
+}
+
 export function TimelineTreegrid({
   layout,
   selection,
@@ -118,7 +122,7 @@ export function TimelineTreegrid({
         >
           {visible.map((row, visibleIndex) => {
             const selected = sameSelectionReference(selection, row.node.selection);
-            const expandable = row.has_children;
+            const expandable = isCollapsible(row);
             const primitiveCount = layout.lanes_by_row.get(row.node.id)?.assignments.length ?? 0;
             return (
               <div

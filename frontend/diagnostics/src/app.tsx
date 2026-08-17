@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import { ArrowLeft, ArrowRight, Radio, ZoomIn, ZoomOut } from "lucide-preact";
 import {
   useCallback,
   useEffect,
@@ -66,7 +67,13 @@ import {
   layoutTimeline,
   selectTimelineModel,
 } from "./timeline/layout.ts";
-import { createTimelineViewport } from "./timeline/viewport.ts";
+import {
+  createTimelineViewport,
+  followTimelineViewport,
+  panTimelineViewport,
+  pixelToElapsed,
+  zoomTimelineViewport,
+} from "./timeline/viewport.ts";
 import type { TimeSeriesSelection } from "./timeseries/model.ts";
 import { TimeSeriesRenderer } from "./timeseries/renderer.ts";
 import { TranscriptPanel } from "./transcript/TranscriptPanel.tsx";
@@ -364,10 +371,107 @@ function CanonicalTimeline({ state, productionName, dispatch }: CanonicalTimelin
   const select = (selection: SelectionReference): void => {
     dispatch({ type: "select", selection });
   };
+  const setViewport = (
+    next: ReturnType<typeof createTimelineViewport>,
+    zoom: DiagnosticState["presentation"]["zoom"] = state.presentation.zoom,
+  ): void => {
+    dispatch({ type: "viewport_set", viewport: next });
+    dispatch({ type: "follow_live_set", follow_live: next.follow_live });
+    dispatch({ type: "zoom_set", zoom });
+  };
+  const pan = (fraction: number): void => {
+    setViewport(
+      panTimelineViewport(viewport, viewport.width_px * fraction, model.live_now_ns),
+      null,
+    );
+  };
+  const zoom = (factor: number): void => {
+    const anchorPixel = viewport.width_px / 2;
+    const anchorNs = pixelToElapsed(anchorPixel, viewport);
+    setViewport(
+      zoomTimelineViewport(viewport, factor, anchorPixel, model.live_now_ns),
+      { anchor_ns: anchorNs, scale: factor },
+    );
+  };
   return (
     <section class="diagnostic-canonical-timeline" aria-label="Canonical production timeline">
       <header><h2>Production timeline</h2></header>
-      <div style={{ minWidth: 0, overflowX: "auto" }}>
+      <div
+        role="toolbar"
+        aria-label="Timeline navigation"
+        style={{
+          display: "flex",
+          minWidth: 0,
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "0.375rem",
+          marginBlockEnd: "0.5rem",
+        }}
+      >
+        <button
+          class="primary-toolbar__icon-button"
+          type="button"
+          aria-label="Pan timeline earlier"
+          title="Pan timeline earlier"
+          onClick={() => pan(-0.25)}
+        >
+          <ArrowLeft aria-hidden="true" />
+        </button>
+        <button
+          class="primary-toolbar__icon-button"
+          type="button"
+          aria-label="Pan timeline later"
+          title="Pan timeline later"
+          onClick={() => pan(0.25)}
+        >
+          <ArrowRight aria-hidden="true" />
+        </button>
+        <button
+          class="primary-toolbar__icon-button"
+          type="button"
+          aria-label="Zoom timeline in"
+          title="Zoom timeline in"
+          onClick={() => zoom(0.5)}
+        >
+          <ZoomIn aria-hidden="true" />
+        </button>
+        <button
+          class="primary-toolbar__icon-button"
+          type="button"
+          aria-label="Zoom timeline out"
+          title="Zoom timeline out"
+          onClick={() => zoom(2)}
+        >
+          <ZoomOut aria-hidden="true" />
+        </button>
+        <button
+          class="primary-toolbar__icon-button"
+          type="button"
+          aria-label="Follow live timeline"
+          title="Follow live timeline"
+          aria-pressed={viewport.follow_live}
+          onClick={() => setViewport(
+            followTimelineViewport(viewport, model.live_now_ns),
+            null,
+          )}
+        >
+          <Radio aria-hidden="true" />
+        </button>
+        <output
+          aria-label="Timeline viewport"
+          data-start-ns={viewport.start_ns}
+          data-end-ns={viewport.end_ns}
+          style={{ minWidth: 0, overflowWrap: "anywhere", fontVariantNumeric: "tabular-nums" }}
+        >
+          {viewport.start_ns} - {viewport.end_ns} ns
+        </output>
+      </div>
+      <div
+        role="region"
+        aria-label="Timeline canvas viewport"
+        tabIndex={0}
+        style={{ minWidth: 0, overflowX: "auto" }}
+      >
         <TimelineCanvas
           layout={layout}
           viewport={viewport}
