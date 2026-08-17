@@ -289,6 +289,7 @@ pub enum SinkOnlyProfile {}
 
 pub struct DiagnosticHub<R, P> {
     state: Mutex<HubState<R>>,
+    subscriber_delivery_order: Mutex<()>,
     profile: PhantomData<fn() -> P>,
 }
 
@@ -381,6 +382,7 @@ where
                 validator: ReferenceValidator::new(),
                 live_notifier,
             }),
+            subscriber_delivery_order: Mutex::new(()),
             profile: PhantomData,
         }
     }
@@ -394,6 +396,13 @@ where
     where
         C: DiagnosticEventCandidate,
     {
+        let _subscriber_delivery_order = subscriber
+            .map(|_| {
+                self.subscriber_delivery_order
+                    .lock()
+                    .map_err(|_| HubAdmissionError::StatePoisoned)
+            })
+            .transpose()?;
         let mut state = self
             .state
             .lock()
