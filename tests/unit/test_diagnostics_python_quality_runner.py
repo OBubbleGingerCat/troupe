@@ -61,6 +61,11 @@ record = {
     "perfetto_cache": os.environ.get("TROUPE_PERFETTO_CACHE"),
     "playwright_cache": os.environ.get("TROUPE_PLAYWRIGHT_CACHE"),
     "npm_cache": os.environ.get("TROUPE_NPM_CACHE"),
+    "implicit_npm_caches": sorted(
+        name
+        for name, value in os.environ.items()
+        if name.lower() == "npm_config_cache" and value
+    ),
 }
 with Path(os.environ["TROUPE_PYTHON_QUALITY_LOG"]).open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(record) + "\n")
@@ -156,6 +161,7 @@ def _sandbox(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             "TMPDIR": str(temporary),
             "TROUPE_GATE_TMP": str(temporary),
             "TROUPE_NPM_CACHE": str(tmp_path / "inherited-npm-cache"),
+            "NpM_CoNfIg_CaChE": str(tmp_path / "implicit-npm-cache"),
             "TROUPE_PERFETTO_CACHE": str(tmp_path / "inherited-perfetto-cache"),
             "TROUPE_PLAYWRIGHT_CACHE": str(tmp_path / "inherited-playwright-cache"),
             "TROUPE_PYTHON_QUALITY_LOG": str(log),
@@ -270,6 +276,7 @@ def test_all_runs_exact_offline_modes_and_emits_one_summary(tmp_path: Path) -> N
     assert {record["perfetto_cache"] for record in records} == {None}
     assert {record["playwright_cache"] for record in records} == {None}
     assert {record["npm_cache"] for record in records} == {None}
+    assert all(record["implicit_npm_caches"] == [] for record in records)
     mypy_caches = {record["mypy_cache"] for record in records}
     assert len(mypy_caches) == 1
     mypy_cache = Path(mypy_caches.pop())

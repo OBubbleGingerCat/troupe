@@ -49,7 +49,8 @@ pub(crate) struct CueLineageSnapshot {
     runtime: Arc<RuntimeLifecycleProducer>,
     context: DiagnosticRunContext,
     cue_scope: DiagnosticScope,
-    containing_span_id: SchemaU64,
+    scene_span_id: SchemaU64,
+    execution_span_id: SchemaU64,
 }
 
 #[cfg(not(test))]
@@ -66,8 +67,12 @@ impl CueLineageSnapshot {
         &self.cue_scope
     }
 
-    pub(crate) const fn containing_span_id(&self) -> SchemaU64 {
-        self.containing_span_id
+    pub(crate) const fn scene_span_id(&self) -> SchemaU64 {
+        self.scene_span_id
+    }
+
+    pub(crate) const fn execution_span_id(&self) -> SchemaU64 {
+        self.execution_span_id
     }
 }
 
@@ -608,7 +613,7 @@ mod active {
 
     pub(super) fn lineage_snapshot(cued: &Arc<CuedScope>) -> Option<CueLineageSnapshot> {
         let producer = lock(producers()).get(&Arc::as_ptr(cued).addr()).cloned()?;
-        let containing_span_id = {
+        let execution_span_id = {
             let state = lock(&producer.state);
             match state.phase {
                 CuePhase::Dispatched { execution_span_id } => execution_span_id,
@@ -622,7 +627,8 @@ mod active {
             runtime: Arc::clone(&producer.runtime),
             context: producer.context.clone(),
             cue_scope: producer.cue_scope.clone(),
-            containing_span_id,
+            scene_span_id: producer.scene_span_id,
+            execution_span_id,
         })
     }
 

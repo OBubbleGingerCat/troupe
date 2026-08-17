@@ -310,7 +310,7 @@ fn snapshot_from_lineage(
                 Arc::clone(snapshot.runtime()),
                 snapshot.context(),
                 snapshot.cue_scope().clone(),
-                snapshot.containing_span_id(),
+                snapshot.execution_span_id(),
             )
         }));
     }

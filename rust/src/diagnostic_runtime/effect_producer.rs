@@ -190,10 +190,11 @@ mod active {
             let detail = effect_detail(construction)?;
             let context = lineage.context();
             let lifecycle_span_id = context
-                .start_span(
+                .start_span_with_causes(
                     scope.clone(),
                     SpanStartDetail::EffectLifecycle(detail.clone()),
-                    Some(lineage.containing_span_id()),
+                    Some(lineage.scene_span_id()),
+                    caused_by(lineage.execution_span_id(), CausalRelation::FollowsFrom),
                 )
                 .map_err(|error| {
                     lineage.runtime().latch_diagnostic_failure(error);

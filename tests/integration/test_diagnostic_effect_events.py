@@ -99,6 +99,21 @@ def test_return_consumption_and_cancellation_links_are_backward_only() -> None:
     assert "caused_by(terminal.causal_source, terminal.relation)" in source
 
 
+def test_effect_lifecycle_is_scene_owned_and_execution_caused() -> None:
+    effect = PRODUCER.read_text(encoding="utf-8")
+    cue = CUE_PRODUCER.read_text(encoding="utf-8")
+    start = _between(effect, "fn start(", "fn created(&self)")
+    snapshot = _between(cue, "pub(crate) struct CueLineageSnapshot", "#[inline]")
+
+    assert "scene_span_id: SchemaU64" in snapshot
+    assert "execution_span_id: SchemaU64" in snapshot
+    assert "start_span_with_causes" in start
+    assert "Some(lineage.scene_span_id())" in start
+    assert "lineage.execution_span_id()" in start
+    assert "CausalRelation::FollowsFrom" in start
+    assert "lineage.containing_span_id()" not in start
+
+
 def test_all_provable_non_success_outcomes_are_stable_and_payload_free() -> None:
     source = PRODUCER.read_text(encoding="utf-8")
     active = source[source.index("mod active {") :]
