@@ -1403,6 +1403,7 @@ def _run(
     cwd: Path,
     env: Mapping[str, str],
     forbidden_stderr: str | None = None,
+    stderr_sink: list[str] | None = None,
     timeout: float | None = None,
 ) -> str:
     options: dict[str, Any] = {
@@ -1427,6 +1428,10 @@ def _run(
         raise VerificationError(f"command failed ({completed.returncode}): {output.strip()}")
     if forbidden_stderr is not None and forbidden_stderr in completed.stderr:
         raise VerificationError(f"command emitted forbidden stderr: {completed.stderr.strip()}")
+    if stderr_sink is not None:
+        if stderr_sink:
+            raise VerificationError("stderr capture sink must be empty")
+        stderr_sink.append(completed.stderr)
     return completed.stdout
 
 
@@ -1928,6 +1933,57 @@ def _validate_mock_agent_cleanup(path: Path) -> None:
         raise VerificationError("wheel smoke left a mock agent process running")
 
 
+def _validate_diagnostic_ready_stderr(stderr: str, production: Path) -> None:
+    prefix = "troupe: diagnostic ready "
+    if not stderr.endswith("\n") or stderr.count("\n") != 1:
+        raise VerificationError("packaged Production stderr is not one readiness line")
+    line = stderr.removesuffix("\n")
+    if not line.startswith(prefix):
+        raise VerificationError("packaged Production did not report diagnostic readiness")
+    encoded = line.removeprefix(prefix)
+    try:
+        locator = json.loads(encoded)
+    except json.JSONDecodeError as error:
+        raise VerificationError("packaged diagnostic readiness is not JSON") from error
+    fields = {
+        "locator_schema_version",
+        "run_id",
+        "local_url",
+        "advertise_url",
+        "archive_directory",
+        "security_scope",
+    }
+    if not isinstance(locator, dict) or set(locator) != fields:
+        raise VerificationError("packaged diagnostic readiness fields are not exact")
+    run_id = locator["run_id"]
+    if not isinstance(run_id, str) or re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        run_id,
+    ) is None:
+        raise VerificationError("packaged diagnostic readiness Run ID is invalid")
+    if (
+        locator["locator_schema_version"] != 1
+        or locator["advertise_url"] is not None
+        or locator["security_scope"] != "trusted_network"
+        or not isinstance(locator["local_url"], str)
+        or re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]*/", locator["local_url"])
+        is None
+    ):
+        raise VerificationError("packaged diagnostic readiness locator drifted")
+    try:
+        archive = Path(locator["archive_directory"]).resolve(strict=True)
+        archive.relative_to((production / ".troupe/diagnostics/runs").resolve(strict=True))
+    except (OSError, TypeError, ValueError) as error:
+        raise VerificationError(
+            "packaged diagnostic readiness archive escaped the Production"
+        ) from error
+    if archive.name != run_id:
+        raise VerificationError("packaged diagnostic readiness archive Run ID drifted")
+    canonical = json.dumps(locator, separators=(",", ":"), ensure_ascii=False)
+    if encoded != canonical:
+        raise VerificationError("packaged diagnostic readiness JSON is not canonical")
+
+
 def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
     diagnostics = _diagnostics_configuration(os.environ)
     child_venv = workspace / "child-venv"
@@ -2034,13 +2090,25 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
             ignore=shutil.ignore_patterns(".troupe", "__pycache__", "*.pyc", "*.pyo"),
         )
     raw_args = ["--events", str(events), "--value", "7", "input.txt"]
-    _run(
-        ["troupe", "--production", str(fixture), "--", *raw_args],
-        cwd=outside,
-        env=env,
-        forbidden_stderr="troupe:",
-        timeout=SMOKE_TIMEOUT,
-    )
+    command = ["troupe", "--production", str(fixture), "--", *raw_args]
+    if diagnostics is None:
+        _run(
+            command,
+            cwd=outside,
+            env=env,
+            forbidden_stderr="troupe:",
+            timeout=SMOKE_TIMEOUT,
+        )
+    else:
+        production_stderr: list[str] = []
+        _run(
+            command,
+            cwd=outside,
+            env=env,
+            stderr_sink=production_stderr,
+            timeout=SMOKE_TIMEOUT,
+        )
+        _validate_diagnostic_ready_stderr(production_stderr[0], fixture)
     _validate_smoke_events(events, raw_args)
     _validate_mock_agent_cleanup(workspace / "agent-events.jsonl")
     return diagnostics_result

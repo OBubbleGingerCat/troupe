@@ -363,6 +363,37 @@ def test_packaged_smoke_uses_the_existing_cli_json_order_contract() -> None:
     assert smoke.canonical_json({"z": 1, "a": 2}) == b'{"z":1,"a":2}'
 
 
+def test_packaged_production_allows_only_its_diagnostic_readiness_line(
+    tmp_path: Path,
+) -> None:
+    verifier = load_verifier()
+    production = tmp_path / "wheel_smoke_production"
+    run_id = "123e4567-e89b-42d3-a456-426614174000"
+    archive = production / ".troupe" / "diagnostics" / "runs" / run_id
+    archive.mkdir(parents=True)
+    locator = {
+        "locator_schema_version": 1,
+        "run_id": run_id,
+        "local_url": "http://127.0.0.1:41223/",
+        "advertise_url": None,
+        "archive_directory": str(archive),
+        "security_scope": "trusted_network",
+    }
+    encoded = json.dumps(locator, separators=(",", ":"))
+    verifier._validate_diagnostic_ready_stderr(
+        f"troupe: diagnostic ready {encoded}\n",
+        production,
+    )
+
+    for stderr in (
+        f"troupe: diagnostic ready {encoded}\nwarning\n",
+        f"troupe: diagnostic ready {json.dumps(locator, sort_keys=True)}\n",
+        "troupe: failed to load production\n",
+    ):
+        with pytest.raises(verifier.VerificationError):
+            verifier._validate_diagnostic_ready_stderr(stderr, production)
+
+
 def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
     tmp_path: Path,
 ) -> None:
