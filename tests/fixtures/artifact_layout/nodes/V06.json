@@ -1,6 +1,13 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/test_diagnostics_e2e_failures.sh",
+    "tests/e2e/diagnostics_failures/child_harness.py",
+    "tests/e2e/diagnostics_failures/fault_adapter.py",
+    "tests/e2e/diagnostics_failures/matrix.json",
+    "tests/e2e/diagnostics_failures/oracle.py",
+    "tests/e2e/diagnostics_failures/runner.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []

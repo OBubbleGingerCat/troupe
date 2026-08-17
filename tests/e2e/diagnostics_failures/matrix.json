@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "execution": {
+    "port": 0,
+    "isolated_temp_per_child": true,
+    "child_process_boundary": true,
+    "deterministic_faults": true,
+    "real_disk_fill": false
+  },
+  "cases": [
+    {
+      "id": "startup-archive-lease",
+      "phase": "startup",
+      "adapter": "startup_archive_lease",
+      "checks": [
+        {"id": "startup.state_path", "outcome": "startup_fatal"},
+        {"id": "startup.write_probe", "outcome": "startup_fatal"},
+        {"id": "startup.active_lease", "outcome": "startup_fatal"},
+        {"id": "startup.pre_import", "outcome": "startup_fatal"},
+        {"id": "startup.rollback_resources", "outcome": "resource_released"},
+        {"id": "shutdown.hard_crash", "outcome": "crash_incomplete"},
+        {"id": "shutdown.no_residue", "outcome": "resource_released"}
+      ]
+    },
+    {
+      "id": "startup-store-registry-server",
+      "phase": "startup",
+      "adapter": "startup_store_registry_server",
+      "checks": [
+        {"id": "startup.schema", "outcome": "startup_fatal"},
+        {"id": "startup.initial_commit", "outcome": "startup_fatal"},
+        {"id": "startup.bind", "outcome": "startup_fatal"},
+        {"id": "startup.registry_publish", "outcome": "startup_fatal"},
+        {"id": "runtime.server_execution_context", "outcome": "runtime_fatal"},
+        {"id": "runtime.listener", "outcome": "runtime_fatal"},
+        {"id": "runtime.storage_permission", "outcome": "runtime_fatal"},
+        {"id": "local.single_client", "outcome": "operation_local"},
+        {"id": "local.single_request", "outcome": "operation_local"},
+        {"id": "local.invalid_request", "outcome": "operation_local"},
+        {"id": "shutdown.registry_unpublish", "outcome": "shutdown_fatal"}
+      ]
+    },
+    {
+      "id": "startup-bootstrap-views",
+      "phase": "startup",
+      "adapter": "startup_bootstrap_views",
+      "checks": [
+        {"id": "startup.view_invalid", "outcome": "user_startup_failure"},
+        {"id": "startup.view_duplicate", "outcome": "user_startup_failure"},
+        {"id": "startup.view_incompatible", "outcome": "user_startup_failure"},
+        {"id": "startup.view_constructor_not_run", "outcome": "user_startup_failure"},
+        {"id": "startup.view_user_failure_clean", "outcome": "clean_terminal"},
+        {"id": "startup.view_commit_incomplete", "outcome": "startup_fatal"},
+        {"id": "startup.view_finalization_incomplete", "outcome": "startup_fatal"}
+      ]
+    },
+    {
+      "id": "runtime-admission-writer",
+      "phase": "runtime",
+      "adapter": "runtime_admission_writer",
+      "checks": [
+        {"id": "runtime.hub", "outcome": "runtime_fatal"},
+        {"id": "runtime.admission_event_boundary", "outcome": "runtime_fatal"},
+        {"id": "runtime.admission_byte_boundary", "outcome": "runtime_fatal"},
+        {"id": "runtime.writer_queue", "outcome": "runtime_fatal"},
+        {"id": "runtime.writer_transaction", "outcome": "runtime_fatal"},
+        {"id": "runtime.writer_commit", "outcome": "runtime_fatal"},
+        {"id": "runtime.storage_disk", "outcome": "runtime_fatal"},
+        {"id": "shutdown.dense_prefix", "outcome": "crash_incomplete"}
+      ]
+    },
+    {
+      "id": "runtime-progress-quota",
+      "phase": "runtime",
+      "adapter": "runtime_progress_quota",
+      "checks": [
+        {"id": "runtime.writer_stall", "outcome": "runtime_fatal"},
+        {"id": "runtime.run_quota", "outcome": "runtime_fatal"},
+        {"id": "shutdown.drain_timeout", "outcome": "shutdown_fatal"},
+        {"id": "limits.default_ingress", "outcome": "deterministic_boundary"},
+        {"id": "limits.batch", "outcome": "deterministic_boundary"},
+        {"id": "limits.deadlines", "outcome": "deterministic_boundary"},
+        {"id": "limits.deterministic_clock", "outcome": "deterministic_boundary"}
+      ]
+    },
+    {
+      "id": "runtime-active-queries",
+      "phase": "runtime",
+      "adapter": "runtime_active_queries",
+      "checks": [
+        {"id": "runtime.active_reader_corruption", "outcome": "runtime_fatal"},
+        {"id": "runtime.active_reader_identity", "outcome": "runtime_fatal"},
+        {"id": "runtime.active_reader_dense_prefix", "outcome": "runtime_fatal"},
+        {"id": "runtime.query_execution_context", "outcome": "runtime_fatal"},
+        {"id": "local.archive_reader", "outcome": "operation_local"},
+        {"id": "local.archive_query", "outcome": "operation_local"},
+        {"id": "local.archive_store", "outcome": "operation_local"},
+        {"id": "shutdown.archive_readable", "outcome": "archive_readable"}
+      ]
+    },
+    {
+      "id": "runtime-views-sse",
+      "phase": "runtime",
+      "adapter": "runtime_views_sse",
+      "checks": [
+        {"id": "runtime.view_worker", "outcome": "runtime_fatal"},
+        {"id": "runtime.sse_reader", "outcome": "runtime_fatal"},
+        {"id": "local.sse_slow_client", "outcome": "operation_local"},
+        {"id": "local.sse_overflow", "outcome": "operation_local"}
+      ]
+    },
+    {
+      "id": "local-exporter",
+      "phase": "local",
+      "adapter": "local_exporter",
+      "checks": [
+        {"id": "local.exporter", "outcome": "operation_local"},
+        {"id": "shutdown.stream_peer_disconnect", "outcome": "operation_local"}
+      ]
+    },
+    {
+      "id": "usage-terminal-matrix",
+      "phase": "usage",
+      "adapter": "usage_terminal_matrix",
+      "checks": [
+        {"id": "usage.prompt_not_submitted", "outcome": "usage_terminal"},
+        {"id": "usage.session_terminal_unknown", "outcome": "usage_terminal"},
+        {"id": "usage.authoritative_race", "outcome": "usage_terminal"},
+        {"id": "usage.exactly_once", "outcome": "usage_terminal"},
+        {"id": "usage.mandatory_ack", "outcome": "usage_terminal"},
+        {"id": "usage.before_act_finish", "outcome": "usage_terminal"}
+      ]
+    },
+    {
+      "id": "sink-queue-dispatch",
+      "phase": "sink",
+      "adapter": "sink_queue_dispatch",
+      "checks": [
+        {"id": "local.sink_overflow", "outcome": "sink_local"},
+        {"id": "sink.unexpected_enqueue_once", "outcome": "sink_local"},
+        {"id": "sink.drop_counter", "outcome": "sink_local"},
+        {"id": "sink.drop_summary", "outcome": "sink_local"},
+        {"id": "sink.counter_failure_nonrecursive", "outcome": "sink_local"}
+      ]
+    },
+    {
+      "id": "sink-callback-live",
+      "phase": "sink",
+      "adapter": "sink_callback_live",
+      "checks": [
+        {"id": "local.sink_callback", "outcome": "sink_local"},
+        {"id": "sink.callback_component_once", "outcome": "sink_local"},
+        {"id": "sink.failure_visible_store_http_cli", "outcome": "sink_local"},
+        {"id": "sink.failure_not_redelivered", "outcome": "sink_local"},
+        {"id": "sink.production_continues", "outcome": "sink_local"}
+      ]
+    },
+    {
+      "id": "shutdown-convergence",
+      "phase": "shutdown",
+      "adapter": "shutdown_convergence",
+      "checks": [
+        {"id": "runtime.first_cause", "outcome": "runtime_fatal"},
+        {"id": "runtime.stop_production", "outcome": "runtime_fatal"},
+        {"id": "shutdown.terminal_commit", "outcome": "clean_terminal"},
+        {"id": "shutdown.resource_close", "outcome": "resource_released"},
+        {"id": "shutdown.clean_shutdown", "outcome": "clean_terminal"},
+        {"id": "shutdown.incomplete_on_failure", "outcome": "shutdown_fatal"}
+      ]
+    }
+  ]
+}
