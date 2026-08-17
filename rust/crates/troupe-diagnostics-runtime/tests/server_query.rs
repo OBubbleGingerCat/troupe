@@ -1059,7 +1059,8 @@ def reject_untyped_integers(value, path="response"):
 for value in (status, snapshot, events, error):
     reject_untyped_integers(value)
 "#;
-    let output = Command::new("python3")
+    let python = std::env::var_os("PYO3_PYTHON").unwrap_or_else(|| "python3".into());
+    let output = Command::new(python)
         .args(["-c", script])
         .current_dir(repository_root())
         .output()
