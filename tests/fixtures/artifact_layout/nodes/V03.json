@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/test_diagnostics_final.sh",
+    "tests/unit/test_diagnostics_final_runner.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []

@@ -1,7 +1,27 @@
 {
-  "state": "planned",
-  "argv": [],
-  "env": {},
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_diagnostics_final_runner.py"
+    ],
+    [
+      "scripts/test_diagnostics_final.sh",
+      "--verify-dispatch",
+      "--evidence-root",
+      "${TROUPE_GATE_TMP:?}/evidence/attempts/00000000-0000-4000-8000-000000000003",
+      "--acceptance-path",
+      "${TROUPE_GATE_TMP:?}/evidence/accepted.json",
+      "--attempt-id",
+      "00000000-0000-4000-8000-000000000003",
+      "--integration-sha",
+      "1111111111111111111111111111111111111111"
+    ]
+  ],
+  "env": {
+    "TROUPE_GATE_TMP": "required"
+  },
   "maturin_features": [],
   "cache_requirements": [],
   "exclusive_resources": []
