@@ -1,7 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/integration/test_diagnostic_activation.py"
+  ],
+  "modified": [
+    "rust/src/application/cli.rs",
+    "rust/src/diagnostic_runtime/activation.rs"
+  ],
   "removed": [],
   "generated": []
 }

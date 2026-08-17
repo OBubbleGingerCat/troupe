@@ -14,8 +14,9 @@ use crate::application::diagnostics::{
 };
 use crate::application::failure::ProductionFailed;
 use crate::application::invocation::{InvocationError, ParsedInvocation, parse_arguments};
-use crate::application::loader::{ProductionLoadError, load_production};
+use crate::application::loader::ProductionLoadError;
 use crate::application::signals::SignalGuard;
+use crate::diagnostic_runtime::{activation, runtime_producer};
 use crate::orchestration::production::Production;
 use crate::orchestration::python_task::create_run_binding;
 use crate::orchestration::runtime::{RuntimeCore, run_lifecycle};
@@ -236,7 +237,7 @@ fn run_diagnostic(py: Python<'_>, command: DiagnosticCommand) -> PyResult<i32> {
 
 #[pyfunction]
 pub fn main(py: Python<'_>) -> PyResult<i32> {
-    let (path, _diagnostics, production_args) = match invocation(py)? {
+    let (path, diagnostics, production_args) = match invocation(py)? {
         Invocation::Production {
             path,
             diagnostics,
@@ -246,16 +247,24 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
         Invocation::Exit(code) => return Ok(code),
     };
 
-    let production = match load_production(py, path.bind(py), production_args.bind(py)) {
-        Ok(production) => production,
-        Err(error) if error.is_instance_of::<ProductionLoadError>(py) => {
-            let value = error.value(py).cast::<PyBaseException>()?;
-            let rendered = format_load_failure(py, value)?;
-            write_stderr(py, &rendered)?;
-            return Ok(1);
-        }
-        Err(error) => return Err(error),
-    };
+    let activated =
+        match activation::activate(py, path.bind(py), production_args.bind(py), diagnostics) {
+            Ok(activated) => activated,
+            Err(error) => match error.into_python() {
+                Ok(error) if error.is_instance_of::<ProductionLoadError>(py) => {
+                    let value = error.value(py).cast::<PyBaseException>()?;
+                    let rendered = format_load_failure(py, value)?;
+                    write_stderr(py, &rendered)?;
+                    return Ok(1);
+                }
+                Ok(error) => return Err(error),
+                Err(error) => {
+                    write_stream(py, "stderr", &error.line())?;
+                    return Ok(1);
+                }
+            },
+        };
+    let (production, diagnostic_runtime) = activated.into_parts();
 
     let core = Arc::new(RuntimeCore::new());
     let guard = SignalGuard::install(py, Arc::clone(&core))?;
@@ -267,6 +276,11 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
         let locals = Python::attach(pyo3_async_runtimes::tokio::get_current_locals)?;
         let result = async {
             let binding = create_run_binding(&locals, &production).await?;
+            Python::attach(|py| {
+                let production_state = production.bind(py).cast::<Production>()?.borrow().state();
+                activation::bind_run(py, &core, &production_state, &binding)
+            })?;
+            runtime_producer::run_started(&core, &binding);
             run_lifecycle(permit, locals, production, binding).await
         }
         .await;
@@ -274,16 +288,24 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
         result
     });
     let restore_result = guard.restore(py);
+    let diagnostic_shutdown = diagnostic_runtime.shutdown();
 
-    match (run_result, restore_result) {
-        (Err(error), _) if error.is_instance_of::<ProductionFailed>(py) => {
+    match (run_result, restore_result, diagnostic_shutdown) {
+        (Err(error), _, shutdown) if error.is_instance_of::<ProductionFailed>(py) => {
             let value = error.value(py).cast::<PyBaseException>()?;
             let rendered = format_lifecycle_failure(py, value)?;
             write_stderr(py, &rendered)?;
+            if let Err(error) = shutdown {
+                write_stream(py, "stderr", &error.line())?;
+            }
             Ok(1)
         }
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(0),
+        (Err(error), _, _) => Err(error),
+        (Ok(()), Err(error), _) => Err(error),
+        (Ok(()), Ok(()), Err(error)) => {
+            write_stream(py, "stderr", &error.line())?;
+            Ok(1)
+        }
+        (Ok(()), Ok(()), Ok(())) => Ok(0),
     }
 }

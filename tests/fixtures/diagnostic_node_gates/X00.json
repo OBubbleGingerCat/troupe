@@ -1,6 +1,14 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/integration/test_diagnostic_activation.py",
+      "tests/integration/test_cli.py",
+      "tests/integration/test_lifecycle.py"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
