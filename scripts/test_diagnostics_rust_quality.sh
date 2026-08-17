@@ -95,6 +95,10 @@ trap cleanup EXIT
 
 export CARGO_NET_OFFLINE=true
 export CARGO_TERM_COLOR=never
+# Keep the all-targets libtest run deterministic on high-core hosts. Several
+# tests intentionally coordinate blocking worker threads, and unconstrained
+# libtest fan-out can starve those workers without exercising product code.
+export RUST_TEST_THREADS=1
 export HTTP_PROXY=http://127.0.0.1:9/
 export HTTPS_PROXY=http://127.0.0.1:9/
 export http_proxy=http://127.0.0.1:9/
