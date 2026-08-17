@@ -53,7 +53,7 @@ def sha256_file(path: Path) -> str:
 
 
 def canonical_json(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
 
 def read_ready_line(

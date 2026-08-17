@@ -20,6 +20,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_RELATIVE = Path("scripts/test_diagnostics_wheel.sh")
 SCRIPT = ROOT / SCRIPT_RELATIVE
+SMOKE_RELATIVE = Path("tests/release/diagnostics_wheel_smoke.py")
 EXPECTED_RELATIVE = Path("tests/fixtures/release/diagnostics-wheel-expected.json")
 SCHEMA_RELATIVE = Path("tests/fixtures/release/diagnostics-wheel-report-schema.json")
 ARTIFACT_RELATIVE = Path("tests/fixtures/artifact_layout/nodes/V07.json")
@@ -140,6 +141,15 @@ def load_json(path: Path) -> dict[str, Any]:
 def load_verifier() -> ModuleType:
     path = ROOT / "scripts/verify_wheel.py"
     spec = importlib.util.spec_from_file_location("_troupe_v07_verify_wheel", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_smoke() -> ModuleType:
+    path = ROOT / SMOKE_RELATIVE
+    spec = importlib.util.spec_from_file_location("_troupe_v07_wheel_smoke", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -342,6 +352,14 @@ def test_sdist_build_system_uses_the_json_contract_key_names(tmp_path: Path) -> 
         match="build requirement is not exactly maturin",
     ):
         verifier._validate_build_system(sdist, expected)
+
+
+def test_packaged_smoke_uses_the_existing_cli_json_order_contract() -> None:
+    smoke = load_smoke()
+    assert smoke.canonical_json({"schema": "test", "source": "active"}) == (
+        b'{"schema":"test","source":"active"}'
+    )
+    assert smoke.canonical_json({"z": 1, "a": 2}) == b'{"z":1,"a":2}'
 
 
 def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
