@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://troupe.local/schemas/diagnostics-accepted-evidence-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "attempt_id", "identity", "cache", "reports", "result"],
+  "properties": {
+    "schema": { "const": "troupe.diagnostics.accepted-evidence.v1" },
+    "attempt_id": { "$ref": "#/$defs/uuid" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "cache": { "$ref": "#/$defs/cache" },
+    "reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["performance", "wheel", "final"],
+      "properties": {
+        "performance": { "$ref": "#/$defs/report" },
+        "wheel": { "$ref": "#/$defs/report" },
+        "final": { "$ref": "#/$defs/report" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "result_sha256"],
+      "properties": {
+        "status": { "const": "accepted" },
+        "result_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor_design_sha256", "diagnostics_design_sha256", "plan_sha256", "validator_sha256", "review_record_sha256", "integration_sha"],
+      "properties": {
+        "actor_design_sha256": { "$ref": "#/$defs/sha256" },
+        "diagnostics_design_sha256": { "$ref": "#/$defs/sha256" },
+        "plan_sha256": { "$ref": "#/$defs/sha256" },
+        "validator_sha256": { "$ref": "#/$defs/sha256" },
+        "review_record_sha256": { "$ref": "#/$defs/sha256" },
+        "integration_sha": { "$ref": "#/$defs/commit" }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["npm_manifest_sha256", "playwright_identity_sha256", "perfetto_identity_sha256", "performance_report_cache_sha256", "wheel_report_cache_sha256", "aggregate_sha256"],
+      "properties": {
+        "npm_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "playwright_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "perfetto_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "performance_report_cache_sha256": { "$ref": "#/$defs/sha256" },
+        "wheel_report_cache_sha256": { "$ref": "#/$defs/sha256" },
+        "aggregate_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "result_sha256"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^attempts/[0-9a-f-]+/V(?:05-performance-raw|07-wheel-report|03-final-evidence)\\.json$" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "result_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}
