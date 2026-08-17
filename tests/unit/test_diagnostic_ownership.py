@@ -624,7 +624,7 @@ def test_base_snapshot_rejects_deleted_added_or_rewritten_artifacts(
         base["rust_sources"].append("src/not-a-real-source.rs")
     else:
         data = b"rewritten\n"
-        base["package_files"]["__init__.py"] = {
+        base["package_files"]["py.typed"] = {
             "base64": base64.b64encode(data).decode("ascii"),
             "sha256": hashlib.sha256(data).hexdigest(),
         }

@@ -883,8 +883,13 @@ def test_rust_manifest_and_source_boundary() -> None:
     invocation_source = (ROOT / "rust" / "src" / "application" / "invocation.rs").read_text(
         encoding="utf-8"
     )
-    assert "#[derive(Parser)]" in invocation_source
-    assert "::try_parse_from" in invocation_source
+    argument_source = (
+        ROOT / "rust" / "src" / "application" / "diagnostic_cli" / "args.rs"
+    ).read_text(encoding="utf-8")
+    assert "#[derive(Clone, Debug, Parser, Eq, PartialEq)]" in argument_source
+    assert "TroupeArgs::command()" in invocation_source
+    assert ".try_get_matches_from" in invocation_source
+    assert "TroupeArgs::from_arg_matches" in invocation_source
     assert "#[pymodule(gil_used = true)]" in (
         ROOT / "rust" / "src" / "lib.rs"
     ).read_text(encoding="utf-8")
