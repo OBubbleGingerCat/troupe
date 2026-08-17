@@ -231,7 +231,7 @@ def test_checked_in_contract_and_descriptors_are_exact() -> None:
             ["pytest", "-q", "tests/unit/test_diagnostics_python_quality_runner.py"],
             ["scripts/test_diagnostics_python_quality.sh", "--all"],
         ],
-        "env": {"TROUPE_GATE_TMP": "optional"},
+        "env": {"TROUPE_GATE_TMP": "forbidden"},
         "maturin_features": [
             "agent-test-support",
             "diagnostics-test-support",

@@ -582,6 +582,18 @@ def test_descriptor_npm_cache_removes_implicit_cache_and_registry_authority() ->
     } & {"npm_config_cache", "npm_config_registry"}
 
 
+def test_descriptor_forbidden_environment_is_removed_from_child() -> None:
+    environment = gate._descriptor_environment(
+        "V14",
+        {"TROUPE_GATE_TMP": "/owned/repository-temp", "PATH": "/usr/bin:/bin"},
+        {"TROUPE_GATE_TMP": "forbidden"},
+        (),
+    )
+
+    assert "TROUPE_GATE_TMP" not in environment
+    assert environment["PATH"] == "/usr/bin:/bin"
+
+
 @pytest.mark.parametrize("value", [None, ""])
 def test_descriptor_cache_requirement_rejects_missing_or_empty_caller_value(
     value: str | None,

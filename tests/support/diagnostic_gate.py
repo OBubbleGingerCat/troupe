@@ -692,6 +692,8 @@ def _descriptor_environment(
             value = caller_values.get(name)
             if value is not None:
                 result[name] = value
+        elif policy == "forbidden":
+            result.pop(name, None)
         else:
             result[name] = policy
     for cache in cache_requirements:

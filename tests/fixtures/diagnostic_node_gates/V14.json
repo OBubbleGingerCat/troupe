@@ -12,7 +12,7 @@
     ]
   ],
   "env": {
-    "TROUPE_GATE_TMP": "optional"
+    "TROUPE_GATE_TMP": "forbidden"
   },
   "maturin_features": [
     "agent-test-support",
