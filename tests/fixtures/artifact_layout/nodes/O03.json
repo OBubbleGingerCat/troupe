@@ -1,6 +1,10 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "docs/diagnostics/cli.md",
+    "docs/diagnostics/perfetto.md",
+    "tests/documentation/test_diagnostics_cli_perfetto.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
