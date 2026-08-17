@@ -1,0 +1,28 @@
+{
+  "schema": "troupe.diagnostics.performance-baseline.v1",
+  "repeat": 3,
+  "workload": {
+    "long_run_events": 12000,
+    "pause_events": 4000,
+    "visible_primitives": 10000,
+    "hit_tests": 2000,
+    "rerenders_per_frame": 100,
+    "query_entries": 80,
+    "activated_windows": 8
+  },
+  "limits": {
+    "duration_ms": {
+      "state_reduce_ms": 500,
+      "pause_reduce_ms": 300,
+      "timeline_layout_ms": 50,
+      "timeline_draw_ms": 50,
+      "hit_test_ms": 20,
+      "raf_updates_ms": 75
+    },
+    "duration_variance_floor_ms": 5,
+    "heap_peak_bytes": 16777216,
+    "heap_retained_bytes": 8388608,
+    "heap_recovery_ratio": 0.9,
+    "run_variance_ratio": 0.6
+  }
+}
