@@ -1,6 +1,10 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/test_diagnostics_frontend_release.sh",
+    "tests/fixtures/release/frontend-asset-contract.json",
+    "tests/unit/test_diagnostics_frontend_release_runner.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
