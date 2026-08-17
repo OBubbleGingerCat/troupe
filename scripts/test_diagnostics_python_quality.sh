@@ -52,11 +52,22 @@ checkout_fingerprint() {
 }
 
 initial_checkout="$(checkout_fingerprint)" || exit 1
-temporary_base="${TMPDIR:-/tmp}"
+temporary_base="${TROUPE_GATE_TMP:-/tmp}"
 temporary_base="$(CDPATH= cd -- "$temporary_base" && pwd -P)" || exit 1
+case "$temporary_base/" in
+  "$repository_root/"*)
+    printf 'Python quality temporary base must remain outside the repository\n' >&2
+    exit 1
+    ;;
+esac
 quality_root="$(mktemp -d -- "$temporary_base/troupe-python-quality.XXXXXX")" || exit 1
 ownership_marker="$quality_root/.troupe-python-quality-owned"
 if ! (umask 077 && : > "$ownership_marker"); then
+  rmdir -- "$quality_root" 2>/dev/null || true
+  exit 1
+fi
+if ! mkdir -m 700 -- "$quality_root/tmp"; then
+  rm -f -- "$ownership_marker"
   rmdir -- "$quality_root" 2>/dev/null || true
   exit 1
 fi
@@ -82,6 +93,8 @@ trap cleanup EXIT
 export PYTHONDONTWRITEBYTECODE=1
 export PYTEST_ADDOPTS='-p no:cacheprovider'
 export MYPY_CACHE_DIR="$quality_root/mypy-cache"
+export TMPDIR="$quality_root/tmp"
+export TMP="$quality_root/tmp"
 export CARGO_NET_OFFLINE=true
 export PIP_NO_INDEX=1
 export UV_OFFLINE=1

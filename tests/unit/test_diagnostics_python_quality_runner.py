@@ -49,6 +49,7 @@ record = {
     "project_environment": os.environ.get("UV_PROJECT_ENVIRONMENT"),
     "pythonpath": os.environ.get("PYTHONPATH"),
     "mypy_cache": os.environ.get("MYPY_CACHE_DIR"),
+    "tmpdir": os.environ.get("TMPDIR"),
     "pytest_addopts": os.environ.get("PYTEST_ADDOPTS"),
     "cargo_offline": os.environ.get("CARGO_NET_OFFLINE"),
     "pip_no_index": os.environ.get("PIP_NO_INDEX"),
@@ -150,6 +151,7 @@ def _sandbox(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
             "PATH": f"{tools}:{environment['PATH']}",
             "PYO3_PYTHON": str(tools / "python"),
             "TMPDIR": str(temporary),
+            "TROUPE_GATE_TMP": str(temporary),
             "TROUPE_PYTHON_QUALITY_LOG": str(log),
             "UV_PROJECT_ENVIRONMENT": str(venv),
         }
@@ -217,7 +219,7 @@ def test_checked_in_contract_and_descriptors_are_exact() -> None:
             ["pytest", "-q", "tests/unit/test_diagnostics_python_quality_runner.py"],
             ["scripts/test_diagnostics_python_quality.sh", "--all"],
         ],
-        "env": {},
+        "env": {"TROUPE_GATE_TMP": "optional"},
         "maturin_features": [
             "agent-test-support",
             "diagnostics-test-support",
@@ -263,6 +265,9 @@ def test_all_runs_exact_offline_modes_and_emits_one_summary(tmp_path: Path) -> N
     assert len(mypy_caches) == 1
     mypy_cache = Path(mypy_caches.pop())
     assert mypy_cache.parent.parent == Path(environment["TMPDIR"])
+    child_tmpdirs = {Path(record["tmpdir"]) for record in records}
+    assert len(child_tmpdirs) == 1
+    assert child_tmpdirs.pop().parent == mypy_cache.parent
     assert not mypy_cache.parent.exists()
     assert {path.name for path in Path(environment["TMPDIR"]).iterdir()} == {"caller-owned"}
     summary = _summary(result)
@@ -328,6 +333,20 @@ def test_origin_failure_stops_before_quality_modes(tmp_path: Path) -> None:
     assert "requires F03 isolated wheel environment" in result.stderr
     assert [record["mode"] for record in _records(log)] == ["origin"]
     assert {path.name for path in Path(environment["TMPDIR"]).iterdir()} == {"caller-owned"}
+
+
+def test_repository_local_temporary_base_is_rejected_before_tools(tmp_path: Path) -> None:
+    repository, environment, log, _ = _sandbox(tmp_path)
+    local = repository / "temporary"
+    local.mkdir()
+    environment["TROUPE_GATE_TMP"] = str(local)
+
+    result = _run(repository, environment)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "must remain outside the repository" in result.stderr
+    assert _records(log) == []
 
 
 def test_checkout_mutation_is_blocking_after_all_mode_results(tmp_path: Path) -> None:

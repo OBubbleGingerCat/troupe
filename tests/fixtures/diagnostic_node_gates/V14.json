@@ -11,7 +11,9 @@
       "--all"
     ]
   ],
-  "env": {},
+  "env": {
+    "TROUPE_GATE_TMP": "optional"
+  },
   "maturin_features": [
     "agent-test-support",
     "diagnostics-test-support"
