@@ -88,6 +88,7 @@ DIAGNOSTICS_REPORT_SCHEMA = (
     ROOT / "tests/fixtures/release/diagnostics-wheel-report-schema.json"
 )
 DIAGNOSTICS_SMOKE = ROOT / "tests/release/diagnostics_wheel_smoke.py"
+WHEEL_SMOKE_PRODUCTION = "wheel_smoke_production"
 DIAGNOSTICS_ENVIRONMENT = {
     "offline": "TROUPE_DIAGNOSTICS_WHEEL_OFFLINE",
     "smoke": "TROUPE_DIAGNOSTICS_WHEEL_SMOKE",
@@ -2021,12 +2022,12 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
 
     events = workspace / "events.json"
     source_fixture = (
-        ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+        ROOT / "tests" / "fixtures" / "productions" / WHEEL_SMOKE_PRODUCTION
     )
     if diagnostics is None:
         fixture = source_fixture
     else:
-        fixture = workspace / "wheel-smoke-production"
+        fixture = workspace / WHEEL_SMOKE_PRODUCTION
         shutil.copytree(
             source_fixture,
             fixture,

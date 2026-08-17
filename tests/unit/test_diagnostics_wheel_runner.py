@@ -287,6 +287,7 @@ def test_verifier_uses_the_realized_repository_contract() -> None:
     verifier = load_verifier()
     expected = load_json(ROOT / EXPECTED_RELATIVE)
 
+    assert verifier.WHEEL_SMOKE_PRODUCTION.isidentifier()
     assert sorted(verifier._validate_source(verifier.SOURCE_PACKAGE)) == [
         "__init__.py",
         "__init__.pyi",
