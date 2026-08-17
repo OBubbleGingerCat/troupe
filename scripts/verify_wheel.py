@@ -9,8 +9,11 @@ import io
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -22,7 +25,12 @@ from email.message import Message
 from email.parser import BytesParser
 from email.policy import default
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # Python 3.10 maintainer environment.
+    import tomli as tomllib
 
 from wheel.wheelfile import WheelError, WheelFile
 
@@ -43,10 +51,267 @@ EXPECTED_PY_TYPED = BASE_ARTIFACTS.package_files["py.typed"].data
 PUBLIC_EXPORTS = list(BASE_ARTIFACTS.public_exports)
 EXPECTED_EXAMPLE_FILES = tuple(BASE_ARTIFACTS.examples)
 SMOKE_TIMEOUT = 10.0
+DIAGNOSTICS_SMOKE_TIMEOUT = 60.0
+DIAGNOSTICS_EXPECTED = ROOT / "tests/fixtures/release/diagnostics-wheel-expected.json"
+DIAGNOSTICS_REPORT_SCHEMA = (
+    ROOT / "tests/fixtures/release/diagnostics-wheel-report-schema.json"
+)
+DIAGNOSTICS_SMOKE = ROOT / "tests/release/diagnostics_wheel_smoke.py"
+DIAGNOSTICS_ENVIRONMENT = {
+    "offline": "TROUPE_DIAGNOSTICS_WHEEL_OFFLINE",
+    "smoke": "TROUPE_DIAGNOSTICS_WHEEL_SMOKE",
+    "report": "TROUPE_DIAGNOSTICS_WHEEL_REPORT",
+    "expected": "TROUPE_DIAGNOSTICS_WHEEL_EXPECTED",
+    "report_schema": "TROUPE_DIAGNOSTICS_WHEEL_REPORT_SCHEMA",
+}
 
 
 class VerificationError(Exception):
     pass
+
+
+def _pairs_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise VerificationError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as error:
+        raise VerificationError(f"could not hash {path}: {error}") from error
+    return digest.hexdigest()
+
+
+def _load_json_object(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+        payload = path.read_bytes()
+    except OSError as error:
+        raise VerificationError(f"could not read {label}: {error}") from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or resolved != path
+    ):
+        raise VerificationError(f"{label} must be an exact regular file")
+    try:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_pairs_object)
+    except VerificationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"{label} is not valid UTF-8 JSON") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"{label} must contain an object")
+    return value, payload
+
+
+def _diagnostics_configuration(
+    environ: Mapping[str, str],
+) -> dict[str, object] | None:
+    values = {
+        field: environ.get(environment_name)
+        for field, environment_name in DIAGNOSTICS_ENVIRONMENT.items()
+    }
+    present = {field for field, value in values.items() if value is not None}
+    if not present:
+        return None
+    if present != set(DIAGNOSTICS_ENVIRONMENT):
+        missing = sorted(set(DIAGNOSTICS_ENVIRONMENT) - present)
+        raise VerificationError(
+            f"diagnostics wheel environment is incomplete: missing {missing}"
+        )
+    if values["offline"] != "1":
+        raise VerificationError("diagnostics wheel build must be offline")
+    if values["smoke"] != "active,archive":
+        raise VerificationError(
+            "diagnostics wheel smoke must be exactly active,archive"
+        )
+
+    report = Path(str(values["report"]))
+    if not report.is_absolute() or str(report) != os.path.abspath(report):
+        raise VerificationError(
+            "diagnostics wheel report path must be canonical and absolute"
+        )
+    try:
+        parent_metadata = report.parent.lstat()
+        parent_resolved = report.parent.resolve(strict=True)
+    except OSError as error:
+        raise VerificationError(
+            f"diagnostics wheel report parent is unavailable: {error}"
+        ) from error
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or parent_resolved != report.parent
+    ):
+        raise VerificationError(
+            "diagnostics wheel report parent must be an exact directory"
+        )
+    if report.exists() or report.is_symlink():
+        raise VerificationError("diagnostics wheel report already exists")
+
+    expected = Path(str(values["expected"]))
+    report_schema = Path(str(values["report_schema"]))
+    try:
+        expected_resolved = expected.resolve(strict=True)
+        schema_resolved = report_schema.resolve(strict=True)
+    except OSError as error:
+        raise VerificationError(
+            f"diagnostics wheel contract is unavailable: {error}"
+        ) from error
+    if expected_resolved != DIAGNOSTICS_EXPECTED or expected != expected_resolved:
+        raise VerificationError("diagnostics wheel expected contract path is not exact")
+    if schema_resolved != DIAGNOSTICS_REPORT_SCHEMA or report_schema != schema_resolved:
+        raise VerificationError("diagnostics wheel report schema path is not exact")
+    return {
+        "offline": True,
+        "smoke": ("active", "archive"),
+        "report": report,
+        "expected": expected,
+        "report_schema": report_schema,
+    }
+
+
+def _schema_target(schema: Mapping[str, Any], reference: str) -> Mapping[str, Any]:
+    if not reference.startswith("#/"):
+        raise VerificationError(f"unsupported report schema reference: {reference}")
+    value: Any = schema
+    for raw in reference[2:].split("/"):
+        key = raw.replace("~1", "/").replace("~0", "~")
+        if not isinstance(value, dict) or key not in value:
+            raise VerificationError(f"unresolved report schema reference: {reference}")
+        value = value[key]
+    if not isinstance(value, dict):
+        raise VerificationError(
+            f"report schema reference is not an object: {reference}"
+        )
+    return value
+
+
+def _validate_schema_value(
+    value: Any,
+    rule: Mapping[str, Any],
+    schema: Mapping[str, Any],
+    location: str,
+) -> None:
+    reference = rule.get("$ref")
+    if reference is not None:
+        if not isinstance(reference, str):
+            raise VerificationError("report schema $ref must be a string")
+        _validate_schema_value(
+            value, _schema_target(schema, reference), schema, location
+        )
+        return
+    if "const" in rule and value != rule["const"]:
+        raise VerificationError(f"report {location} differs from its constant")
+    if "enum" in rule and value not in rule["enum"]:
+        raise VerificationError(f"report {location} is outside its enum")
+
+    expected_type = rule.get("type")
+    matches = {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        "boolean": isinstance(value, bool),
+        "null": value is None,
+    }
+    if expected_type is not None:
+        types = [expected_type] if isinstance(expected_type, str) else expected_type
+        if not isinstance(types, list) or not all(
+            isinstance(item, str) for item in types
+        ):
+            raise VerificationError("report schema type declaration is invalid")
+        if not any(matches.get(item, False) for item in types):
+            raise VerificationError(f"report {location} has the wrong type")
+
+    if isinstance(value, dict):
+        required = rule.get("required", [])
+        properties = rule.get("properties", {})
+        if not isinstance(required, list) or not isinstance(properties, dict):
+            raise VerificationError("report schema object declaration is invalid")
+        missing = set(required) - set(value)
+        if missing:
+            raise VerificationError(f"report {location} is missing {sorted(missing)}")
+        if rule.get("additionalProperties") is False:
+            extra = set(value) - set(properties)
+            if extra:
+                raise VerificationError(
+                    f"report {location} has extra fields {sorted(extra)}"
+                )
+        for key, child in value.items():
+            child_rule = properties.get(key)
+            if child_rule is not None:
+                if not isinstance(child_rule, dict):
+                    raise VerificationError(
+                        "report schema property declaration is invalid"
+                    )
+                _validate_schema_value(child, child_rule, schema, f"{location}.{key}")
+
+    if isinstance(value, list):
+        minimum = rule.get("minItems")
+        maximum = rule.get("maxItems")
+        if minimum is not None and len(value) < minimum:
+            raise VerificationError(f"report {location} has too few items")
+        if maximum is not None and len(value) > maximum:
+            raise VerificationError(f"report {location} has too many items")
+        prefix = rule.get("prefixItems", [])
+        if not isinstance(prefix, list):
+            raise VerificationError("report schema prefixItems declaration is invalid")
+        for index, child_rule in enumerate(prefix):
+            if index >= len(value):
+                break
+            if not isinstance(child_rule, dict):
+                raise VerificationError("report schema prefix item is invalid")
+            _validate_schema_value(
+                value[index], child_rule, schema, f"{location}[{index}]"
+            )
+        items = rule.get("items")
+        if items is False and len(value) > len(prefix):
+            raise VerificationError(f"report {location} has disallowed trailing items")
+        if isinstance(items, dict):
+            start = len(prefix) if prefix else 0
+            for index in range(start, len(value)):
+                _validate_schema_value(
+                    value[index], items, schema, f"{location}[{index}]"
+                )
+
+    if isinstance(value, str):
+        minimum_length = rule.get("minLength")
+        if minimum_length is not None and len(value) < minimum_length:
+            raise VerificationError(f"report {location} is too short")
+        pattern = rule.get("pattern")
+        if pattern is not None and re.search(pattern, value) is None:
+            raise VerificationError(f"report {location} does not match its pattern")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum_value = rule.get("minimum")
+        if minimum_value is not None and value < minimum_value:
+            raise VerificationError(f"report {location} is below its minimum")
+
+
+def _validate_report_schema(
+    report: Mapping[str, Any], schema: Mapping[str, Any]
+) -> None:
+    _validate_schema_value(report, schema, schema, "root")
 
 
 def _parse_metadata(data: bytes) -> Message:
@@ -462,6 +727,519 @@ def _validate_artifacts(source_package: Path, sdist: Path, wheel: Path) -> None:
     _validate_wheel(source_package, wheel, required_manylinux=None, expected=expected)
 
 
+def _validate_expected_contract(expected: Mapping[str, Any]) -> None:
+    fields = {
+        "schema",
+        "build_system",
+        "manylinux",
+        "smoke_modes",
+        "forbidden_tools",
+        "wheel_members",
+        "allowed_elf_needed",
+        "exporter_before",
+        "size_is_informational",
+    }
+    if set(expected) != fields:
+        raise VerificationError(
+            "diagnostics wheel expected contract fields are not exact"
+        )
+    if expected["schema"] != "troupe.diagnostics.wheel-expected.v1":
+        raise VerificationError("diagnostics wheel expected contract version drifted")
+    if expected["build_system"] != {
+        "requires": ["maturin==1.14.1"],
+        "build_backend": "maturin",
+    }:
+        raise VerificationError("diagnostics wheel build system contract drifted")
+    if expected["manylinux"] != "2_17":
+        raise VerificationError("diagnostics wheel manylinux contract drifted")
+    if expected["smoke_modes"] != ["active", "archive"]:
+        raise VerificationError("diagnostics wheel smoke contract drifted")
+    if expected["wheel_members"] != list(BASE_ARTIFACTS.wheel_members):
+        raise VerificationError("diagnostics wheel member contract drifted")
+    forbidden = expected["forbidden_tools"]
+    if forbidden != [
+        "node",
+        "nodejs",
+        "npm",
+        "npx",
+        "protoc",
+        "perfetto",
+        "trace_processor_shell",
+    ]:
+        raise VerificationError("diagnostics wheel forbidden tool contract drifted")
+    needed = expected["allowed_elf_needed"]
+    if (
+        not isinstance(needed, list)
+        or not needed
+        or not all(isinstance(item, str) and item for item in needed)
+        or len(needed) != len(set(needed))
+    ):
+        raise VerificationError("diagnostics wheel ELF baseline is malformed")
+    before = expected["exporter_before"]
+    if not isinstance(before, dict) or set(before) != {
+        "source_commit",
+        "wheel_sha256",
+        "wheel_bytes",
+        "native_sha256",
+        "native_bytes",
+    }:
+        raise VerificationError("diagnostics exporter size baseline is malformed")
+    if not all(
+        isinstance(before[name], str) and re.fullmatch(r"[0-9a-f]{64}", before[name])
+        for name in ("wheel_sha256", "native_sha256")
+    ):
+        raise VerificationError("diagnostics exporter baseline hash is malformed")
+    if (
+        not isinstance(before["source_commit"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", before["source_commit"]) is None
+    ):
+        raise VerificationError("diagnostics exporter baseline commit is malformed")
+    if any(
+        not isinstance(before[name], int)
+        or isinstance(before[name], bool)
+        or before[name] <= 0
+        for name in ("wheel_bytes", "native_bytes")
+    ):
+        raise VerificationError("diagnostics exporter baseline size is malformed")
+    if expected["size_is_informational"] is not True:
+        raise VerificationError("diagnostics exporter size must remain informational")
+
+
+def _validate_build_system(sdist: Path, expected: Mapping[str, Any]) -> None:
+    try:
+        source_payload = (ROOT / "pyproject.toml").read_bytes()
+        source = tomllib.loads(source_payload.decode("utf-8"))
+        with tarfile.open(sdist, "r:*") as archive:
+            members = [
+                member
+                for member in archive.getmembers()
+                if member.isfile() and member.name.endswith("/pyproject.toml")
+            ]
+            if len(members) != 1:
+                raise VerificationError("sdist must contain exactly one pyproject.toml")
+            stream = archive.extractfile(members[0])
+            if stream is None:
+                raise VerificationError("sdist pyproject.toml is unreadable")
+            sdist_payload = stream.read()
+    except VerificationError:
+        raise
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError, tarfile.TarError) as error:
+        raise VerificationError(
+            f"could not validate wheel build system: {error}"
+        ) from error
+    if sdist_payload != source_payload:
+        raise VerificationError("sdist pyproject.toml differs from source")
+    if source.get("build-system") != expected["build_system"]:
+        raise VerificationError("pyproject build requirement is not exactly maturin")
+
+
+def _elf_needed(data: bytes) -> list[str]:
+    header_format = "<16sHHIQQQIHHHHHH"
+    section_format = "<IIQQQQIIQQ"
+    if len(data) < struct.calcsize(header_format):
+        raise VerificationError("native module is not a complete ELF file")
+    try:
+        header = struct.unpack_from(header_format, data)
+    except struct.error as error:
+        raise VerificationError("native module ELF header is malformed") from error
+    identity = header[0]
+    if identity[:4] != b"\x7fELF" or identity[4:6] != b"\x02\x01":
+        raise VerificationError("native module must be a little-endian ELF64 file")
+    if header[2] != 62:
+        raise VerificationError("native module must target ELF x86_64")
+    section_offset = header[6]
+    section_entry_size = header[11]
+    section_count = header[12]
+    if section_entry_size != struct.calcsize(section_format) or section_count == 0:
+        raise VerificationError("native module ELF section table is unsupported")
+    table_end = section_offset + section_entry_size * section_count
+    if section_offset <= 0 or table_end > len(data):
+        raise VerificationError("native module ELF section table is out of bounds")
+    sections: list[tuple[int, ...]] = []
+    try:
+        for index in range(section_count):
+            sections.append(
+                struct.unpack_from(
+                    section_format,
+                    data,
+                    section_offset + index * section_entry_size,
+                )
+            )
+    except struct.error as error:
+        raise VerificationError(
+            "native module ELF section table is malformed"
+        ) from error
+    dynamic_sections = [section for section in sections if section[1] == 6]
+    if len(dynamic_sections) != 1:
+        raise VerificationError(
+            "native module must contain exactly one ELF dynamic section"
+        )
+    dynamic = dynamic_sections[0]
+    dynamic_offset, dynamic_size, string_index, entry_size = (
+        dynamic[4],
+        dynamic[5],
+        dynamic[6],
+        dynamic[9],
+    )
+    if entry_size != 16 or dynamic_offset + dynamic_size > len(data):
+        raise VerificationError("native module ELF dynamic section is malformed")
+    if string_index >= len(sections):
+        raise VerificationError("native module ELF dynamic strings are missing")
+    strings = sections[string_index]
+    string_offset, string_size = strings[4], strings[5]
+    if string_offset + string_size > len(data):
+        raise VerificationError("native module ELF dynamic strings are out of bounds")
+    string_data = data[string_offset : string_offset + string_size]
+    needed: list[str] = []
+    try:
+        for offset in range(dynamic_offset, dynamic_offset + dynamic_size, entry_size):
+            tag, value = struct.unpack_from("<qQ", data, offset)
+            if tag == 0:
+                break
+            if tag != 1:
+                continue
+            if value >= len(string_data):
+                raise VerificationError("native module ELF DT_NEEDED offset is invalid")
+            end = string_data.find(b"\0", value)
+            if end < 0:
+                raise VerificationError("native module ELF DT_NEEDED is unterminated")
+            needed.append(string_data[value:end].decode("ascii"))
+    except (struct.error, UnicodeError) as error:
+        raise VerificationError("native module ELF DT_NEEDED is malformed") from error
+    if not needed or len(needed) != len(set(needed)):
+        raise VerificationError(
+            "native module ELF DT_NEEDED inventory is empty or duplicated"
+        )
+    return needed
+
+
+def _wheel_observation(
+    wheel: Path,
+    expected: Mapping[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    try:
+        with WheelFile(wheel) as archive:
+            infos = sorted(
+                (info for info in archive.infolist() if not info.is_dir()),
+                key=lambda info: info.filename,
+            )
+            members = []
+            native_path: str | None = None
+            native_data: bytes | None = None
+            for info in infos:
+                payload = archive.read(info.filename)
+                members.append(
+                    {
+                        "path": info.filename,
+                        "sha256": _sha256_bytes(payload),
+                        "bytes": len(payload),
+                    }
+                )
+                if re.fullmatch(
+                    r"troupe/_runtime(?:\.[A-Za-z0-9_]+)*\.so", info.filename
+                ):
+                    native_path = info.filename
+                    native_data = payload
+    except (OSError, KeyError, WheelError, zipfile.BadZipFile) as error:
+        raise VerificationError(f"could not observe wheel artifact: {error}") from error
+    if native_path is None or native_data is None:
+        raise VerificationError("wheel observation did not find its native module")
+    actual_template = [
+        "troupe/<native>" if row["path"] == native_path else row["path"]
+        for row in members
+    ]
+    if sorted(actual_template) != sorted(expected["wheel_members"]):
+        raise VerificationError(
+            "observed wheel manifest differs from its exact contract"
+        )
+    needed = _elf_needed(native_data)
+    unexpected_needed = sorted(set(needed) - set(expected["allowed_elf_needed"]))
+    if unexpected_needed:
+        raise VerificationError(
+            f"native module added ELF DT_NEEDED entries: {unexpected_needed}"
+        )
+    wheel_bytes = wheel.stat().st_size
+    return (
+        {
+            "filename": wheel.name,
+            "sha256": _sha256_path(wheel),
+            "bytes": wheel_bytes,
+            "members": members,
+            "native_path": native_path,
+            "native_sha256": _sha256_bytes(native_data),
+            "native_bytes": len(native_data),
+            "elf_needed": needed,
+        },
+        native_data,
+    )
+
+
+def _sdist_observation(sdist: Path) -> dict[str, Any]:
+    try:
+        with tarfile.open(sdist, "r:*") as archive:
+            regular_members = sum(member.isfile() for member in archive.getmembers())
+        size = sdist.stat().st_size
+    except (OSError, tarfile.TarError) as error:
+        raise VerificationError(f"could not observe sdist artifact: {error}") from error
+    return {
+        "filename": sdist.name,
+        "sha256": _sha256_path(sdist),
+        "bytes": size,
+        "regular_members": regular_members,
+    }
+
+
+def _exact_mapping(value: Any, fields: set[str], label: str) -> Mapping[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise VerificationError(f"{label} fields are not exact")
+    return value
+
+
+def _normalize_diagnostics_smoke(
+    raw: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    wheel: Mapping[str, Any],
+) -> dict[str, Any]:
+    _exact_mapping(
+        raw,
+        {
+            "modes",
+            "run_id",
+            "installed",
+            "active",
+            "archive",
+            "forbidden_tools",
+            "production_imports",
+        },
+        "diagnostics wheel smoke",
+    )
+    if raw["modes"] != expected["smoke_modes"]:
+        raise VerificationError("diagnostics wheel smoke modes drifted")
+    if raw["forbidden_tools"] != expected["forbidden_tools"]:
+        raise VerificationError("diagnostics wheel forbidden tool observation drifted")
+    if raw["production_imports"] != 1:
+        raise VerificationError("archive smoke imported the Production")
+    installed = _exact_mapping(
+        raw["installed"],
+        {"environment", "troupe_file", "native_file", "native_bytes", "native_sha256"},
+        "diagnostics wheel installed origin",
+    )
+    try:
+        environment = Path(str(installed["environment"])).resolve(strict=True)
+        for name in ("troupe_file", "native_file"):
+            Path(str(installed[name])).resolve(strict=True).relative_to(environment)
+    except (OSError, ValueError) as error:
+        raise VerificationError(
+            "diagnostics wheel smoke imported outside its child venv"
+        ) from error
+    if (
+        installed["native_sha256"] != wheel["native_sha256"]
+        or installed["native_bytes"] != wheel["native_bytes"]
+    ):
+        raise VerificationError("installed native module differs from the wheel member")
+    active = _exact_mapping(raw["active"], {"status", "ui"}, "active wheel smoke")
+    archive = _exact_mapping(
+        raw["archive"],
+        {"status", "ui", "trace_bytes", "trace_sha256"},
+        "archive wheel smoke",
+    )
+    if active["status"] != "passed" or archive["status"] != "passed":
+        raise VerificationError("diagnostics wheel smoke did not pass")
+    return {
+        "modes": list(raw["modes"]),
+        "run_id": raw["run_id"],
+        "installed_native_sha256": installed["native_sha256"],
+        "installed_native_bytes": installed["native_bytes"],
+        "active": dict(active),
+        "archive": dict(archive),
+        "forbidden_tools": list(raw["forbidden_tools"]),
+        "production_imports": raw["production_imports"],
+    }
+
+
+def _diagnostics_identity() -> dict[str, str]:
+    paths = {
+        "actor_design_sha256": ROOT / "docs/design/actor-agent-session.md",
+        "diagnostics_design_sha256": ROOT / "docs/design/production-diagnostics.md",
+        "plan_sha256": ROOT / "docs/plan/production-diagnostics-implementation-plan.md",
+        "validator_sha256": ROOT / "docs/plan/verify_production_diagnostics_plan.py",
+        "review_record_sha256": ROOT
+        / "docs/plan/production-diagnostics-plan-review-record.md",
+    }
+    identity = {name: _sha256_path(path) for name, path in paths.items()}
+    integration = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        env=_build_environment(os.environ),
+    ).strip()
+    if re.fullmatch(r"[0-9a-f]{40}", integration) is None:
+        raise VerificationError("could not bind wheel report to an integration commit")
+    identity["integration_sha"] = integration
+    return identity
+
+
+def _assemble_diagnostics_report(
+    configuration: Mapping[str, object],
+    expected: Mapping[str, Any],
+    expected_payload: bytes,
+    schema: Mapping[str, Any],
+    schema_payload: bytes,
+    sdist: Path,
+    wheel_before: Mapping[str, Any],
+    wheel_after: Mapping[str, Any],
+    smoke_raw: Mapping[str, Any],
+) -> dict[str, Any]:
+    if (
+        wheel_before["sha256"] != wheel_after["sha256"]
+        or wheel_before["bytes"] != wheel_after["bytes"]
+        or wheel_before["native_sha256"] != wheel_after["native_sha256"]
+        or wheel_before["native_bytes"] != wheel_after["native_bytes"]
+    ):
+        raise VerificationError("wheel or native module changed during packaged smoke")
+    smoke = _normalize_diagnostics_smoke(smoke_raw, expected, wheel_after)
+    identity = _diagnostics_identity()
+    sdist_report = _sdist_observation(sdist)
+    wheel_report = {
+        "filename": wheel_before["filename"],
+        "sha256_before_smoke": wheel_before["sha256"],
+        "sha256_after_smoke": wheel_after["sha256"],
+        "bytes_before_smoke": wheel_before["bytes"],
+        "bytes_after_smoke": wheel_after["bytes"],
+        "members": wheel_before["members"],
+    }
+    native_report = {
+        "path": wheel_before["native_path"],
+        "sha256_before_smoke": wheel_before["native_sha256"],
+        "sha256_after_smoke": wheel_after["native_sha256"],
+        "bytes_before_smoke": wheel_before["native_bytes"],
+        "bytes_after_smoke": wheel_after["native_bytes"],
+        "elf_needed": wheel_before["elf_needed"],
+    }
+    artifact_material = {
+        "sdist": sdist_report,
+        "wheel": wheel_report,
+        "native": native_report,
+    }
+    artifacts = {
+        "artifact_sha256": _sha256_bytes(_canonical_json(artifact_material)),
+        **artifact_material,
+    }
+    before = dict(expected["exporter_before"])
+    after = {
+        "source_commit": identity["integration_sha"],
+        "wheel_sha256": wheel_after["sha256"],
+        "wheel_bytes": wheel_after["bytes"],
+        "native_sha256": wheel_after["native_sha256"],
+        "native_bytes": wheel_after["native_bytes"],
+    }
+    cache_requirements: list[str] = []
+    report: dict[str, Any] = {
+        "schema": "troupe.diagnostics.wheel-report.v1",
+        "identity": identity,
+        "contract": {
+            "expected_sha256": _sha256_bytes(expected_payload),
+            "report_schema_sha256": _sha256_bytes(schema_payload),
+        },
+        "build": {
+            "offline": configuration["offline"],
+            "build_system": expected["build_system"],
+            "manylinux": expected["manylinux"],
+            "smoke_modes": list(cast(tuple[str, str], configuration["smoke"])),
+            "forbidden_tools": expected["forbidden_tools"],
+            "wheel_builds": 1,
+        },
+        "cache": {
+            "requirements": cache_requirements,
+            "identity_sha256": _sha256_bytes(_canonical_json(cache_requirements)),
+        },
+        "artifacts": artifacts,
+        "exporter_size": {
+            "before": before,
+            "after": after,
+            "delta": {
+                "wheel_bytes": after["wheel_bytes"] - before["wheel_bytes"],
+                "native_bytes": after["native_bytes"] - before["native_bytes"],
+            },
+            "hard_limit": False,
+        },
+        "smoke": smoke,
+    }
+    report["result"] = {
+        "status": "passed",
+        "result_sha256": _sha256_bytes(_canonical_json(report)),
+    }
+    _validate_report_schema(report, schema)
+    return report
+
+
+def _publish_diagnostics_report(path: Path, report: Mapping[str, Any]) -> None:
+    payload = _canonical_json(report) + b"\n"
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory = os.open(path.parent, directory_flags | no_follow)
+    except OSError as error:
+        raise VerificationError(
+            f"could not open wheel report directory: {error}"
+        ) from error
+    staging: str | None = None
+    published = False
+    try:
+        if path.exists() or path.is_symlink():
+            raise VerificationError("diagnostics wheel report already exists")
+        for _ in range(16):
+            candidate = f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
+                    0o600,
+                    dir_fd=directory,
+                )
+            except FileExistsError:
+                continue
+            staging = candidate
+            break
+        else:
+            raise VerificationError("could not allocate wheel report staging name")
+        try:
+            position = 0
+            while position < len(payload):
+                written = os.write(descriptor, payload[position:])
+                if written <= 0:
+                    raise OSError("short write while publishing wheel report")
+                position += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.link(
+            staging,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+        published = True
+        os.unlink(staging, dir_fd=directory)
+        staging = None
+        os.fsync(directory)
+    except VerificationError:
+        raise
+    except FileExistsError as error:
+        raise VerificationError("diagnostics wheel report already exists") from error
+    except OSError as error:
+        raise VerificationError(
+            f"could not publish diagnostics wheel report atomically: {error}"
+        ) from error
+    finally:
+        if staging is not None and not published:
+            try:
+                os.unlink(staging, dir_fd=directory)
+            except OSError:
+                pass
+        os.close(directory)
+
+
 def _maturin_command(
     output: Path,
     release: bool,
@@ -852,8 +1630,17 @@ def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> 
     _validate_installed_paths(child_venv, payload)
 
 
-def _validate_smoke_tools(child_venv: Path, env: Mapping[str, str]) -> None:
-    expected_path = f"{child_venv}/bin:/usr/bin:/bin"
+def _validate_smoke_tools(
+    child_venv: Path,
+    env: Mapping[str, str],
+    *,
+    diagnostics: bool = False,
+) -> None:
+    expected_path = (
+        f"{child_venv}/bin:{os.environ['PATH']}"
+        if diagnostics
+        else f"{child_venv}/bin:/usr/bin:/bin"
+    )
     if env.get("PATH") != expected_path:
         raise VerificationError("wheel smoke PATH is not isolated")
     if shutil.which("uv", path=expected_path) is not None:
@@ -1022,7 +1809,8 @@ def _validate_mock_agent_cleanup(path: Path) -> None:
         raise VerificationError("wheel smoke left a mock agent process running")
 
 
-def _smoke_wheel(wheel: Path, workspace: Path) -> None:
+def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
+    diagnostics = _diagnostics_configuration(os.environ)
     child_venv = workspace / "child-venv"
     outside = workspace / "outside-repository"
     outside.mkdir()
@@ -1043,7 +1831,11 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
     dependency = _build_dependency_wheel(workspace)
     child_python = str(child_venv / "bin" / "python")
     env = _smoke_environment(os.environ)
-    env["PATH"] = f"{child_venv}/bin:/usr/bin:/bin"
+    env["PATH"] = (
+        f"{child_venv}/bin:{os.environ['PATH']}"
+        if diagnostics is not None
+        else f"{child_venv}/bin:/usr/bin:/bin"
+    )
     _run(
         [
             child_python,
@@ -1059,7 +1851,8 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
         env=env,
     )
     _run([child_python, "-m", "pip", "check"], cwd=outside, env=env)
-    _install_mock_agent_launcher(child_venv, workspace)
+    if diagnostics is None:
+        _install_mock_agent_launcher(child_venv, workspace)
     output = _run(
         [child_python, "-c", SMOKE],
         cwd=outside,
@@ -1073,11 +1866,50 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
     if not isinstance(payload, dict):
         raise VerificationError("wheel smoke metadata must be an object")
     _validate_smoke_payload(child_venv, payload)
-    _validate_smoke_tools(child_venv, env)
+    _validate_smoke_tools(child_venv, env, diagnostics=diagnostics is not None)
 
     _run(["troupe", "--help"], cwd=outside, env=env, forbidden_stderr="troupe:")
+    diagnostics_result: dict[str, Any] | None = None
+    if diagnostics is not None:
+        diagnostics_workspace = workspace / "diagnostics-smoke"
+        diagnostics_workspace.mkdir()
+        diagnostics_output = _run(
+            [
+                child_python,
+                str(DIAGNOSTICS_SMOKE),
+                "--workspace",
+                str(diagnostics_workspace),
+                "--smoke",
+                str(os.environ[DIAGNOSTICS_ENVIRONMENT["smoke"]]),
+            ],
+            cwd=outside,
+            env=env,
+            timeout=DIAGNOSTICS_SMOKE_TIMEOUT,
+        )
+        try:
+            decoded = json.loads(diagnostics_output)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise VerificationError(
+                "diagnostics wheel smoke did not return valid JSON"
+            ) from error
+        if not isinstance(decoded, dict):
+            raise VerificationError("diagnostics wheel smoke result must be an object")
+        diagnostics_result = decoded
+        _install_mock_agent_launcher(child_venv, workspace)
+
     events = workspace / "events.json"
-    fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    source_fixture = (
+        ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    )
+    if diagnostics is None:
+        fixture = source_fixture
+    else:
+        fixture = workspace / "wheel-smoke-production"
+        shutil.copytree(
+            source_fixture,
+            fixture,
+            ignore=shutil.ignore_patterns(".troupe", "__pycache__", "*.pyc", "*.pyo"),
+        )
     raw_args = ["--events", str(events), "--value", "7", "input.txt"]
     _run(
         ["troupe", "--production", str(fixture), "--", *raw_args],
@@ -1088,6 +1920,7 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
     )
     _validate_smoke_events(events, raw_args)
     _validate_mock_agent_cleanup(workspace / "agent-events.jsonl")
+    return diagnostics_result
 
 
 def _write_sha256(wheel: Path, checksum: Path) -> None:
@@ -1192,6 +2025,41 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _build_mode(arguments: argparse.Namespace) -> None:
+    diagnostics = _diagnostics_configuration(os.environ)
+    diagnostics_expected: dict[str, Any] | None = None
+    diagnostics_expected_payload: bytes | None = None
+    diagnostics_schema: dict[str, Any] | None = None
+    diagnostics_schema_payload: bytes | None = None
+    if diagnostics is not None:
+        if (
+            not arguments.release
+            or arguments.manylinux != "2_17"
+            or arguments.target is not None
+            or arguments.output_dir is not None
+        ):
+            raise VerificationError(
+                "diagnostics wheel mode requires one unpublished release manylinux 2_17 build"
+            )
+        diagnostics_expected, diagnostics_expected_payload = _load_json_object(
+            Path(str(diagnostics["expected"])),
+            "diagnostics wheel expected contract",
+        )
+        diagnostics_schema, diagnostics_schema_payload = _load_json_object(
+            Path(str(diagnostics["report_schema"])),
+            "diagnostics wheel report schema",
+        )
+        _validate_expected_contract(diagnostics_expected)
+        if (
+            os.environ.get("CARGO_NET_OFFLINE") != "true"
+            or os.environ.get("PIP_NO_INDEX") != "1"
+        ):
+            raise VerificationError("diagnostics wheel build is not offline")
+        for tool in diagnostics_expected["forbidden_tools"]:
+            if shutil.which(tool) is not None:
+                raise VerificationError(
+                    f"forbidden tool is available during diagnostics wheel build: {tool}"
+                )
+
     output: Path | None = arguments.output_dir
     if output is not None and output.exists():
         raise VerificationError(f"output directory already exists: {output}")
@@ -1221,7 +2089,43 @@ def _build_mode(arguments: argparse.Namespace) -> None:
                 required_manylinux=arguments.manylinux,
                 expected=expected,
             )
-            _smoke_wheel(wheel, workspace)
+            diagnostics_before: dict[str, Any] | None = None
+            if diagnostics_expected is not None:
+                _validate_build_system(sdist, diagnostics_expected)
+                diagnostics_before, _ = _wheel_observation(
+                    wheel,
+                    diagnostics_expected,
+                )
+            smoke_result = _smoke_wheel(wheel, workspace)
+            if diagnostics is not None:
+                if (
+                    diagnostics_expected is None
+                    or diagnostics_expected_payload is None
+                    or diagnostics_schema is None
+                    or diagnostics_schema_payload is None
+                    or diagnostics_before is None
+                    or smoke_result is None
+                ):
+                    raise VerificationError("diagnostics wheel evidence is incomplete")
+                diagnostics_after, _ = _wheel_observation(
+                    wheel,
+                    diagnostics_expected,
+                )
+                report = _assemble_diagnostics_report(
+                    diagnostics,
+                    diagnostics_expected,
+                    diagnostics_expected_payload,
+                    diagnostics_schema,
+                    diagnostics_schema_payload,
+                    sdist,
+                    diagnostics_before,
+                    diagnostics_after,
+                    smoke_result,
+                )
+                _publish_diagnostics_report(
+                    Path(str(diagnostics["report"])),
+                    report,
+                )
             if output is not None:
                 staging = _stage_publication(wheel, output)
     except BaseException:
@@ -1235,6 +2139,8 @@ def _build_mode(arguments: argparse.Namespace) -> None:
 
 
 def _wheel_mode(arguments: argparse.Namespace) -> None:
+    if _diagnostics_configuration(os.environ) is not None:
+        raise VerificationError("diagnostics report mode requires --build")
     wheel: Path = arguments.wheel
     checksum: Path = arguments.sha256_file
     _validate_sha256(wheel, checksum)
