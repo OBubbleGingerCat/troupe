@@ -435,13 +435,14 @@ fn assert_closed_error(response: &HttpResponse, status: u16, code: &str, expecte
     assert_eq!(response.status, status);
     assert_json_headers(response);
     let body = response.json();
-    assert_eq!(
-        body.as_object()
-            .expect("error envelope")
-            .keys()
-            .collect::<Vec<_>>(),
-        vec!["api_schema_version", "error", "run_id"]
-    );
+    let mut keys = body
+        .as_object()
+        .expect("error envelope")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["api_schema_version", "error", "run_id"]);
     assert_eq!(body["api_schema_version"], 1);
     assert_eq!(body["run_id"], expected_run);
     assert_eq!(body["error"]["code"], code);

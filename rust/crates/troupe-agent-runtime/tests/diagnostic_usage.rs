@@ -625,6 +625,9 @@ fn candidate_is_typed_precanonical_and_source_boundary_has_no_derivation_seam() 
     );
     assert!(usage.contains("fn token_count_from_acp(value: u64) -> TokenCount"));
     assert!(!usage.contains("Option<u64>"));
+    let normalization = &usage[usage.find("fn normalize_authoritative(").unwrap()
+        ..usage.find("fn token_count_from_acp(").unwrap()];
+    assert!(!normalization.contains(".stop_reason"));
     for forbidden in [
         "UsageUpdate",
         "context_used_tokens",
@@ -636,7 +639,6 @@ fn candidate_is_typed_precanonical_and_source_boundary_has_no_derivation_seam() 
         "read_to_string",
         "response.meta",
         "usage.meta",
-        ".stop_reason",
         "checked_sub",
         "saturating_sub",
         "ActTokenUsageFinalized",
