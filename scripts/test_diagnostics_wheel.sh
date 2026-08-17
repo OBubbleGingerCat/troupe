@@ -36,6 +36,12 @@ BLOCKED_TOOLS = {
 }
 HIDDEN_TOOLS = BLOCKED_TOOLS | {"uv"}
 OFFLINE_PROXY = "http://127.0.0.1:9/"
+BUILDER_IMAGE = (
+    "ghcr.io/pyo3/maturin@"
+    "sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38"
+)
+BUILD_TARGET = "x86_64-unknown-linux-gnu"
+CONTAINER_PYTHON = "/opt/python/cp310-cp310/bin/python"
 
 
 class RunnerError(RuntimeError):
@@ -130,11 +136,17 @@ def run(repository: Path, arguments: list[str]) -> int:
         sanitized_path = str(tool_bin)
         for name in HIDDEN_TOOLS:
             require(shutil.which(name, path=sanitized_path) is None, f"failed to hide {name}")
-        for name in ("maturin", "cargo", "rustc", "rustup", "patchelf", "git"):
+        for name in ("docker",):
             require(shutil.which(name, path=sanitized_path) is not None, f"required build tool is unavailable: {name}")
 
         temporary = suite / "tmp"
         temporary.mkdir()
+        container_tools = suite / "container-tools"
+        container_tools.mkdir()
+        (container_tools / "git").symlink_to("/usr/local/bin/git")
+        (container_tools / "patchelf").symlink_to("/usr/local/bin/patchelf")
+        cargo_root = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+        cargo_registry = exact_directory(cargo_root / "registry", "Cargo registry")
         environment = dict(os.environ)
         for name in list(environment):
             folded = name.casefold()
@@ -168,17 +180,119 @@ def run(repository: Path, arguments: list[str]) -> int:
                 "TROUPE_DIAGNOSTICS_WHEEL_REPORT_SCHEMA": str(
                     repository / "tests/fixtures/release/diagnostics-wheel-report-schema.json"
                 ),
+                "TROUPE_DIAGNOSTICS_WHEEL_BUILDER_IMAGE": BUILDER_IMAGE,
+                "TROUPE_DIAGNOSTICS_WHEEL_TARGET": BUILD_TARGET,
             }
         )
         verifier = repository / "scripts/verify_wheel.py"
+        container_path = os.pathsep.join(
+            (
+                str(container_tools),
+                "/opt/python/cp310-cp310/bin",
+                "/root/.cargo/bin",
+                "/usr/bin",
+                "/bin",
+            )
+        )
+        container_environment = {
+            "ALL_PROXY": OFFLINE_PROXY,
+            "CARGO_HOME": "/root/.cargo",
+            "CARGO_NET_OFFLINE": "true",
+            "CARGO_TARGET_DIR": str(temporary / "cargo-target"),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+            "GIT_CONFIG_VALUE_0": str(repository),
+            "HTTP_PROXY": OFFLINE_PROXY,
+            "HTTPS_PROXY": OFFLINE_PROXY,
+            "NO_PROXY": "127.0.0.1,localhost",
+            "PATH": container_path,
+            "PIP_NO_INDEX": "1",
+            "PYO3_PYTHON": CONTAINER_PYTHON,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TMPDIR": str(temporary),
+            "TROUPE_DIAGNOSTICS_WHEEL_BUILDER_IMAGE": BUILDER_IMAGE,
+            "TROUPE_DIAGNOSTICS_WHEEL_EXPECTED": environment[
+                "TROUPE_DIAGNOSTICS_WHEEL_EXPECTED"
+            ],
+            "TROUPE_DIAGNOSTICS_WHEEL_OFFLINE": "1",
+            "TROUPE_DIAGNOSTICS_WHEEL_REPORT": str(report),
+            "TROUPE_DIAGNOSTICS_WHEEL_REPORT_SCHEMA": environment[
+                "TROUPE_DIAGNOSTICS_WHEEL_REPORT_SCHEMA"
+            ],
+            "TROUPE_DIAGNOSTICS_WHEEL_SMOKE": smoke,
+            "TROUPE_DIAGNOSTICS_WHEEL_TARGET": BUILD_TARGET,
+            "UV_OFFLINE": "1",
+            "all_proxy": OFFLINE_PROXY,
+            "http_proxy": OFFLINE_PROXY,
+            "https_proxy": OFFLINE_PROXY,
+            "no_proxy": "127.0.0.1,localhost",
+        }
+        container_script = r'''
+owner_uid=$1
+owner_gid=$2
+owned_suite=$3
+owned_report=$4
+container_python=$5
+verifier=$6
+
+restore_ownership() {
+  original_status=$?
+  trap - EXIT
+  ownership_status=0
+  chown -hR -- "${owner_uid}:${owner_gid}" "$owned_suite" || ownership_status=125
+  if [[ -f "$owned_report" && ! -L "$owned_report" ]]; then
+    chown --no-dereference -- "${owner_uid}:${owner_gid}" "$owned_report" || ownership_status=125
+  fi
+  if ((ownership_status != 0)); then
+    exit "$ownership_status"
+  fi
+  exit "$original_status"
+}
+trap restore_ownership EXIT
+
+"$container_python" "$verifier" \
+  --build \
+  --release \
+  --target x86_64-unknown-linux-gnu \
+  --manylinux 2_17
+'''
         command = [
-            str(Path(sys.executable).resolve(strict=True)),
-            str(verifier),
-            "--build",
-            "--release",
-            "--manylinux",
-            "2_17",
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--pull",
+            "never",
+            "--entrypoint",
+            "/bin/bash",
+            "--workdir",
+            str(repository),
+            "--mount",
+            f"type=bind,src={repository},dst={repository},readonly",
+            "--mount",
+            f"type=bind,src={gate},dst={gate}",
+            "--mount",
+            f"type=bind,src={cargo_registry},dst=/root/.cargo/registry,readonly",
         ]
+        for name, value in sorted(container_environment.items()):
+            command.extend(["--env", f"{name}={value}"])
+        command.extend(
+            [
+                BUILDER_IMAGE,
+                "-euo",
+                "pipefail",
+                "-c",
+                container_script,
+                "troupe-v07-container",
+                str(os.getuid()),
+                str(os.getgid()),
+                str(suite),
+                str(report),
+                CONTAINER_PYTHON,
+                str(verifier),
+            ]
+        )
         completed = subprocess.run(
             command,
             cwd=repository,

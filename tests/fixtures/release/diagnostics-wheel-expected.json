@@ -4,7 +4,9 @@
     "requires": ["maturin==1.14.1"],
     "build_backend": "maturin"
   },
+  "builder_image": "ghcr.io/pyo3/maturin@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38",
   "manylinux": "2_17",
+  "target": "x86_64-unknown-linux-gnu",
   "smoke_modes": ["active", "archive"],
   "forbidden_tools": [
     "node",

@@ -51,7 +51,9 @@
       "required": [
         "offline",
         "build_system",
+        "builder_image",
         "manylinux",
+        "target",
         "smoke_modes",
         "forbidden_tools",
         "wheel_builds"
@@ -72,7 +74,11 @@
             "build_backend": { "const": "maturin" }
           }
         },
+        "builder_image": {
+          "const": "ghcr.io/pyo3/maturin@sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38"
+        },
         "manylinux": { "const": "2_17" },
+        "target": { "const": "x86_64-unknown-linux-gnu" },
         "smoke_modes": { "$ref": "#/$defs/smokeModes" },
         "forbidden_tools": { "$ref": "#/$defs/forbiddenTools" },
         "wheel_builds": { "const": 1 }

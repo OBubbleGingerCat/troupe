@@ -32,9 +32,6 @@ if sys.version_info >= (3, 11):
 else:  # Python 3.10 maintainer environment.
     import tomli as tomllib
 
-from wheel.wheelfile import WheelError, WheelFile
-
-
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PACKAGE = ROOT / "src" / "troupe"
 SUPPORT = ROOT / "tests" / "support"
@@ -52,6 +49,11 @@ PUBLIC_EXPORTS = list(BASE_ARTIFACTS.public_exports)
 EXPECTED_EXAMPLE_FILES = tuple(BASE_ARTIFACTS.examples)
 SMOKE_TIMEOUT = 10.0
 DIAGNOSTICS_SMOKE_TIMEOUT = 60.0
+DIAGNOSTICS_BUILDER_IMAGE = (
+    "ghcr.io/pyo3/maturin@"
+    "sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38"
+)
+DIAGNOSTICS_TARGET = "x86_64-unknown-linux-gnu"
 DIAGNOSTICS_EXPECTED = ROOT / "tests/fixtures/release/diagnostics-wheel-expected.json"
 DIAGNOSTICS_REPORT_SCHEMA = (
     ROOT / "tests/fixtures/release/diagnostics-wheel-report-schema.json"
@@ -63,6 +65,8 @@ DIAGNOSTICS_ENVIRONMENT = {
     "report": "TROUPE_DIAGNOSTICS_WHEEL_REPORT",
     "expected": "TROUPE_DIAGNOSTICS_WHEEL_EXPECTED",
     "report_schema": "TROUPE_DIAGNOSTICS_WHEEL_REPORT_SCHEMA",
+    "builder_image": "TROUPE_DIAGNOSTICS_WHEEL_BUILDER_IMAGE",
+    "target": "TROUPE_DIAGNOSTICS_WHEEL_TARGET",
 }
 
 
@@ -143,6 +147,10 @@ def _diagnostics_configuration(
         raise VerificationError(
             "diagnostics wheel smoke must be exactly active,archive"
         )
+    if values["builder_image"] != DIAGNOSTICS_BUILDER_IMAGE:
+        raise VerificationError("diagnostics wheel builder image is not exact")
+    if values["target"] != DIAGNOSTICS_TARGET:
+        raise VerificationError("diagnostics wheel target is not exact")
 
     report = Path(str(values["report"]))
     if not report.is_absolute() or str(report) != os.path.abspath(report):
@@ -186,6 +194,8 @@ def _diagnostics_configuration(
         "report": report,
         "expected": expected,
         "report_schema": report_schema,
+        "builder_image": values["builder_image"],
+        "target": values["target"],
     }
 
 
@@ -594,11 +604,15 @@ def _required_manylinux_platforms(required: str) -> set[str]:
     return accepted
 
 
-def _validate_record(archive: WheelFile, infos: Sequence[zipfile.ZipInfo], record: str) -> None:
+def _validate_record(
+    archive: zipfile.ZipFile,
+    infos: Sequence[zipfile.ZipInfo],
+    record: str,
+) -> None:
     names = {info.filename for info in infos}
     try:
         rows = list(csv.reader(io.StringIO(archive.read(record).decode("utf-8"))))
-    except (csv.Error, UnicodeError, KeyError, WheelError) as error:
+    except (csv.Error, UnicodeError, KeyError) as error:
         raise VerificationError(f"could not read wheel RECORD: {error}") from error
 
     if any(len(row) != 3 for row in rows):
@@ -616,7 +630,7 @@ def _validate_record(archive: WheelFile, infos: Sequence[zipfile.ZipInfo], recor
             continue
         try:
             data = archive.read(path)
-        except (KeyError, WheelError) as error:
+        except KeyError as error:
             raise VerificationError(f"could not read recorded wheel member: {path}") from error
         digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=")
         if encoded_hash != f"sha256={digest.decode('ascii')}":
@@ -642,7 +656,7 @@ def _validate_wheel(
         raise VerificationError("wheel does not contain the requested manylinux policy tag")
 
     try:
-        with WheelFile(wheel) as archive:
+        with zipfile.ZipFile(wheel) as archive:
             infos = [info for info in archive.infolist() if not info.is_dir()]
             names = [info.filename for info in infos]
             if len(names) != len(set(names)):
@@ -716,7 +730,6 @@ def _validate_wheel(
         zipfile.BadZipFile,
         KeyError,
         UnicodeError,
-        WheelError,
     ) as error:
         raise VerificationError(f"could not validate wheel: {error}") from error
 
@@ -731,7 +744,9 @@ def _validate_expected_contract(expected: Mapping[str, Any]) -> None:
     fields = {
         "schema",
         "build_system",
+        "builder_image",
         "manylinux",
+        "target",
         "smoke_modes",
         "forbidden_tools",
         "wheel_members",
@@ -750,8 +765,12 @@ def _validate_expected_contract(expected: Mapping[str, Any]) -> None:
         "build_backend": "maturin",
     }:
         raise VerificationError("diagnostics wheel build system contract drifted")
+    if expected["builder_image"] != DIAGNOSTICS_BUILDER_IMAGE:
+        raise VerificationError("diagnostics wheel builder image contract drifted")
     if expected["manylinux"] != "2_17":
         raise VerificationError("diagnostics wheel manylinux contract drifted")
+    if expected["target"] != DIAGNOSTICS_TARGET:
+        raise VerificationError("diagnostics wheel target contract drifted")
     if expected["smoke_modes"] != ["active", "archive"]:
         raise VerificationError("diagnostics wheel smoke contract drifted")
     if expected["wheel_members"] != list(BASE_ARTIFACTS.wheel_members):
@@ -918,7 +937,7 @@ def _wheel_observation(
     expected: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bytes]:
     try:
-        with WheelFile(wheel) as archive:
+        with zipfile.ZipFile(wheel) as archive:
             infos = sorted(
                 (info for info in archive.infolist() if not info.is_dir()),
                 key=lambda info: info.filename,
@@ -940,7 +959,7 @@ def _wheel_observation(
                 ):
                     native_path = info.filename
                     native_data = payload
-    except (OSError, KeyError, WheelError, zipfile.BadZipFile) as error:
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
         raise VerificationError(f"could not observe wheel artifact: {error}") from error
     if native_path is None or native_data is None:
         raise VerificationError("wheel observation did not find its native module")
@@ -1143,7 +1162,9 @@ def _assemble_diagnostics_report(
         "build": {
             "offline": configuration["offline"],
             "build_system": expected["build_system"],
+            "builder_image": configuration["builder_image"],
             "manylinux": expected["manylinux"],
+            "target": configuration["target"],
             "smoke_modes": list(cast(tuple[str, str], configuration["smoke"])),
             "forbidden_tools": expected["forbidden_tools"],
             "wheel_builds": 1,
@@ -1590,12 +1611,23 @@ def _build_dependency_wheel(workspace: Path) -> Path:
         b"Root-Is-Purelib: true\n"
         b"Tag: py3-none-any\n"
     )
+    members = {
+        "troupe_smoke_dependency.py": module,
+        f"{dist_info}/METADATA": metadata,
+        f"{dist_info}/WHEEL": wheel_metadata,
+    }
+    record_lines = []
+    for name, payload in members.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=")
+        record_lines.append(f"{name},sha256={digest.decode('ascii')},{len(payload)}\n")
+    record_name = f"{dist_info}/RECORD"
+    record = "".join([*record_lines, f"{record_name},,\n"]).encode("utf-8")
     try:
-        with WheelFile(wheel, "w") as archive:
-            archive.writestr("troupe_smoke_dependency.py", module)
-            archive.writestr(f"{dist_info}/METADATA", metadata)
-            archive.writestr(f"{dist_info}/WHEEL", wheel_metadata)
-    except (OSError, WheelError, zipfile.BadZipFile) as error:
+        with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in members.items():
+                archive.writestr(name, payload)
+            archive.writestr(record_name, record)
+    except (OSError, ValueError, zipfile.BadZipFile) as error:
         raise VerificationError(f"could not build smoke dependency wheel: {error}") from error
     return wheel
 
@@ -2034,11 +2066,11 @@ def _build_mode(arguments: argparse.Namespace) -> None:
         if (
             not arguments.release
             or arguments.manylinux != "2_17"
-            or arguments.target is not None
+            or arguments.target != DIAGNOSTICS_TARGET
             or arguments.output_dir is not None
         ):
             raise VerificationError(
-                "diagnostics wheel mode requires one unpublished release manylinux 2_17 build"
+                "diagnostics wheel mode requires one unpublished release manylinux 2_17 x86_64 build"
             )
         diagnostics_expected, diagnostics_expected_payload = _load_json_object(
             Path(str(diagnostics["expected"])),

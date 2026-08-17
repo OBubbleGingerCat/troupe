@@ -23,6 +23,11 @@ SCHEMA_RELATIVE = Path("tests/fixtures/release/diagnostics-wheel-report-schema.j
 ARTIFACT_RELATIVE = Path("tests/fixtures/artifact_layout/nodes/V07.json")
 GATE_RELATIVE = Path("tests/fixtures/diagnostic_node_gates/V07.json")
 REPORT_NAME = "V07-wheel-report.json"
+BUILDER_IMAGE = (
+    "ghcr.io/pyo3/maturin@"
+    "sha256:2665227312dd1eab1c29c70a001dc8aac53155a2d048bede3b2df7f1691c8e38"
+)
+BUILD_TARGET = "x86_64-unknown-linux-gnu"
 FORBIDDEN = [
     "node",
     "nodejs",
@@ -52,6 +57,8 @@ record = {
     "report": os.environ.get("TROUPE_DIAGNOSTICS_WHEEL_REPORT"),
     "expected": os.environ.get("TROUPE_DIAGNOSTICS_WHEEL_EXPECTED"),
     "report_schema": os.environ.get("TROUPE_DIAGNOSTICS_WHEEL_REPORT_SCHEMA"),
+    "builder_image": os.environ.get("TROUPE_DIAGNOSTICS_WHEEL_BUILDER_IMAGE"),
+    "target": os.environ.get("TROUPE_DIAGNOSTICS_WHEEL_TARGET"),
     "cargo_offline": os.environ.get("CARGO_NET_OFFLINE"),
     "pip_no_index": os.environ.get("PIP_NO_INDEX"),
     "uv_offline": os.environ.get("UV_OFFLINE"),
@@ -89,6 +96,39 @@ finally:
 """
 
 
+FAKE_DOCKER = r"""#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+Path(os.environ["TROUPE_V07_FAKE_DOCKER_LOG"]).write_text(
+    json.dumps(sys.argv[1:], separators=(",", ":")), encoding="utf-8"
+)
+repository = Path(os.environ["TROUPE_V07_FAKE_REPOSITORY"])
+completed = subprocess.run(
+    [
+        sys.executable,
+        str(repository / "scripts/verify_wheel.py"),
+        "--build",
+        "--release",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manylinux",
+        "2_17",
+    ],
+    cwd=repository,
+    env=os.environ,
+    check=False,
+)
+raise SystemExit(completed.returncode)
+"""
+
+
 def load_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(value, dict)
@@ -119,10 +159,9 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str], Path]:
 
     tools = (tmp_path / "tools").resolve()
     tools.mkdir()
-    for name in ("maturin", "cargo", "rustc", "rustup", "patchelf", "git"):
-        executable = tools / name
-        executable.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
-        executable.chmod(0o755)
+    docker = tools / "docker"
+    docker.write_text(FAKE_DOCKER, encoding="utf-8")
+    docker.chmod(0o755)
     for name in (*FORBIDDEN, "uv"):
         executable = tools / name
         executable.write_text("#!/bin/sh\nexit 97\n", encoding="ascii")
@@ -130,15 +169,21 @@ def sandbox(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str], Path]:
 
     gate = (tmp_path / "gate").resolve()
     gate.mkdir()
+    cargo_home = (tmp_path / "cargo-home").resolve()
+    (cargo_home / "registry").mkdir(parents=True)
     sentinel = gate / "caller-owned"
     sentinel.write_text("preserve\n", encoding="ascii")
     log = (tmp_path / "fake-verifier.json").resolve()
+    docker_log = (tmp_path / "fake-docker.json").resolve()
     environment = dict(os.environ)
     environment.update(
         {
             "PATH": f"{tools}:{environment.get('PATH', '')}",
+            "CARGO_HOME": str(cargo_home),
             "TROUPE_GATE_TMP": str(gate),
             "TROUPE_V07_FAKE_LOG": str(log),
+            "TROUPE_V07_FAKE_DOCKER_LOG": str(docker_log),
+            "TROUPE_V07_FAKE_REPOSITORY": str(repository),
             "TROUPE_NPM_CACHE": str(tmp_path / "npm-cache"),
             "TROUPE_PLAYWRIGHT_CACHE": str(tmp_path / "browser-cache"),
             "TROUPE_PERFETTO_CACHE": str(tmp_path / "perfetto-cache"),
@@ -180,7 +225,9 @@ def test_checked_contract_and_node_descriptors_are_exact() -> None:
         "requires": ["maturin==1.14.1"],
         "build_backend": "maturin",
     }
+    assert expected["builder_image"] == BUILDER_IMAGE
     assert expected["manylinux"] == "2_17"
+    assert expected["target"] == BUILD_TARGET
     assert expected["smoke_modes"] == ["active", "archive"]
     assert expected["forbidden_tools"] == FORBIDDEN
     assert expected["size_is_informational"] is True
@@ -224,13 +271,22 @@ def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
     assert sentinel.read_text(encoding="ascii") == "preserve\n"
     assert not list(gate.glob("troupe-v07.*"))
     record = load_json(log)
-    assert record["argv"] == ["--build", "--release", "--manylinux", "2_17"]
+    assert record["argv"] == [
+        "--build",
+        "--release",
+        "--target",
+        BUILD_TARGET,
+        "--manylinux",
+        "2_17",
+    ]
     assert record["cwd"] == str(repository)
     assert record["offline"] == "1"
     assert record["smoke"] == "active,archive"
     assert record["report"] == str(report)
     assert record["expected"] == str(repository / EXPECTED_RELATIVE)
     assert record["report_schema"] == str(repository / SCHEMA_RELATIVE)
+    assert record["builder_image"] == BUILDER_IMAGE
+    assert record["target"] == BUILD_TARGET
     assert record["cargo_offline"] == "true"
     assert record["pip_no_index"] == "1"
     assert record["uv_offline"] == "1"
@@ -240,6 +296,21 @@ def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
     assert set(record["blocked"].values()) == {None}
     assert record["cache_environment"] == []
     assert len(record["path"].split(os.pathsep)) == 1
+    docker_arguments = json.loads(
+        Path(environment["TROUPE_V07_FAKE_DOCKER_LOG"]).read_text(encoding="utf-8")
+    )
+    assert docker_arguments[:2] == ["run", "--rm"]
+    assert docker_arguments[docker_arguments.index("--network") + 1] == "none"
+    assert docker_arguments[docker_arguments.index("--pull") + 1] == "never"
+    assert docker_arguments.count(BUILDER_IMAGE) == 1
+    mounts = [
+        docker_arguments[index + 1]
+        for index, value in enumerate(docker_arguments)
+        if value == "--mount"
+    ]
+    assert f"type=bind,src={repository},dst={repository},readonly" in mounts
+    assert f"type=bind,src={gate},dst={gate}" in mounts
+    assert any(mount.endswith("dst=/root/.cargo/registry,readonly") for mount in mounts)
     summary = json.loads(result.stdout)
     assert summary == {
         "schema": "troupe.diagnostics.wheel-runner.v1",
@@ -448,6 +519,8 @@ def test_report_assembly_matches_the_closed_checked_schema(
     configuration = {
         "offline": True,
         "smoke": ("active", "archive"),
+        "builder_image": BUILDER_IMAGE,
+        "target": BUILD_TARGET,
     }
 
     report = verifier._assemble_diagnostics_report(
