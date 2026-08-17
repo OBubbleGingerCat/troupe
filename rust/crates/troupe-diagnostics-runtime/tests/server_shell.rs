@@ -12,8 +12,8 @@ use std::{
 use bytes::Bytes;
 use futures::stream;
 use http_body_util::StreamBody;
-use hyper::body::Frame;
 use hyper::StatusCode;
+use hyper::body::Frame;
 use serde_json::{Value, json};
 use troupe_diagnostics_core::id::CanonicalUuid;
 use troupe_diagnostics_runtime::{
@@ -85,9 +85,16 @@ impl HttpResponse {
     }
 }
 
-fn request(server: &DiagnosticServer, method: &str, path: &str, headers: &[(&str, &str)]) -> HttpResponse {
+fn request(
+    server: &DiagnosticServer,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
     let mut stream = TcpStream::connect(server.connect_addr()).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -174,10 +181,12 @@ fn decode_chunked(bytes: &[u8]) -> Vec<u8> {
 
 fn assert_common_headers(response: &HttpResponse) {
     assert_eq!(response.header("cache-control"), Some("no-store"));
-    assert!(response
-        .headers
-        .keys()
-        .all(|name| !name.starts_with("access-control-")));
+    assert!(
+        response
+            .headers
+            .keys()
+            .all(|name| !name.starts_with("access-control-"))
+    );
 }
 
 #[test]
@@ -269,7 +278,10 @@ fn configured_base_path_and_explicit_port_are_authoritative() {
     let response = request(&server, "GET", "/troupe/api/v1/identity", &[]);
     assert_eq!(response.status, 200);
     let identity = response.json();
-    assert_eq!(identity["advertise_url"], "https://diagnostics.example/troupe/");
+    assert_eq!(
+        identity["advertise_url"],
+        "https://diagnostics.example/troupe/"
+    );
     assert_eq!(identity["base_path"], "/troupe");
     assert_eq!(identity["api_base_path"], "/troupe/api/v1");
     assert_eq!(identity["identity_path"], "/troupe/api/v1/identity");
@@ -277,7 +289,10 @@ fn configured_base_path_and_explicit_port_are_authoritative() {
         identity["operational_limits"]["sse_heartbeat_interval_ms"],
         "5000"
     );
-    assert_eq!(request(&server, "GET", "/troupe/api/v1/test", &[]).status, 200);
+    assert_eq!(
+        request(&server, "GET", "/troupe/api/v1/test", &[]).status,
+        200
+    );
     server.shutdown().unwrap();
 }
 
@@ -338,8 +353,9 @@ fn methods_routes_cache_and_cors_form_a_read_only_shell() {
 #[test]
 fn forwarded_headers_are_ignored_before_routing_or_handler_dispatch() {
     let server = DiagnosticServer::start(
-        config()
-            .with_advertise_url(Some(WebBaseUrl::parse("https://public.example/base").unwrap())),
+        config().with_advertise_url(Some(
+            WebBaseUrl::parse("https://public.example/base").unwrap(),
+        )),
         vec![test_route(Arc::new(AtomicUsize::new(0)))],
     )
     .unwrap();
@@ -377,24 +393,26 @@ fn forwarded_headers_are_ignored_before_routing_or_handler_dispatch() {
 fn bind_failure_is_a_synchronous_start_failure() {
     let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = occupied.local_addr().unwrap().port();
-    let error = DiagnosticServer::start(
-        config().with_bind("127.0.0.1", port),
-        Vec::new(),
-    )
-    .unwrap_err();
+    let error =
+        DiagnosticServer::start(config().with_bind("127.0.0.1", port), Vec::new()).unwrap_err();
     assert_eq!(error.code(), ServerStartErrorCode::BindFailed);
 }
 
 #[test]
 fn request_errors_and_client_disconnects_stay_local() {
     let failing = RouteDefinition::read_only("/api/v1/fail", |_request| async {
-        Err(RequestError::new("injected_request_failure", "expected test failure"))
+        Err(RequestError::new(
+            "injected_request_failure",
+            "expected test failure",
+        ))
     })
     .unwrap();
     let server = DiagnosticServer::start(config(), vec![failing]).unwrap();
 
     let mut disconnected = TcpStream::connect(server.connect_addr()).unwrap();
-    disconnected.write_all(b"GET /api/v1/identity HTTP/1.1\r\nHost:").unwrap();
+    disconnected
+        .write_all(b"GET /api/v1/identity HTTP/1.1\r\nHost:")
+        .unwrap();
     drop(disconnected);
 
     let failed = request(&server, "GET", "/api/v1/fail", &[]);
@@ -441,7 +459,10 @@ fn unexpected_execution_context_exit_is_reported_as_core_fatal() {
     let failure = server
         .wait_for_core_failure(Duration::from_secs(2))
         .unwrap();
-    assert_eq!(failure.code(), ServerCoreFailureCode::ExecutionContextExited);
+    assert_eq!(
+        failure.code(),
+        ServerCoreFailureCode::ExecutionContextExited
+    );
     server.shutdown().unwrap();
 }
 

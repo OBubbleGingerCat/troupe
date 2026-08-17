@@ -7,9 +7,7 @@ use hyper::{
 };
 use serde_json::json;
 
-use super::{
-    routes::{CachePolicy, ResponseBody, RouteRequest, RouteResponse, RouteTarget, Router},
-};
+use super::routes::{CachePolicy, ResponseBody, RouteRequest, RouteResponse, RouteTarget, Router};
 
 const FORWARDED_HEADERS: [&str; 4] = [
     "forwarded",
@@ -28,11 +26,14 @@ pub(crate) async fn handle_request(
 async fn dispatch(router: &Router, request: Request<Incoming>) -> Response<ResponseBody> {
     let is_head = request.method() == Method::HEAD;
     let Some(route) = router.resolve(request.uri().path()) else {
-        return finalize(error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "route is not registered",
-        ), is_head);
+        return finalize(
+            error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "route is not registered",
+            ),
+            is_head,
+        );
     };
     if !route.methods().allows(request.method()) {
         let mut response = error_response(

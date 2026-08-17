@@ -406,7 +406,9 @@ impl TurnTerminalObservation<'_> {
     }
 }
 
-const fn terminal_outcome(stop_reason: agent_client_protocol::schema::v1::StopReason) -> AgentTurnDiagnosticOutcome {
+const fn terminal_outcome(
+    stop_reason: agent_client_protocol::schema::v1::StopReason,
+) -> AgentTurnDiagnosticOutcome {
     use agent_client_protocol::schema::v1::StopReason;
 
     match stop_reason {
@@ -471,7 +473,11 @@ mod tests {
     fn terminal_boundaries_have_closed_outcomes_and_stable_error_codes() {
         let adapter = agent_adapter(AgentKind::Codex);
         for (stop_reason, outcome, error_code) in [
-            (StopReason::EndTurn, AgentTurnDiagnosticOutcome::Completed, None),
+            (
+                StopReason::EndTurn,
+                AgentTurnDiagnosticOutcome::Completed,
+                None,
+            ),
             (
                 StopReason::Cancelled,
                 AgentTurnDiagnosticOutcome::Cancelled,
@@ -497,9 +503,7 @@ mod tests {
             let observation = TurnTerminalObservation::settled(&response, adapter);
             assert_eq!(observation.outcome, outcome);
             assert_eq!(
-                observation
-                    .error_code
-                    .map(AgentDiagnosticErrorCode::as_str),
+                observation.error_code.map(AgentDiagnosticErrorCode::as_str),
                 error_code
             );
         }

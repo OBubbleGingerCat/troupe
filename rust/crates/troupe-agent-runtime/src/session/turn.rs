@@ -698,10 +698,11 @@ impl AgentTurnControl {
                         }
                         (None, _) => TurnTerminalObservation::unknown(Some(adapter)),
                     };
-                let terminal_observation = broken_failure.as_ref().map_or(
-                    terminal_observation,
-                    |failure| terminal_observation.with_failure(failure.code),
-                );
+                let terminal_observation = broken_failure
+                    .as_ref()
+                    .map_or(terminal_observation, |failure| {
+                        terminal_observation.with_failure(failure.code)
+                    });
                 Self::observe_turn_terminal_locked(&mut state, &terminal_observation);
             }
             (

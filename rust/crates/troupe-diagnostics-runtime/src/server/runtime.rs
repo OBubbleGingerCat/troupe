@@ -47,11 +47,7 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn new(
-        run_id: CanonicalUuid,
-        owner_pid: u32,
-        process_identity: ProcessIdentity,
-    ) -> Self {
+    pub fn new(run_id: CanonicalUuid, owner_pid: u32, process_identity: ProcessIdentity) -> Self {
         Self {
             run_id,
             owner_pid,
@@ -344,14 +340,14 @@ async fn run_server(
             format!("failed to encode diagnostic server identity: {error}"),
         ))
     })?);
-    let router = Arc::new(Router::new(&identity, identity_bytes, routes).map_err(
-        |error| {
+    let router = Arc::new(
+        Router::new(&identity, identity_bytes, routes).map_err(|error| {
             ContextOutcome::StartupFailed(ServerStartError::new(
                 ServerStartErrorCode::InvalidRoutes,
                 error.to_string(),
             ))
-        },
-    )?);
+        })?,
+    );
 
     let connect_addr = connectable_addr(local_addr);
     complete_readiness_probe(&listener, connect_addr).await?;

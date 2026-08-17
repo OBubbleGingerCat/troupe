@@ -1,11 +1,4 @@
-use std::{
-    collections::HashSet,
-    error::Error,
-    fmt,
-    future::Future,
-    pin::Pin,
-    sync::Arc,
-};
+use std::{collections::HashSet, error::Error, fmt, future::Future, pin::Pin, sync::Arc};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full, combinators::UnsyncBoxBody};
@@ -62,7 +55,6 @@ impl RouteRequest {
     pub const fn headers(&self) -> &HeaderMap {
         &self.headers
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,10 +233,7 @@ impl RouteDefinition {
         Self::new(relative_path, RouteMethods::GetAndHead, handler)
     }
 
-    pub fn get<F, Fut>(
-        relative_path: &str,
-        handler: F,
-    ) -> Result<Self, RouteConfigurationError>
+    pub fn get<F, Fut>(relative_path: &str, handler: F) -> Result<Self, RouteConfigurationError>
     where
         F: Fn(RouteRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<RouteResponse, RequestError>> + Send + 'static,
@@ -369,9 +358,7 @@ fn validate_relative_path(path: &str) -> Result<(), RouteConfigurationError> {
         || path.contains('?')
         || path.contains('#')
         || path.contains("//")
-        || path
-            .split('/')
-            .any(|segment| matches!(segment, "." | ".."))
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
     {
         return Err(RouteConfigurationError::new(
             "route path must be a normalized absolute ASCII path",

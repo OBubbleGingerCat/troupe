@@ -28,13 +28,10 @@ impl DenseIdentityMap {
         space: IdentitySpace,
         maximum: u64,
     ) -> Result<Self, ProjectionError> {
-        let count = u64::try_from(identities.len()).map_err(|_| {
-            ProjectionError::identity_exhausted(space, u64::MAX, maximum)
-        })?;
+        let count = u64::try_from(identities.len())
+            .map_err(|_| ProjectionError::identity_exhausted(space, u64::MAX, maximum))?;
         if count > maximum {
-            return Err(ProjectionError::identity_exhausted(
-                space, count, maximum,
-            ));
+            return Err(ProjectionError::identity_exhausted(space, count, maximum));
         }
 
         let ids = identities
@@ -44,9 +41,7 @@ impl DenseIdentityMap {
                 let id = u64::try_from(index)
                     .ok()
                     .and_then(|value| value.checked_add(1))
-                    .ok_or_else(|| {
-                        ProjectionError::identity_exhausted(space, count, maximum)
-                    })?;
+                    .ok_or_else(|| ProjectionError::identity_exhausted(space, count, maximum))?;
                 Ok((identity, id))
             })
             .collect::<Result<_, ProjectionError>>()?;
@@ -126,7 +121,8 @@ fn exact_finite_double(value: &str) -> Option<f64> {
 
     let significant_bits = u64::BITS - odd_significand.leading_zeros();
     let binary_exponent = factors_of_two.checked_sub(i32::try_from(scale).ok()?)?;
-    let highest_exponent = binary_exponent.checked_add(i32::try_from(significant_bits).ok()? - 1)?;
+    let highest_exponent =
+        binary_exponent.checked_add(i32::try_from(significant_bits).ok()? - 1)?;
     if binary_exponent < -1_074 || highest_exponent > 1_023 {
         return None;
     }

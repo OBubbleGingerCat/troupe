@@ -651,26 +651,11 @@ fn record_scoped_aggregates(
     let Some(scene_id) = usage.scope().scene_id().cloned() else {
         return Ok(());
     };
-    let scene = DiagnosticScope::new(
-        Some(scene_id.clone()),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    );
+    let scene = DiagnosticScope::new(Some(scene_id.clone()), None, None, None, None, None, None);
     record_scoped_aggregate(aggregates, scene, usage)?;
     if let Some(actor_id) = usage.scope().actor_id().cloned() {
-        let actor = DiagnosticScope::new(
-            Some(scene_id),
-            Some(actor_id),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let actor =
+            DiagnosticScope::new(Some(scene_id), Some(actor_id), None, None, None, None, None);
         record_scoped_aggregate(aggregates, actor, usage)?;
     }
     Ok(())

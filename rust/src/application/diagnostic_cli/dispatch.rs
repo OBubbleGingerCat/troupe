@@ -361,11 +361,14 @@ mod tests {
         Python::attach(|py| -> PyResult<()> {
             let sys = py.import("sys")?;
             let io = py.import("io")?;
+            let signal = py.import("signal")?;
             let original_argv = sys.getattr("argv")?.unbind();
             let original_stdout = sys.getattr("stdout")?.unbind();
             let original_stderr = sys.getattr("stderr")?.unbind();
+            let original_signal = signal.getattr("signal")?.unbind();
             let stdout = io.call_method0("StringIO")?;
             let stderr = io.call_method0("StringIO")?;
+            let test_signal = py.eval(c"lambda _signum, _handler: None", None, None)?;
             let missing = format!("/troupe-d07-definitely-missing-{}", std::process::id());
             let argv = PyList::new(
                 py,
@@ -382,15 +385,21 @@ mod tests {
                 sys.setattr("argv", &argv)?;
                 sys.setattr("stdout", &stdout)?;
                 sys.setattr("stderr", &stderr)?;
+                signal.setattr("signal", &test_signal)?;
                 let exit_code = crate::application::cli::main(py)?;
                 let stdout = stdout.call_method0("getvalue")?.extract()?;
                 let stderr = stderr.call_method0("getvalue")?.extract()?;
                 Ok((exit_code, stdout, stderr))
             })();
 
-            sys.setattr("argv", original_argv.bind(py))?;
-            sys.setattr("stdout", original_stdout.bind(py))?;
-            sys.setattr("stderr", original_stderr.bind(py))?;
+            let restore_argv = sys.setattr("argv", original_argv.bind(py));
+            let restore_stdout = sys.setattr("stdout", original_stdout.bind(py));
+            let restore_stderr = sys.setattr("stderr", original_stderr.bind(py));
+            let restore_signal = signal.setattr("signal", original_signal.bind(py));
+            restore_argv?;
+            restore_stdout?;
+            restore_stderr?;
+            restore_signal?;
 
             let (exit_code, stdout, stderr) = result?;
             assert_eq!(exit_code, 1);

@@ -786,6 +786,8 @@ impl RunBinding {
         self.production.upgrade()
     }
 
+    // Unit tests replace the production sink binding with a direct Act hook.
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn diagnostic_admission(&self) -> &DiagnosticAdmissionSlot {
         &self.diagnostic_admission
     }

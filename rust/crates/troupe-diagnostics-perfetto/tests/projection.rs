@@ -2,22 +2,21 @@ use std::{collections::BTreeMap, convert::Infallible, fs, path::PathBuf};
 
 use troupe_diagnostics_core::{
     detail::{
-        ActorDetail, AgentSessionDetail, CanonicalInteger, CustomNumber,
-        DiagnosticAttributeValue, DiagnosticAttributes, DiagnosticDimensions, EmptyDetail,
-        InstantDetail, SpanStartDetail,
+        ActorDetail, AgentSessionDetail, CanonicalInteger, CustomNumber, DiagnosticAttributeValue,
+        DiagnosticAttributes, DiagnosticDimensions, EmptyDetail, InstantDetail, SpanStartDetail,
     },
     event::{
         ActTokenUsageFinalized, AffectedElapsedInterval, AgentMessageDelta, CausalLink,
         ContextUsageSampled, CounterSampled, CustomCounterSampled, CustomInstantOccurred,
-        DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope, InstantOccurred,
-        ObservationGap, SpanFinished, SpanStarted,
+        DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope, InstantOccurred, ObservationGap,
+        SpanFinished, SpanStarted,
     },
-    id::{CanonicalUuid, RunLocalId},
     hub::{
         AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
         DeliveryFailure, EventIdentity, LiveEventNotifier, MandatoryDurableReserver,
         ProductionDiagnosticHub,
     },
+    id::{CanonicalUuid, RunLocalId},
     kinds::{
         CausalRelation, ContextSampleOrigin, CounterKind, CustomSeverity, SpanOutcome,
         UsageAvailability, UsageSource,
@@ -114,12 +113,7 @@ fn start(
     ))
 }
 
-fn finish(
-    sequence: u64,
-    elapsed_ns: u64,
-    scope: DiagnosticScope,
-    span_id: u64,
-) -> DiagnosticEvent {
+fn finish(sequence: u64, elapsed_ns: u64, scope: DiagnosticScope, span_id: u64) -> DiagnosticEvent {
     DiagnosticEvent::SpanFinished(SpanFinished::new(
         header(sequence, elapsed_ns, scope, Vec::new()),
         SchemaU64::new(span_id),
@@ -142,24 +136,14 @@ fn canonical_prefix() -> Vec<DiagnosticEvent> {
     let root = scope(None, None, None, None);
     let scene = scope(Some("scene-1"), None, None, None);
     let actor = scope(Some("scene-1"), Some("actor-1"), None, None);
-    let cue_one = scope(
-        Some("scene-1"),
-        Some("actor-1"),
-        Some("cue-1"),
-        None,
-    );
+    let cue_one = scope(Some("scene-1"), Some("actor-1"), Some("cue-1"), None);
     let act = scope(
         Some("scene-1"),
         Some("actor-1"),
         Some("cue-1"),
         Some("act-1"),
     );
-    let cue_two = scope(
-        Some("scene-1"),
-        Some("actor-1"),
-        Some("cue-2"),
-        None,
-    );
+    let cue_two = scope(Some("scene-1"), Some("actor-1"), Some("cue-2"), None);
 
     let exact_counter = CustomCounterSampled::new(
         header(10, 80, act.clone(), Vec::new()),
@@ -228,10 +212,7 @@ fn canonical_prefix() -> Vec<DiagnosticEvent> {
                 7,
                 50,
                 cue_one.clone(),
-                vec![CausalLink::new(
-                    SchemaU64::new(5),
-                    CausalRelation::Dispatch,
-                )],
+                vec![CausalLink::new(SchemaU64::new(5), CausalRelation::Dispatch)],
             ),
             InstantDetail::CueDispatched(EmptyDetail::new()),
             Some(SchemaU64::new(4)),
@@ -401,7 +382,10 @@ fn canonical_projection_matches_checked_binary_and_packet_goldens() {
             canonical_events,
             fs::read(directory.join("canonical-events.json")).unwrap()
         );
-        assert_eq!(bytes, fs::read(directory.join("expected-trace.pb")).unwrap());
+        assert_eq!(
+            bytes,
+            fs::read(directory.join("expected-trace.pb")).unwrap()
+        );
         assert_eq!(
             packets,
             fs::read_to_string(directory.join("expected-packets.json")).unwrap()
@@ -494,8 +478,12 @@ fn equal_timestamps_keep_canonical_sequence_order() {
     let packets = project_prefix(metadata(2), &events)
         .unwrap()
         .debug_packets_json();
-    let start = packets.find("\"troupe.event.sequence\",\"uint\":\"1\"").unwrap();
-    let finish = packets.find("\"troupe.event.sequence\",\"uint\":\"2\"").unwrap();
+    let start = packets
+        .find("\"troupe.event.sequence\",\"uint\":\"1\"")
+        .unwrap();
+    let finish = packets
+        .find("\"troupe.event.sequence\",\"uint\":\"2\"")
+        .unwrap();
     assert!(start < finish);
 }
 
@@ -541,10 +529,7 @@ fn timestamp_reference_and_identity_boundaries_fail_explicitly() {
                 2,
                 2,
                 root,
-                vec![CausalLink::new(
-                    SchemaU64::new(1),
-                    CausalRelation::Return,
-                )],
+                vec![CausalLink::new(SchemaU64::new(1), CausalRelation::Return)],
             ),
             CounterKind::CueActive,
             SchemaU64::new(0),
@@ -591,7 +576,8 @@ fn exact_large_doubles_and_non_exact_numbers_are_not_rounded() {
     assert!(packets.contains("\"double\":\"9223372036854776000\""));
     assert!(packets.contains("9223372036854775809"));
     assert!(packets.contains("troupe.counter_projection"));
-    assert!(packets.contains(
-        "\"type\":\"instant\",\"track_uuid\":\"1\",\"name\":\"numbers.non_exact\""
-    ));
+    assert!(
+        packets
+            .contains("\"type\":\"instant\",\"track_uuid\":\"1\",\"name\":\"numbers.non_exact\"")
+    );
 }

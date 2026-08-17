@@ -1192,6 +1192,7 @@ impl WriterSupervisor {
         deadlines: WriterDeadlines,
         downstream: Box<dyn CommitObserver + Send>,
     ) -> Result<Self, BootstrapError> {
+        let writer_run_id = store.metadata().run_id();
         let observer = BootstrapCommitObserver {
             ingress: ingress.clone(),
             downstream,
@@ -1213,7 +1214,7 @@ impl WriterSupervisor {
         let thread = thread::Builder::new()
             .name("troupe-diagnostic-writer".to_owned())
             .spawn(move || {
-                let _activity = WriterThreadActivity::started();
+                let _activity = WriterThreadActivity::started(writer_run_id);
                 let failure_ingress = thread_ingress.clone();
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     run_writer(
@@ -1382,26 +1383,53 @@ impl Drop for WriterSupervisor {
     }
 }
 
-struct WriterThreadActivity;
+struct WriterThreadActivity {
+    #[cfg(test)]
+    run_id: CanonicalUuid,
+}
 
 impl WriterThreadActivity {
-    fn started() -> Self {
+    fn started(run_id: CanonicalUuid) -> Self {
         #[cfg(test)]
-        ACTIVE_WRITER_THREADS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Self
+        {
+            active_writer_runs()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(run_id);
+            Self { run_id }
+        }
+        #[cfg(not(test))]
+        {
+            let _ = run_id;
+            Self {}
+        }
     }
 }
 
 impl Drop for WriterThreadActivity {
     fn drop(&mut self) {
         #[cfg(test)]
-        ACTIVE_WRITER_THREADS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        active_writer_runs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.run_id);
     }
 }
 
 #[cfg(test)]
-static ACTIVE_WRITER_THREADS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+fn active_writer_runs() -> &'static Mutex<std::collections::HashSet<CanonicalUuid>> {
+    static ACTIVE: std::sync::OnceLock<Mutex<std::collections::HashSet<CanonicalUuid>>> =
+        std::sync::OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+fn writer_thread_active(run_id: CanonicalUuid) -> bool {
+    active_writer_runs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&run_id)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_writer(
@@ -1825,7 +1853,6 @@ mod tests {
         fs::{self, OpenOptions},
         io::Write,
         net::TcpStream,
-        sync::atomic::Ordering,
         time::Duration,
     };
 
@@ -2010,7 +2037,7 @@ mod tests {
             assert_eq!(snapshot.locator_path.is_some(), index >= 6);
             assert_listener_stopped(snapshot.connect_addr);
             assert_registry_empty(root.path());
-            assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+            assert!(!writer_thread_active(run_id));
 
             if index >= 2 {
                 let shared = SharedArchiveLease::acquire(&run_directory)
@@ -2042,7 +2069,7 @@ mod tests {
         assert!(guard.locator_path().is_file());
         assert_eq!(guard.server_identity().run_id(), run_id);
         assert_eq!(guard.writer_progress().unwrap().committed_sequence(), 0);
-        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 1);
+        assert!(writer_thread_active(run_id));
         let address = guard.connect_addr();
         let error = SharedArchiveLease::acquire(&run_directory)
             .expect_err("active Runtime lease excludes archive readers");
@@ -2056,7 +2083,7 @@ mod tests {
         guard.shutdown().expect("shutdown diagnostics");
         assert_listener_stopped(Some(address));
         assert_registry_empty(root.path());
-        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+        assert!(!writer_thread_active(run_id));
         drop(
             SharedArchiveLease::acquire(&run_directory)
                 .expect("shutdown released the active archive lease"),
@@ -2094,7 +2121,7 @@ mod tests {
 
         assert_listener_stopped(Some(address));
         assert_registry_empty(root.path());
-        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+        assert!(!writer_thread_active(run_id));
         let store = DiagnosticStore::open_validated(&run_directory, run_id)
             .expect("reopen clean terminal archive");
         assert!(store.metadata().clean_shutdown());
@@ -2149,7 +2176,7 @@ mod tests {
                 .any(|failure| failure.component() == "registry")
         );
         assert_listener_stopped(Some(address));
-        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+        assert!(!writer_thread_active(run_id));
         drop(
             SharedArchiveLease::acquire(&run_directory)
                 .expect("failed unpublish does not retain the active lease"),
@@ -2175,18 +2202,13 @@ mod tests {
         let root = TestRoot::new();
         fs::write(root.path().join(".troupe"), b"not a directory")
             .expect("create invalid state root");
+        let run_id = CanonicalUuid::new(Uuid::new_v4());
         let mut checkpoint = NoopCheckpoint;
-        let error = bootstrap_root(
-            root.path(),
-            CanonicalUuid::new(Uuid::new_v4()),
-            config(),
-            components(),
-            &mut checkpoint,
-        )
-        .expect_err("reject unwritable state-root shape");
+        let error = bootstrap_root(root.path(), run_id, config(), components(), &mut checkpoint)
+            .expect_err("reject unwritable state-root shape");
 
         assert_eq!(error.phase(), BootstrapPhase::ArchivePrepared);
-        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+        assert!(!writer_thread_active(run_id));
     }
 
     #[test]
@@ -2211,7 +2233,7 @@ mod tests {
         assert_eq!(error.phase(), BootstrapPhase::WriterSupervisorReady);
         assert!(error.cleanup_failures().is_empty());
         assert_registry_empty(root.path());
-        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+        assert!(!writer_thread_active(run_id));
         drop(
             SharedArchiveLease::acquire(&run_directory)
                 .expect("quota failure released the active archive lease"),

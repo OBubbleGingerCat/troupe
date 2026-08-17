@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use agent_client_protocol::schema::v1::{SessionId, SessionUpdate};
 use uuid::Uuid;
 
+#[cfg(test)]
+use super::observer::AgentTurnDiagnosticOutcome;
 use super::observer::{
     AgentDiagnosticErrorCode, AgentDiagnosticObservation, AgentDiagnosticObserver,
     AgentTurnDiagnosticSettlement,
 };
-#[cfg(test)]
-use super::observer::AgentTurnDiagnosticOutcome;
 use super::payload::ToolPayloadCapturePolicy;
 use super::usage::{TurnTerminalObservation, TurnTerminalSettlement};
 use super::{context, cost, message, payload, plan, thinking, tool};
@@ -1180,7 +1180,9 @@ mod tests {
             Some(AgentTurnDiagnosticOutcome::Cancelled)
         );
         assert_eq!(
-            observations[2].error_code().map(AgentDiagnosticErrorCode::as_str),
+            observations[2]
+                .error_code()
+                .map(AgentDiagnosticErrorCode::as_str),
             Some("prompt_not_submitted")
         );
         assert!(owner.failures().is_empty());

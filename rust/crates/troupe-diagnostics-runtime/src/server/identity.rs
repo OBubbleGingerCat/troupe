@@ -225,13 +225,10 @@ impl std::error::Error for IdentityError {}
 fn valid_limit_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
-        })
         && name
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_lowercase)
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
 }
 
 fn derive_local_endpoint(bind: &BindEndpoint) -> Result<WebBaseUrl, IdentityError> {
@@ -264,12 +261,10 @@ fn normalized_base_path(advertise_url: Option<&WebBaseUrl>) -> Result<String, Id
         ));
     }
     let path = path.strip_suffix('/').unwrap_or(path);
-    if path.is_empty()
-        || path
-            .split('/')
-            .any(|segment| matches!(segment, "." | ".."))
-    {
-        return Err(IdentityError::new("advertise URL base path is not normalized"));
+    if path.is_empty() || path.split('/').any(|segment| matches!(segment, "." | "..")) {
+        return Err(IdentityError::new(
+            "advertise URL base path is not normalized",
+        ));
     }
     Ok(path.to_owned())
 }

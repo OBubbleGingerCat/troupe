@@ -136,9 +136,7 @@ impl AgentDiagnosticObservation {
             Self::SessionClosing(_) => AgentDiagnosticObservationKind::SessionClosing,
             Self::SessionClosed(_) => AgentDiagnosticObservationKind::SessionClosed,
             Self::TurnSubmitted(_) => AgentDiagnosticObservationKind::TurnSubmitted,
-            Self::TurnSupervisorHandoff(_) => {
-                AgentDiagnosticObservationKind::TurnSupervisorHandoff
-            }
+            Self::TurnSupervisorHandoff(_) => AgentDiagnosticObservationKind::TurnSupervisorHandoff,
             Self::TurnTerminal { .. } => AgentDiagnosticObservationKind::TurnTerminal,
             Self::Candidate(candidate) => {
                 AgentDiagnosticObservationKind::Candidate(candidate.kind())

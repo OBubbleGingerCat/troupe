@@ -13,21 +13,18 @@ use troupe_diagnostics_runtime::query::reader::CapturedEvent;
 
 use crate::{
     collect::{
-        ProjectionCollector, ProjectionError, ProjectionLimits, ProjectionMetadata,
-        ProjectionPlan, USAGE_COVERAGE_COUNTERS, UsageField, UsageSummary,
-        builtin_counter_series, context_cost_series, context_counter_series,
-        custom_counter_series, usage_counter_series, usage_coverage_series,
+        ProjectionCollector, ProjectionError, ProjectionLimits, ProjectionMetadata, ProjectionPlan,
+        USAGE_COVERAGE_COUNTERS, UsageField, UsageSummary, builtin_counter_series,
+        context_cost_series, context_counter_series, custom_counter_series, usage_counter_series,
+        usage_coverage_series,
     },
     identity::{ExactCounterValue, exact_counter_value},
     schema::{
         BuiltinClock, CounterDescriptor, DebugAnnotation, TracePacket, TrackDescriptor, TrackEvent,
-        TrackEventType,
-        debug_annotation, encode_trace_packet_fragment, trace_packet, track_descriptor,
-        track_event,
+        TrackEventType, debug_annotation, encode_trace_packet_fragment, trace_packet,
+        track_descriptor, track_event,
     },
-    tracks::{
-        ROOT_TRACK_IDENTITY, counter_track_identity, scope_track_identity,
-    },
+    tracks::{ROOT_TRACK_IDENTITY, counter_track_identity, scope_track_identity},
 };
 
 const TRACK_EVENT_PACKET_SEQUENCE_ID: u32 = 1;
@@ -312,10 +309,7 @@ impl PacketProjector<'_> {
                     ));
                 }
                 if let Some(kind) = value.affected_kind() {
-                    annotations.push(string_annotation(
-                        "troupe.gap.affected_kind",
-                        kind.as_str(),
-                    ));
+                    annotations.push(string_annotation("troupe.gap.affected_kind", kind.as_str()));
                 }
                 if let Some(scope) = value.affected_scope() {
                     annotations.push(string_annotation(
@@ -375,20 +369,11 @@ impl PacketProjector<'_> {
                         severity.as_str(),
                     ));
                 }
-                vec![self.instant_packet(
-                    value.header(),
-                    &track,
-                    value.name(),
-                    annotations,
-                )?]
+                vec![self.instant_packet(value.header(), &track, value.name(), annotations)?]
             }
             DiagnosticEvent::CustomCounterSampled(value) => {
                 let scope_track = scope_track_identity(value.header().scope());
-                let series = custom_counter_series(
-                    value.name(),
-                    value.unit(),
-                    value.dimensions(),
-                );
+                let series = custom_counter_series(value.name(), value.unit(), value.dimensions());
                 let track = counter_track_identity(&scope_track, &series);
                 let mut annotations = dimension_annotations(value.dimensions());
                 if let Some(unit) = value.unit() {
@@ -412,12 +397,13 @@ impl PacketProjector<'_> {
             .first_mut()
             .expect("every canonical diagnostic event has a structural projection packet");
         self.attach_flows(header.sequence(), first)?;
-        self.next_sequence = self.next_sequence.checked_add(1).ok_or(
-            ProjectionError::SequenceMismatch {
-                expected: u64::MAX,
-                actual: u64::MAX,
-            },
-        )?;
+        self.next_sequence =
+            self.next_sequence
+                .checked_add(1)
+                .ok_or(ProjectionError::SequenceMismatch {
+                    expected: u64::MAX,
+                    actual: u64::MAX,
+                })?;
         Ok(packets)
     }
 
@@ -487,10 +473,8 @@ impl PacketProjector<'_> {
         &self,
         value: &troupe_diagnostics_core::event::InstantOccurred,
     ) -> Result<Vec<TracePacket>, ProjectionError> {
-        let track = self.containing_or_scope_track(
-            value.header().scope(),
-            value.containing_span_id(),
-        )?;
+        let track =
+            self.containing_or_scope_track(value.header().scope(), value.containing_span_id())?;
         Ok(vec![self.instant_packet(
             value.header(),
             &track,
@@ -514,17 +498,10 @@ impl PacketProjector<'_> {
                 observed.get(),
             ));
         }
-        let mut packets = vec![self.instant_packet(
-            value.header(),
-            &scope_track,
-            "context.usage",
-            summary,
-        )?];
+        let mut packets =
+            vec![self.instant_packet(value.header(), &scope_track, "context.usage", summary)?];
         if let Some(used) = value.context_used_tokens() {
-            let track = counter_track_identity(
-                &scope_track,
-                context_counter_series("used_tokens"),
-            );
+            let track = counter_track_identity(&scope_track, context_counter_series("used_tokens"));
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
@@ -535,10 +512,8 @@ impl PacketProjector<'_> {
             )?);
         }
         if let Some(window) = value.context_window_tokens() {
-            let track = counter_track_identity(
-                &scope_track,
-                context_counter_series("window_tokens"),
-            );
+            let track =
+                counter_track_identity(&scope_track, context_counter_series("window_tokens"));
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
@@ -552,10 +527,8 @@ impl PacketProjector<'_> {
             value.cumulative_cost_amount(),
             value.cumulative_cost_currency(),
         ) {
-            let track = counter_track_identity(
-                &scope_track,
-                &context_cost_series(currency.as_str()),
-            );
+            let track =
+                counter_track_identity(&scope_track, &context_cost_series(currency.as_str()));
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
@@ -580,8 +553,7 @@ impl PacketProjector<'_> {
             values: UsageField::ALL
                 .into_iter()
                 .filter_map(|field| {
-                    usage_value(value, field)
-                        .map(|tokens| (field, tokens.as_str().to_owned()))
+                    usage_value(value, field).map(|tokens| (field, tokens.as_str().to_owned()))
                 })
                 .collect(),
         };
@@ -599,10 +571,8 @@ impl PacketProjector<'_> {
                 .or_insert_with(|| "0".to_owned());
             add_nonnegative_decimal(total, amount);
             let total = total.clone();
-            let track = counter_track_identity(
-                ROOT_TRACK_IDENTITY,
-                usage_counter_series(field.as_str()),
-            );
+            let track =
+                counter_track_identity(ROOT_TRACK_IDENTITY, usage_counter_series(field.as_str()));
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
@@ -620,10 +590,8 @@ impl PacketProjector<'_> {
         }
         for coverage in USAGE_COVERAGE_COUNTERS {
             let count = self.coverage.get(coverage).copied().unwrap_or(0);
-            let track = counter_track_identity(
-                ROOT_TRACK_IDENTITY,
-                usage_coverage_series(coverage),
-            );
+            let track =
+                counter_track_identity(ROOT_TRACK_IDENTITY, usage_coverage_series(coverage));
             packets.push(self.numeric_packet(
                 value.header(),
                 &track,
@@ -703,10 +671,7 @@ impl PacketProjector<'_> {
                     "troupe.counter.value_decimal",
                     canonical_decimal,
                 ));
-                annotations.push(string_annotation(
-                    "troupe.counter_projection",
-                    "not_exact",
-                ));
+                annotations.push(string_annotation("troupe.counter_projection", "not_exact"));
                 self.event_packet(
                     header,
                     fallback_track_identity,
@@ -765,7 +730,9 @@ impl PacketProjector<'_> {
         packet: &mut TracePacket,
     ) -> Result<(), ProjectionError> {
         let Some(trace_packet::Data::TrackEvent(event)) = packet.data.as_mut() else {
-            return Err(ProjectionError::unknown_identity("flow packet is not a TrackEvent"));
+            return Err(ProjectionError::unknown_identity(
+                "flow packet is not a TrackEvent",
+            ));
         };
         if let Some(flows) = self.plan.starting_flows.get(&sequence) {
             for (index, flow) in flows.iter().enumerate() {
@@ -895,11 +862,12 @@ fn instant_detail_annotations(detail: &InstantDetail) -> Vec<DebugAnnotation> {
             );
             annotations
         }
-        InstantDetail::AgentTurnTerminal(detail)
-        | InstantDetail::AgentTurnSettled(detail) => detail
-            .error_code()
-            .map(|error| vec![string_annotation("troupe.error.code", error)])
-            .unwrap_or_default(),
+        InstantDetail::AgentTurnTerminal(detail) | InstantDetail::AgentTurnSettled(detail) => {
+            detail
+                .error_code()
+                .map(|error| vec![string_annotation("troupe.error.code", error)])
+                .unwrap_or_default()
+        }
         InstantDetail::ToolUpdated(detail) => tool_annotations(detail),
         InstantDetail::ResultSubmitted(detail)
         | InstantDetail::ResultRejected(detail)
@@ -911,11 +879,7 @@ fn instant_detail_annotations(detail: &InstantDetail) -> Vec<DebugAnnotation> {
                 annotations.push(string_annotation("troupe.result.issue.code", issue.code()));
                 annotations.push(string_annotation("troupe.result.issue.path", issue.path()));
             }
-            optional_string_annotation(
-                &mut annotations,
-                "troupe.error.code",
-                detail.error_code(),
-            );
+            optional_string_annotation(&mut annotations, "troupe.error.code", detail.error_code());
             annotations
         }
         InstantDetail::DiagnosticComponentFailed(detail) => {
@@ -983,11 +947,7 @@ fn tool_annotations(
         string_annotation("troupe.tool.kind", detail.tool_kind().as_str()),
         string_annotation("troupe.tool.status", detail.status().as_str()),
     ];
-    optional_string_annotation(
-        &mut annotations,
-        "troupe.error.code",
-        detail.error_code(),
-    );
+    optional_string_annotation(&mut annotations, "troupe.error.code", detail.error_code());
     annotations
 }
 
@@ -1021,10 +981,9 @@ fn attribute_annotations(
             match value {
                 DiagnosticAttributeValue::Null => string_annotation(&name, "null"),
                 DiagnosticAttributeValue::Boolean(value) => bool_annotation(&name, *value),
-                DiagnosticAttributeValue::Integer(value) => exact_integer_annotation(
-                    &name,
-                    value.as_str(),
-                ),
+                DiagnosticAttributeValue::Integer(value) => {
+                    exact_integer_annotation(&name, value.as_str())
+                }
                 DiagnosticAttributeValue::Decimal(value) => {
                     string_annotation(&name, value.as_str())
                 }
@@ -1063,9 +1022,7 @@ fn dimension_annotations(
                 DiagnosticDimension::Integer(value) => {
                     exact_integer_annotation(&name, value.as_str())
                 }
-                DiagnosticDimension::Decimal(value) => {
-                    string_annotation(&name, value.as_str())
-                }
+                DiagnosticDimension::Decimal(value) => string_annotation(&name, value.as_str()),
                 DiagnosticDimension::String(value) => string_annotation(&name, value),
             }
         })
@@ -1090,10 +1047,7 @@ fn optional_string_annotation(
 }
 
 fn string_annotation(name: &str, value: &str) -> DebugAnnotation {
-    annotation(
-        name,
-        debug_annotation::Value::StringValue(value.to_owned()),
-    )
+    annotation(name, debug_annotation::Value::StringValue(value.to_owned()))
 }
 
 fn uint_annotation(name: &str, value: u64) -> DebugAnnotation {
@@ -1159,10 +1113,7 @@ fn packets_json(packets: &[TracePacket]) -> String {
                 output.push_str(",\"timestamp\":");
                 push_optional_u64(&mut output, packet.timestamp);
                 output.push_str(",\"clock_id\":");
-                push_optional_u64(
-                    &mut output,
-                    packet.timestamp_clock_id.map(u64::from),
-                );
+                push_optional_u64(&mut output, packet.timestamp_clock_id.map(u64::from));
                 output.push_str(",\"type\":");
                 push_json_string(
                     &mut output,
@@ -1212,12 +1163,10 @@ fn packets_json(packets: &[TracePacket]) -> String {
                             write!(output, ",\"bool\":{value}").expect("write JSON bool")
                         }
                         Some(debug_annotation::Value::UintValue(value)) => {
-                            write!(output, ",\"uint\":\"{value}\"")
-                                .expect("write JSON uint")
+                            write!(output, ",\"uint\":\"{value}\"").expect("write JSON uint")
                         }
                         Some(debug_annotation::Value::IntValue(value)) => {
-                            write!(output, ",\"int\":\"{value}\"")
-                                .expect("write JSON int")
+                            write!(output, ",\"int\":\"{value}\"").expect("write JSON int")
                         }
                         Some(debug_annotation::Value::DoubleValue(value)) => {
                             output.push_str(",\"double\":");
@@ -1242,14 +1191,11 @@ fn packets_json(packets: &[TracePacket]) -> String {
 }
 
 fn push_packet_sequence_id(output: &mut String, packet: &TracePacket) {
-    let value = packet
-        .optional_trusted_packet_sequence_id
-        .as_ref()
-        .map(
-            |trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(value)| {
-                u64::from(*value)
-            },
-        );
+    let value = packet.optional_trusted_packet_sequence_id.as_ref().map(
+        |trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(value)| {
+            u64::from(*value)
+        },
+    );
     push_optional_u64(output, value);
 }
 

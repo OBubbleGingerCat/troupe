@@ -509,17 +509,24 @@ mod tests {
         assert!(start.header().scope().actor_id().is_none());
     }
 
-    fn assert_scene_finish(
-        event: &AcceptedDiagnosticEvent,
-        sequence: u64,
+    fn assert_scene_finish<'a>(
+        events: &'a [AcceptedDiagnosticEvent],
         span_id: u64,
         id: &str,
         outcome: SpanOutcome,
         code: Option<&str>,
-    ) {
-        assert_eq!(event.identity().sequence().get(), sequence);
+    ) -> &'a AcceptedDiagnosticEvent {
+        let event = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.event(),
+                    DiagnosticEvent::SpanFinished(finish) if finish.span_id().get() == span_id
+                )
+            })
+            .unwrap_or_else(|| panic!("missing Scene lifecycle finish for span {span_id}"));
         let DiagnosticEvent::SpanFinished(finish) = event.event() else {
-            panic!("expected Scene span finish")
+            unreachable!("the Scene finish lookup only returns SpanFinished events")
         };
         assert_eq!(finish.span_id().get(), span_id);
         assert_eq!(finish.outcome(), outcome);
@@ -528,6 +535,16 @@ mod tests {
             finish.header().scope().scene_id().map(RunLocalId::as_str),
             Some(id)
         );
+        event
+    }
+
+    fn scene_is_finished(events: &[AcceptedDiagnosticEvent], span_id: u64) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event.event(),
+                DiagnosticEvent::SpanFinished(finish) if finish.span_id().get() == span_id
+            )
+        })
     }
 
     #[test]
@@ -537,33 +554,38 @@ mod tests {
             let harness = Harness::new(py, None);
             let first = harness.scene(py, "scene-first");
             let second = harness.scene(py, "scene-second");
+            let first_span_id = snapshot_for_scene(&first).unwrap().scene_span_id().get();
+            let second_span_id = snapshot_for_scene(&second).unwrap().scene_span_id().get();
 
             task_finished(&first, None);
-            assert_eq!(harness.log.events().len(), 5);
+            assert!(!scene_is_finished(&harness.log.events(), first_span_id));
             second.close();
-            assert_eq!(harness.log.events().len(), 5);
+            assert!(!scene_is_finished(&harness.log.events(), second_span_id));
             first.close();
+            assert!(scene_is_finished(&harness.log.events(), first_span_id));
+            assert!(!scene_is_finished(&harness.log.events(), second_span_id));
             task_finished(&second, None);
 
             let events = harness.log.events();
-            assert_eq!(events.len(), 7);
             assert_scene_start(&events[3], 4, "scene-first", 1);
             assert_scene_start(&events[4], 5, "scene-second", 1);
-            assert_scene_finish(
-                &events[5],
-                6,
-                4,
+            let first_finish = assert_scene_finish(
+                &events,
+                first_span_id,
                 "scene-first",
                 SpanOutcome::Completed,
                 None,
             );
-            assert_scene_finish(
-                &events[6],
-                7,
-                5,
+            let second_finish = assert_scene_finish(
+                &events,
+                second_span_id,
                 "scene-second",
                 SpanOutcome::Completed,
                 None,
+            );
+            assert!(
+                first_finish.identity().sequence().get()
+                    < second_finish.identity().sequence().get()
             );
             assert!(events.windows(2).all(|pair| {
                 pair[0].event().header().elapsed_ns().get()
@@ -626,11 +648,16 @@ mod tests {
         Python::attach(|py| {
             let harness = Harness::new(py, None);
             let failed = harness.scene(py, "scene-failed");
+            let failed_span_id = snapshot_for_scene(&failed).unwrap().scene_span_id().get();
             let failure = PyRuntimeError::new_err("secret Scene failure payload");
             task_finished(&failed, Some(&failure));
             failed.close();
 
             let cancelled = harness.scene(py, "scene-cancelled");
+            let cancelled_span_id = snapshot_for_scene(&cancelled)
+                .unwrap()
+                .scene_span_id()
+                .get();
             let cancellation = py
                 .import("asyncio")?
                 .getattr("CancelledError")?
@@ -641,17 +668,15 @@ mod tests {
 
             let events = harness.log.events();
             assert_scene_finish(
-                &events[4],
-                5,
-                4,
+                &events,
+                failed_span_id,
                 "scene-failed",
                 SpanOutcome::Failed,
                 Some(SCENE_FAILED),
             );
             assert_scene_finish(
-                &events[6],
-                7,
-                6,
+                &events,
+                cancelled_span_id,
                 "scene-cancelled",
                 SpanOutcome::Cancelled,
                 Some(SCENE_CANCELLED),
