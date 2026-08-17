@@ -3112,7 +3112,7 @@ def test_run_wraps_a_bounded_smoke_timeout_after_subprocess_reaping(
     assert calls[0]["timeout"] == timeout_seconds
 
 
-def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
+def test_current_smoke_wiring_uses_realized_package_and_writable_production(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3125,7 +3125,10 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     child = workspace / "child-venv"
     outside = workspace / "outside-repository"
     events_path = workspace / "events.json"
-    fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    source_fixture = (
+        ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    )
+    fixture = workspace / verifier.WHEEL_SMOKE_PRODUCTION
     raw_args = ["--events", str(events_path), "--value", "7", "input.txt"]
     expected_events = _installed_smoke_events(raw_args)
     managed_python = tmp_path / "managed" / "bin" / "python3.10"
@@ -3144,6 +3147,26 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     builder_init_base_executables: list[str] = []
     builder_base_executables: list[str] = []
     post_create_base_executables: list[str] = []
+    run_id = "123e4567-e89b-42d3-a456-426614174000"
+    archive = fixture / ".troupe" / "diagnostics" / "runs" / run_id
+    locator = {
+        "locator_schema_version": 1,
+        "run_id": run_id,
+        "local_url": "http://127.0.0.1:41223/",
+        "advertise_url": None,
+        "archive_directory": str(archive),
+        "security_scope": "trusted_network",
+    }
+    ready_line = (
+        "troupe: diagnostic ready "
+        + json.dumps(locator, separators=(",", ":"))
+        + "\n"
+    )
+
+    def realized_payload(path: Path) -> dict[str, object]:
+        payload = _installed_smoke_payload(path)
+        payload["exports"] = verifier.REALIZED_PUBLIC_EXPORTS
+        return payload
 
     class FakeEnvBuilder:
         def __init__(self, *, with_pip: bool) -> None:
@@ -3158,7 +3181,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
                 executable = bin_dir / name
                 executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 executable.chmod(0o755)
-            payload = _installed_smoke_payload(path)
+            payload = realized_payload(path)
             for key in ("troupe_file", "runtime_file", "dependency_file"):
                 installed_file = Path(str(payload[key]))
                 installed_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3204,13 +3227,17 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         timeline.append(f"run-{index}")
         calls.append((command, cwd, dict(env), dict(kwargs)))
         if index == 2:
-            return json.dumps(_installed_smoke_payload(child))
+            return json.dumps(realized_payload(child))
         if index == 4:
             events_path.write_text(json.dumps(expected_events), encoding="utf-8")
             (workspace / "agent-events.jsonl").write_text(
                 _mock_agent_events(),
                 encoding="utf-8",
             )
+            archive.mkdir(parents=True)
+            stderr_sink = kwargs.get("stderr_sink")
+            assert isinstance(stderr_sink, list)
+            stderr_sink.append(ready_line)
         return ""
 
     monkeypatch.setattr(verifier, "_run", run)
@@ -3233,6 +3260,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         "paths": 0,
         "events": 0,
         "agent_cleanup": 0,
+        "readiness": 0,
     }
     for name, key in (
         ("_validate_smoke_tools", "tools"),
@@ -3240,6 +3268,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         ("_validate_installed_paths", "paths"),
         ("_validate_smoke_events", "events"),
         ("_validate_mock_agent_cleanup", "agent_cleanup"),
+        ("_validate_diagnostic_ready_stderr", "readiness"),
     ):
         real = getattr(verifier, name)
 
@@ -3275,6 +3304,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         "paths": 1,
         "events": 1,
         "agent_cleanup": 1,
+        "readiness": 1,
     }
     assert timeline == [
         "run-0",
@@ -3287,6 +3317,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         "which-troupe",
         "run-3",
         "run-4",
+        "validate-readiness",
         "validate-events",
         "validate-agent_cleanup",
     ]
@@ -3303,9 +3334,13 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         expected_kwargs: dict[str, object] = {}
         if index in (2, 4):
             expected_kwargs["timeout"] = verifier.SMOKE_TIMEOUT
-        if index in (3, 4):
+        if index == 3:
             expected_kwargs["forbidden_stderr"] = "troupe:"
+        if index == 4:
+            expected_kwargs["stderr_sink"] = [ready_line]
         assert kwargs == expected_kwargs
+    assert fixture.is_dir()
+    assert not (source_fixture / ".troupe").exists()
 
 
 @pytest.mark.parametrize("failure", ["os-error", "called-process-error", "abort"])

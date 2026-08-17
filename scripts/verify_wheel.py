@@ -1723,12 +1723,12 @@ def _validate_smoke_payload(
     child_venv: Path,
     payload: Mapping[str, object],
     *,
-    diagnostics: bool = False,
+    realized: bool = False,
 ) -> None:
     expected_values: dict[str, object] = {
         "production_identity": True,
         "production_module": "troupe",
-        "exports": REALIZED_PUBLIC_EXPORTS if diagnostics else PUBLIC_EXPORTS,
+        "exports": REALIZED_PUBLIC_EXPORTS if realized else PUBLIC_EXPORTS,
         "public_identities": True,
         "public_modules": True,
         "schema_contract": True,
@@ -2043,7 +2043,7 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
     _validate_smoke_payload(
         child_venv,
         payload,
-        diagnostics=diagnostics is not None,
+        realized=True,
     )
     _validate_smoke_tools(child_venv, env, diagnostics=diagnostics is not None)
 
@@ -2080,35 +2080,23 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
     source_fixture = (
         ROOT / "tests" / "fixtures" / "productions" / WHEEL_SMOKE_PRODUCTION
     )
-    if diagnostics is None:
-        fixture = source_fixture
-    else:
-        fixture = workspace / WHEEL_SMOKE_PRODUCTION
-        shutil.copytree(
-            source_fixture,
-            fixture,
-            ignore=shutil.ignore_patterns(".troupe", "__pycache__", "*.pyc", "*.pyo"),
-        )
+    fixture = workspace / WHEEL_SMOKE_PRODUCTION
+    shutil.copytree(
+        source_fixture,
+        fixture,
+        ignore=shutil.ignore_patterns(".troupe", "__pycache__", "*.pyc", "*.pyo"),
+    )
     raw_args = ["--events", str(events), "--value", "7", "input.txt"]
     command = ["troupe", "--production", str(fixture), "--", *raw_args]
-    if diagnostics is None:
-        _run(
-            command,
-            cwd=outside,
-            env=env,
-            forbidden_stderr="troupe:",
-            timeout=SMOKE_TIMEOUT,
-        )
-    else:
-        production_stderr: list[str] = []
-        _run(
-            command,
-            cwd=outside,
-            env=env,
-            stderr_sink=production_stderr,
-            timeout=SMOKE_TIMEOUT,
-        )
-        _validate_diagnostic_ready_stderr(production_stderr[0], fixture)
+    production_stderr: list[str] = []
+    _run(
+        command,
+        cwd=outside,
+        env=env,
+        stderr_sink=production_stderr,
+        timeout=SMOKE_TIMEOUT,
+    )
+    _validate_diagnostic_ready_stderr(production_stderr[0], fixture)
     _validate_smoke_events(events, raw_args)
     _validate_mock_agent_cleanup(workspace / "agent-events.jsonl")
     return diagnostics_result
