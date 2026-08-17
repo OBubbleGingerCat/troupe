@@ -1,7 +1,10 @@
 {
-  "state": "planned",
+  "state": "realized",
   "introduced": [],
-  "modified": [],
+  "modified": [
+    "scripts/test_linux_release.sh",
+    "tests/unit/test_release_script.py"
+  ],
   "removed": [],
   "generated": []
 }

@@ -1,8 +1,26 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_release_script.py"
+    ],
+    [
+      "scripts/test_linux_release.sh",
+      "diagnostics"
+    ],
+    [
+      "scripts/test_linux_release.sh",
+      "all"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm",
+    "perfetto",
+    "playwright"
+  ],
   "exclusive_resources": []
 }

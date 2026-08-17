@@ -30,6 +30,19 @@ WHEEL_NAME = BASE_ARTIFACTS.release_wheel_name
 CALLER_LIBRARY_PATH = "/caller/lib-one:/caller/lib-two"
 CALLER_CONDA_PREFIX = "/caller/conda"
 CALLER_PYTHON_HOME = sys.base_prefix
+ATTEMPT_ID = "00000000-0000-4000-8000-000000000001"
+DIAGNOSTIC_ORDER = [
+    "V00",
+    "V04",
+    "V13",
+    "V05",
+    "V07",
+    "V08",
+    "V09",
+    "V10",
+    "V14",
+    "V15",
+]
 
 
 class Call(NamedTuple):
@@ -70,6 +83,8 @@ def _fake_tools(tmp_path: Path, sandbox: Path) -> tuple[dict[str, str], Path, Pa
     (temporary / "caller-owned-sentinel").write_text("preserve\n", encoding="utf-8")
     log = tmp_path / "calls.bin"
     timeline = tmp_path / "timeline.log"
+    diagnostic_log = tmp_path / "diagnostics.jsonl"
+    timeout_log = tmp_path / "timeouts.jsonl"
     checkout_uid = sandbox.stat().st_uid + 100_000
     implementation = """#!/usr/bin/env bash
 set -euo pipefail
@@ -125,6 +140,82 @@ fi
         executable = tools / name
         executable.write_text(implementation, encoding="utf-8")
         executable.chmod(0o755)
+    diagnostic_implementation = r"""#!/usr/bin/env bash
+set -euo pipefail
+tool="$(basename "$0")"
+label="$tool"
+case "$tool" in
+  run_diagnostic_node_gate.sh) label="${1-}" ;;
+  test_diagnostics_wheel.sh) label=V07 ;;
+  test_diagnostics_python_compat.sh) label=V08 ;;
+  test_diagnostics_frontend_release.sh) label=V09 ;;
+  test_diagnostics_rust_quality.sh) label=V10 ;;
+  test_diagnostics_perfetto_release.sh) label=V15 ;;
+esac
+printf 'tool:diagnostic:%s:%q\n' "$label" "$*" >> "$TROUPE_RELEASE_TEST_TIMELINE"
+env -u PYTHONHOME "$TROUPE_RELEASE_TEST_PYTHON" - "$TROUPE_RELEASE_DIAGNOSTIC_LOG" "$tool" "$label" "$@" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({
+        "tool": sys.argv[2],
+        "label": sys.argv[3],
+        "argv": sys.argv[4:],
+        "gate_tmp": os.environ.get("TROUPE_GATE_TMP"),
+        "npm_cache": os.environ.get("TROUPE_NPM_CACHE"),
+        "playwright_cache": os.environ.get("TROUPE_PLAYWRIGHT_CACHE"),
+        "perfetto_cache": os.environ.get("TROUPE_PERFETTO_CACHE"),
+    }, sort_keys=True) + "\n")
+PY
+if [[ "$label" == V05 && -n "${TROUPE_GATE_TMP-}" ]]; then
+  : > "$TROUPE_GATE_TMP/V05-performance-raw.json"
+fi
+if [[ "$label" == V07 ]]; then
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == --report ]]; then
+      : > "$2"
+      break
+    fi
+    shift
+  done
+fi
+if [[ "${TROUPE_RELEASE_FAIL_DIAGNOSTIC-}" == "$label" ]]; then
+  exit "${TROUPE_RELEASE_FAIL_CODE:-23}"
+fi
+"""
+    for name in (
+        "run_diagnostic_node_gate.sh",
+        "test_diagnostics_wheel.sh",
+        "test_diagnostics_python_compat.sh",
+        "test_diagnostics_frontend_release.sh",
+        "test_diagnostics_rust_quality.sh",
+        "test_diagnostics_perfetto_release.sh",
+    ):
+        executable = sandbox / "scripts" / name
+        executable.write_text(diagnostic_implementation, encoding="utf-8")
+        executable.chmod(0o755)
+    timeout = tools / "timeout"
+    timeout.write_text(
+        r"""#!/usr/bin/env bash
+set -euo pipefail
+env -u PYTHONHOME "$TROUPE_RELEASE_TEST_PYTHON" - "$TROUPE_RELEASE_TIMEOUT_LOG" "$@" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(sys.argv[2:]) + "\n")
+PY
+if [[ $# -lt 5 || "$1" != --foreground || "$2" != --signal=TERM || "$3" != --kill-after=10s ]]; then
+  exit 98
+fi
+shift 4
+exec "$@"
+""",
+        encoding="utf-8",
+    )
+    timeout.chmod(0o755)
     find = tools / "find"
     find.write_text(
         """#!/usr/bin/env bash
@@ -173,6 +264,7 @@ exec /usr/bin/stat "$@"
     env = dict(os.environ)
     for name in list(env):
         if name in {
+            "TROUPE_DIAGNOSTIC_BOOTSTRAP_GATE",
             "UV_PYTHON",
             "UV_PROJECT_ENVIRONMENT",
             "UV_PYTHON_PREFERENCE",
@@ -191,9 +283,18 @@ exec /usr/bin/stat "$@"
             "TROUPE_RELEASE_TEST_ROOT": str(sandbox),
             "TROUPE_RELEASE_TEST_ROOT_UID": str(checkout_uid),
             "TROUPE_RELEASE_TEST_WHEEL": WHEEL_NAME,
+            "TROUPE_RELEASE_DIAGNOSTIC_LOG": str(diagnostic_log),
+            "TROUPE_RELEASE_TIMEOUT_LOG": str(timeout_log),
             "TMPDIR": str(temporary),
         }
     )
+    for name, directory in {
+        "TROUPE_NPM_CACHE": tmp_path / "npm-cache",
+        "TROUPE_PLAYWRIGHT_CACHE": tmp_path / "playwright-cache",
+        "TROUPE_PERFETTO_CACHE": tmp_path / "perfetto-cache",
+    }.items():
+        directory.mkdir()
+        env[name] = str(directory.resolve())
     return env, log, tools
 
 
@@ -227,6 +328,20 @@ def _timeline(env: dict[str, str]) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
 
+def _diagnostic_calls(env: dict[str, str]) -> list[dict[str, object]]:
+    path = Path(env["TROUPE_RELEASE_DIAGNOSTIC_LOG"])
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _timeout_calls(env: dict[str, str]) -> list[list[str]]:
+    path = Path(env["TROUPE_RELEASE_TIMEOUT_LOG"])
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
 def _run(
     script: Path,
     arguments: list[str],
@@ -257,7 +372,9 @@ def _make_artifact(sandbox: Path) -> tuple[Path, Path]:
 def _assert_tmpdir_preserved(env: dict[str, str]) -> None:
     temporary = Path(env["TMPDIR"])
     assert temporary.is_dir()
-    assert (temporary / "caller-owned-sentinel").read_text(encoding="utf-8") == "preserve\n"
+    assert (temporary / "caller-owned-sentinel").read_text(
+        encoding="utf-8"
+    ) == "preserve\n"
     expected = {"caller-owned-sentinel"}
     if (temporary / "fake-managed").exists():
         expected.add("fake-managed")
@@ -393,9 +510,7 @@ def _assert_quality_calls(
         expected_library_path = str(managed_library)
         if caller_library_path:
             expected_library_path = f"{expected_library_path}:{caller_library_path}"
-        assert {call.library_path for call in group[1:]} == {
-            expected_library_path
-        }
+        assert {call.library_path for call in group[1:]} == {expected_library_path}
         assert [call.conda_present for call in group] == [
             "x",
             "x",
@@ -694,7 +809,9 @@ def test_every_release_mode_finishes_with_the_checkout_audit(
 
     assert completed.returncode == 0, completed.stderr
     timeline = _timeline(env)
-    first_audit = next(index for index, entry in enumerate(timeline) if entry.startswith("audit:"))
+    first_audit = next(
+        index for index, entry in enumerate(timeline) if entry.startswith("audit:")
+    )
     assert first_audit > 0
     assert all(entry.startswith("tool:") for entry in timeline[:first_audit])
     assert all(entry.startswith("audit:") for entry in timeline[first_audit:])
@@ -866,7 +983,9 @@ def test_mode_propagates_managed_python_install_failure(
     completed = _run(script, [mode], cwd=tmp_path, env=env)
 
     assert completed.returncode == 37
-    assert [call.arguments for call in _calls(log)] == [["python", "install", *versions]]
+    assert [call.arguments for call in _calls(log)] == [
+        ["python", "install", *versions]
+    ]
     _assert_tmpdir_preserved(env)
 
 
@@ -1010,7 +1129,9 @@ def test_all_mode_propagates_compatibility_failure(tmp_path: Path) -> None:
     calls = _calls(log)
     _assert_quality_calls(calls[:QUALITY_CALL_COUNT])
     assert calls[QUALITY_CALL_COUNT].tool == "docker"
-    assert [(call.python, call.arguments[0]) for call in calls[QUALITY_CALL_COUNT + 1 :]] == [
+    assert [
+        (call.python, call.arguments[0]) for call in calls[QUALITY_CALL_COUNT + 1 :]
+    ] == [
         ("", "python"),
         ("3.10", "sync"),
         ("3.10", "run"),
@@ -1024,7 +1145,9 @@ def test_all_mode_propagates_compatibility_failure(tmp_path: Path) -> None:
     assert all(path.is_absolute() for path in project_paths)
     assert {path.parent.parent for path in project_paths} == {Path(env["TMPDIR"])}
     assert all(not path.exists() for path in project_paths)
-    assert all(not parent.exists() for parent in {path.parent for path in project_paths})
+    assert all(
+        not parent.exists() for parent in {path.parent for path in project_paths}
+    )
     _assert_tmpdir_preserved(env)
 
 
@@ -1034,14 +1157,199 @@ def test_modes_reject_unknown_or_extra_arguments_without_running_tools(
     sandbox, script = _sandbox_script(tmp_path)
     env, log, _ = _fake_tools(tmp_path, sandbox)
     arguments_to_reject = [["unknown"]] + [
-        [mode, "extra"] for mode in ("quality", "build", "compatibility", "all")
+        [mode, "extra"]
+        for mode in ("quality", "build", "compatibility", "diagnostics", "all")
     ]
     for arguments in arguments_to_reject:
         completed = _run(script, arguments, cwd=tmp_path, env=env)
         assert completed.returncode == 2
-        assert "quality|build|compatibility|all" in completed.stderr
+        assert "quality|build|compatibility|diagnostics|all" in completed.stderr
     assert _calls(log) == []
     _assert_tmpdir_preserved(env)
+
+
+def test_diagnostics_mode_dispatches_exact_frozen_children_and_cleans_owned_reports(
+    tmp_path: Path,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+
+    completed = _run(script, ["diagnostics"], cwd=tmp_path, env=env)
+
+    assert completed.returncode == 0, completed.stderr
+    assert _calls(log) == []
+    calls = _diagnostic_calls(env)
+    assert [call["label"] for call in calls] == DIAGNOSTIC_ORDER
+    assert [call["argv"] for call in calls] == [
+        ["V00"],
+        ["V04"],
+        ["V13"],
+        ["V05"],
+        ["--offline", "--smoke", "active,archive", "--report", calls[4]["argv"][4]],
+        ["--versions", "3.10,3.11,3.12,3.13,3.14", "--build-current-wheel-once"],
+        [
+            "--clean",
+            "--check-generated",
+            "--forbid-update",
+            "--npm-cache",
+            env["TROUPE_NPM_CACHE"],
+        ],
+        ["--all", "--locked", "--deny-warnings"],
+        ["V14"],
+        [
+            "--offline",
+            "--all-layers",
+            "--perfetto-cache",
+            env["TROUPE_PERFETTO_CACHE"],
+            "--browser-cache",
+            env["TROUPE_PLAYWRIGHT_CACHE"],
+        ],
+    ]
+    assert [Path(call["gate_tmp"]) if call["gate_tmp"] else None for call in calls] == [
+        None,
+        None,
+        None,
+        Path(str(calls[3]["gate_tmp"])),
+        Path(str(calls[4]["gate_tmp"])),
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
+    v05_root = Path(str(calls[3]["gate_tmp"]))
+    v07_root = Path(str(calls[4]["gate_tmp"]))
+    assert v05_root != v07_root
+    assert v05_root.parent == Path(env["TMPDIR"])
+    assert v07_root.parent == Path(env["TMPDIR"])
+    assert calls[4]["argv"][4] == str(v07_root / "V07-wheel-report.json")
+    assert not v05_root.exists() and not v07_root.exists()
+    assert [call[3] for call in _timeout_calls(env)] == [
+        "900s",
+        "900s",
+        "900s",
+        "900s",
+        "1800s",
+        "1800s",
+        "900s",
+        "1800s",
+        "1800s",
+        "900s",
+    ]
+    assert all(
+        call[:3] == ["--foreground", "--signal=TERM", "--kill-after=10s"]
+        for call in _timeout_calls(env)
+    )
+    for call in calls:
+        assert call["npm_cache"] == env["TROUPE_NPM_CACHE"]
+        assert call["playwright_cache"] == env["TROUPE_PLAYWRIGHT_CACHE"]
+        assert call["perfetto_cache"] == env["TROUPE_PERFETTO_CACHE"]
+    _assert_tmpdir_preserved(env)
+
+
+def test_diagnostics_failure_is_fail_fast_and_cleans_only_owned_roots(
+    tmp_path: Path,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+    env.update(
+        {
+            "TROUPE_RELEASE_FAIL_DIAGNOSTIC": "V07",
+            "TROUPE_RELEASE_FAIL_CODE": "47",
+        }
+    )
+
+    completed = _run(script, ["diagnostics"], cwd=tmp_path, env=env)
+
+    assert completed.returncode == 47
+    assert _calls(log) == []
+    calls = _diagnostic_calls(env)
+    assert [call["label"] for call in calls] == DIAGNOSTIC_ORDER[:5]
+    roots = {Path(str(call["gate_tmp"])) for call in calls if call["gate_tmp"]}
+    assert len(roots) == 2
+    assert all(not root.exists() for root in roots)
+    _assert_tmpdir_preserved(env)
+
+
+def test_final_all_routes_only_persistent_reports_to_fresh_attempt_root(
+    tmp_path: Path,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, _, _ = _fake_tools(tmp_path, sandbox)
+    evidence = (tmp_path / "evidence" / "attempts" / ATTEMPT_ID).resolve()
+    evidence.mkdir(parents=True)
+
+    completed = _run(
+        script,
+        ["all", "--diagnostics-evidence-root", str(evidence)],
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = _diagnostic_calls(env)
+    assert [call["label"] for call in calls] == DIAGNOSTIC_ORDER
+    assert calls[3]["gate_tmp"] == str(evidence)
+    assert calls[4]["gate_tmp"] == str(evidence)
+    assert all(call["gate_tmp"] is None for call in calls[:3] + calls[5:])
+    assert {path.name for path in evidence.iterdir()} == {
+        "V05-performance-raw.json",
+        "V07-wheel-report.json",
+    }
+    assert evidence.is_dir()
+
+
+def test_final_mode_rejects_reused_or_user_selected_paths_before_any_tool(
+    tmp_path: Path,
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+    evidence = (tmp_path / "attempt").resolve()
+    evidence.mkdir()
+    (evidence / "old").write_text("preserve\n", encoding="utf-8")
+
+    completed = _run(
+        script,
+        ["all", "--diagnostics-evidence-root", str(evidence)],
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert (evidence / "old").read_text(encoding="utf-8") == "preserve\n"
+    assert _calls(log) == []
+    assert _diagnostic_calls(env) == []
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["TROUPE_NPM_CACHE", "TROUPE_PLAYWRIGHT_CACHE", "TROUPE_PERFETTO_CACHE"],
+)
+def test_diagnostics_requires_each_explicit_cache_before_dispatch(
+    tmp_path: Path, missing: str
+) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+    env.pop(missing)
+
+    completed = _run(script, ["diagnostics"], cwd=tmp_path, env=env)
+
+    assert completed.returncode != 0
+    assert missing in completed.stderr
+    assert _calls(log) == []
+    assert _diagnostic_calls(env) == []
+
+
+def test_help_lists_every_mode_without_dispatch(tmp_path: Path) -> None:
+    sandbox, script = _sandbox_script(tmp_path)
+    env, log, _ = _fake_tools(tmp_path, sandbox)
+
+    completed = _run(script, ["--help"], cwd=tmp_path, env=env)
+
+    assert completed.returncode == 0
+    assert "quality|build|compatibility|diagnostics|all" in completed.stderr
+    assert _calls(log) == []
+    assert _diagnostic_calls(env) == []
 
 
 def test_release_script_contains_no_out_of_scope_target() -> None:
@@ -1058,3 +1366,53 @@ def test_release_script_contains_no_out_of_scope_target() -> None:
         "windows",
     ):
         assert forbidden not in text
+
+
+def _bootstrap_fake_child(arguments: list[str]) -> int:
+    if len(arguments) < 5 or arguments[3] != "--":
+        return 2
+    label, timeout_seconds, gate_tmp = arguments[:3]
+    command = arguments[4:]
+    expected_timeout = {
+        "quality": "60",
+        "build": "60",
+        "compatibility": "60",
+        "V00": "900",
+        "V04": "900",
+        "V13": "900",
+        "V05": "900",
+        "V07": "1800",
+        "V08": "1800",
+        "V09": "900",
+        "V10": "1800",
+        "V14": "1800",
+        "V15": "900",
+    }
+    if expected_timeout.get(label) != timeout_seconds or not command:
+        return 2
+    if label in {"quality", "build", "compatibility"}:
+        return 0 if command == [label] and not gate_tmp else 2
+    if label in {"V00", "V04", "V13", "V05", "V14"}:
+        if command != ["scripts/run_diagnostic_node_gate.sh", label]:
+            return 2
+    if label == "V05" and not gate_tmp:
+        return 2
+    if label == "V07":
+        if command[:4] != [
+            "scripts/test_diagnostics_wheel.sh",
+            "--offline",
+            "--smoke",
+            "active,archive",
+        ]:
+            return 2
+        if command[4:5] != ["--report"] or len(command) != 6:
+            return 2
+        if not gate_tmp or Path(command[5]).parent != Path(gate_tmp):
+            return 2
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--bootstrap-fake-child":
+        raise SystemExit(_bootstrap_fake_child(sys.argv[2:]))
+    raise SystemExit(2)
