@@ -139,7 +139,7 @@ pub(crate) struct PreparedSinkToolPayload {
 }
 
 impl PreparedSinkToolPayload {
-    fn from_applied(payload: &SinkOnlyToolPayload) -> Self {
+    fn from_applied(canonical_tool_call_id: &str, payload: &SinkOnlyToolPayload) -> Self {
         let input = payload.input().map(|input| SinkProjectedToolInput {
             raw_input: input
                 .raw_input()
@@ -166,7 +166,7 @@ impl PreparedSinkToolPayload {
             truncated: output.truncated(),
         });
         Self {
-            tool_call_id: Arc::from(payload.tool_call_id()),
+            tool_call_id: Arc::from(canonical_tool_call_id),
             source: payload.source(),
             input,
             output,
@@ -206,12 +206,13 @@ impl PreparedSinkToolPayload {
 }
 
 pub(crate) fn prepare_sink_tool_payload(
+    canonical_tool_call_id: &str,
     payload: &SinkOnlyToolPayload,
     budget: &mut AgentToolPayloadActBudget,
 ) -> PreparedSinkToolPayload {
     let mut payload = payload.clone();
     payload.apply_act_budget(budget);
-    PreparedSinkToolPayload::from_applied(&payload)
+    PreparedSinkToolPayload::from_applied(canonical_tool_call_id, &payload)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

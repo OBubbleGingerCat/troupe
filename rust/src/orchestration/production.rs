@@ -137,11 +137,14 @@ impl Production {
             drop(permit);
             let actor = validate_actor_factory_result(class_result, &construction)?;
             let actor_object = actor.clone().unbind();
-            let agent_session = state.start_agent_session(
-                &cast_permit,
-                Arc::clone(&resolved_profile),
-                agent_launch,
-            );
+            let agent_session = state
+                .start_agent_session(
+                    &cast_permit,
+                    Arc::clone(&resolved_profile),
+                    agent_launch,
+                    &identity,
+                )
+                .map_err(|failure| failure.to_pyerr(py))?;
             let capability = Arc::new(ActorCapability::new(
                 actor_object,
                 name,

@@ -681,9 +681,9 @@ fn real_a09_budget_drives_none_equal_and_over_budget_projection() {
     let snapshots_at_limit = ACT_TOOL_PAYLOAD_MAX_BYTES / TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES;
     for _ in 0..snapshots_at_limit {
         let prepared = with_sized_tool_input_for_test(
-            "tool-budget",
+            "provider-tool-budget",
             TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES,
-            |payload| prepare_sink_tool_payload(payload, &mut budget),
+            |payload| prepare_sink_tool_payload("tool-budget", payload, &mut budget),
         );
         let projected =
             project_act_event(&start, &current, capture_input, Some(&prepared)).unwrap();
@@ -698,10 +698,11 @@ fn real_a09_budget_drives_none_equal_and_over_budget_projection() {
     assert_eq!(budget.remaining_bytes(), 0);
     assert!(!budget.truncated());
 
-    let over =
-        with_sized_tool_input_for_test("tool-budget", TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES, |payload| {
-            prepare_sink_tool_payload(payload, &mut budget)
-        });
+    let over = with_sized_tool_input_for_test(
+        "provider-tool-budget",
+        TOOL_PAYLOAD_SNAPSHOT_MAX_BYTES,
+        |payload| prepare_sink_tool_payload("tool-budget", payload, &mut budget),
+    );
     let projected = project_act_event(&start, &current, capture_input, Some(&over)).unwrap();
     let input = projected.captured_input().unwrap();
     assert!(input.raw_input().is_none());

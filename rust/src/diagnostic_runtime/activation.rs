@@ -45,13 +45,18 @@ use troupe_diagnostics_runtime::{
     },
 };
 
+#[cfg(not(test))]
+use troupe_agent_runtime::{
+    AgentDiagnosticFailureOwner, AgentDiagnosticObserver, AgentDiagnosticObserverFailure,
+};
+
 use crate::{
     application::{diagnostic_cli::RuntimeDiagnosticArgs, loader::prevalidate_production_root},
     diagnostic_runtime::{
         bootstrap::{
             self, BootstrapComponents, BootstrapConfig, BootstrapRouteAssemblyError,
             BootstrapRouteContext, CleanupFailure, DiagnosticRuntimeGuard, DiagnosticShutdownError,
-            FinalStreamCloser,
+            DurableDiagnosticHub, FinalStreamCloser,
         },
         custom_binding,
         load_producer::{
@@ -67,6 +72,12 @@ use crate::{
         actor_registry::ProductionState, production::Production, runtime::RuntimeCore,
         scene_context::RunBinding,
     },
+};
+
+#[cfg(not(test))]
+use crate::diagnostic_runtime::{
+    hooks::DiagnosticActSubscriberLookup,
+    usage_finalization::{UsageFinalizationFailureOwner, UsageFinalizingObservationBridge},
 };
 
 pub(crate) const READY_PREFIX: &str = "troupe: diagnostic ready ";
@@ -706,6 +717,105 @@ fn shutdown_after_load_error(
     }
 }
 
+#[cfg(not(test))]
+struct ProductionAgentDiagnosticFailureOwner {
+    failures: FirstCoreFailure,
+}
+
+#[cfg(not(test))]
+impl AgentDiagnosticFailureOwner for ProductionAgentDiagnosticFailureOwner {
+    fn observer_failed(&self, failure: AgentDiagnosticObserverFailure) {
+        self.failures.report_agent_observation(
+            "observation",
+            failure.error_code().as_str(),
+            format!(
+                "agent diagnostic {} observation failed",
+                failure.observation_kind().as_str()
+            ),
+        );
+    }
+}
+
+#[cfg(not(test))]
+impl UsageFinalizationFailureOwner for ProductionAgentDiagnosticFailureOwner {
+    fn usage_finalization_failed(
+        &self,
+        act_id: &str,
+        error_code: troupe_agent_runtime::AgentDiagnosticErrorCode,
+    ) {
+        self.failures.report_agent_observation(
+            "usage_finalization",
+            error_code.as_str(),
+            format!("agent diagnostic usage finalization failed for {act_id}"),
+        );
+    }
+}
+
+#[cfg(not(test))]
+struct ProductionAgentDiagnostics {
+    observer: AgentDiagnosticObserver,
+    usage: Arc<UsageFinalizingObservationBridge>,
+}
+
+#[cfg(not(test))]
+impl ProductionAgentDiagnostics {
+    fn install(&self, production: &ProductionState) -> PyResult<()> {
+        production
+            .install_agent_diagnostic_observer(self.observer.clone())
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "install mandatory Production agent diagnostics: {error}"
+                ))
+            })
+    }
+
+    fn usage(&self) -> Arc<UsageFinalizingObservationBridge> {
+        Arc::clone(&self.usage)
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ProductionAgentDiagnostics;
+
+#[cfg(test)]
+impl ProductionAgentDiagnostics {
+    fn install(&self, _production: &ProductionState) -> PyResult<()> {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+fn prepare_production_agent_diagnostics(
+    hub: Arc<DurableDiagnosticHub>,
+    context: DiagnosticRunContext,
+    failures: FirstCoreFailure,
+) -> Result<Arc<ProductionAgentDiagnostics>, ActivationError> {
+    let lookup: Arc<dyn DiagnosticActSubscriberLookup> = Arc::new(context.clone());
+    let owner = Arc::new(ProductionAgentDiagnosticFailureOwner { failures });
+    let usage_owner: Arc<dyn UsageFinalizationFailureOwner> = owner.clone();
+    let usage = UsageFinalizingObservationBridge::production_with_subscribers(
+        hub,
+        lookup,
+        context.clock(),
+        usage_owner,
+    )
+    .map_err(|error| {
+        ActivationError::diagnostic("diagnostic_activation.agent_observer", error.as_str())
+    })?;
+    let observer = AgentDiagnosticObserver::new(Arc::clone(&usage), owner);
+    Ok(Arc::new(ProductionAgentDiagnostics { observer, usage }))
+}
+
+#[cfg(test)]
+fn prepare_production_agent_diagnostics(
+    _hub: Arc<DurableDiagnosticHub>,
+    _context: DiagnosticRunContext,
+    _failures: FirstCoreFailure,
+) -> Result<Arc<ProductionAgentDiagnostics>, ActivationError> {
+    Ok(Arc::new(ProductionAgentDiagnostics))
+}
+
 pub(crate) fn activate(
     py: Python<'_>,
     package_dir: &Bound<'_, PyString>,
@@ -720,7 +830,7 @@ pub(crate) fn activate(
             let code = error.code().to_owned();
             ActivationError::diagnostic(code, error)
         })?;
-    let runtime = ActivatedRuntime::new(guard, failures);
+    let runtime = ActivatedRuntime::new(guard, failures.clone());
     let loader = match ProductionLoadProducer::new(runtime.guard()) {
         Ok(loader) => loader,
         Err(error) => {
@@ -730,6 +840,14 @@ pub(crate) fn activate(
                 ActivationError::diagnostic(code, error),
             ));
         }
+    };
+    let agent_diagnostics = match prepare_production_agent_diagnostics(
+        Arc::clone(runtime.guard().hub()),
+        loader.context(),
+        failures.clone(),
+    ) {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => return Err(abort_after_error(runtime, error)),
     };
     if let Err(error) = write_ready(py, runtime.guard()) {
         return Err(abort_after_error(runtime, error));
@@ -747,7 +865,7 @@ pub(crate) fn activate(
         .map_err(|error| ActivationError::diagnostic(error.code(), error))?;
     let (class, lifecycle, _manifest) = prepared.into_parts();
     let runtime = lifecycle.into_runtime();
-    let construction = ActivationConstructionGuard::enter(runtime.run_id);
+    let construction = ActivationConstructionGuard::enter(runtime.run_id, agent_diagnostics);
     let production = match loader.construct(py, class, production_args) {
         Ok(production) => production,
         Err(error) => return Err(shutdown_after_load_error(runtime, error)),
@@ -773,14 +891,16 @@ pub(crate) fn activate(
 }
 
 thread_local! {
-    static ACTIVATION_CONSTRUCTION_STACK: RefCell<Vec<CanonicalUuid>> = const { RefCell::new(Vec::new()) };
+    static ACTIVATION_CONSTRUCTION_STACK: RefCell<Vec<(CanonicalUuid, Arc<ProductionAgentDiagnostics>)>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ActivationConstructionGuard(CanonicalUuid);
 
 impl ActivationConstructionGuard {
-    fn enter(run_id: CanonicalUuid) -> Self {
-        ACTIVATION_CONSTRUCTION_STACK.with(|stack| stack.borrow_mut().push(run_id));
+    fn enter(run_id: CanonicalUuid, diagnostics: Arc<ProductionAgentDiagnostics>) -> Self {
+        ACTIVATION_CONSTRUCTION_STACK.with(|stack| {
+            stack.borrow_mut().push((run_id, diagnostics));
+        });
         Self(run_id)
     }
 }
@@ -788,7 +908,7 @@ impl ActivationConstructionGuard {
 impl Drop for ActivationConstructionGuard {
     fn drop(&mut self) {
         ACTIVATION_CONSTRUCTION_STACK.with(|stack| {
-            let popped = stack
+            let (popped, _) = stack
                 .borrow_mut()
                 .pop()
                 .expect("activation construction context must remain installed");
@@ -804,6 +924,7 @@ struct PendingProduction {
     production: Weak<ProductionState>,
     run_id: CanonicalUuid,
     context: DiagnosticRunContext,
+    agent_diagnostics: Arc<ProductionAgentDiagnostics>,
 }
 
 fn pending_productions() -> &'static Mutex<HashMap<usize, PendingProduction>> {
@@ -845,10 +966,15 @@ pub(crate) fn production_created(
     let Some(construction) = current_production_construction() else {
         return Ok(());
     };
-    let Some(run_id) = ACTIVATION_CONSTRUCTION_STACK.with(|stack| stack.borrow().last().copied())
-    else {
+    let Some((run_id, agent_diagnostics)) = ACTIVATION_CONSTRUCTION_STACK.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .map(|(run_id, diagnostics)| (*run_id, Arc::clone(diagnostics)))
+    }) else {
         return Ok(());
     };
+    agent_diagnostics.install(production)?;
     let key = production_key(production);
     let mut pending = lock(pending_productions());
     pending.retain(|_, value| value.production.upgrade().is_some());
@@ -863,6 +989,7 @@ pub(crate) fn production_created(
             production: Arc::downgrade(production),
             run_id,
             context: construction.context(),
+            agent_diagnostics,
         },
     );
     Ok(())
@@ -900,9 +1027,13 @@ pub(crate) fn bind_run(
         };
 
         let failure_owner: Arc<dyn ActDiagnosticFailureOwner> = producer.clone();
-        let capability =
-            sink_binding::production_capability(pending.run_id, pending.context, failure_owner)
-                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let capability = sink_binding::production_capability(
+            pending.run_id,
+            pending.context,
+            failure_owner,
+            pending.agent_diagnostics.usage(),
+        )
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let capability: Arc<dyn DiagnosticAdmissionCapability> = capability;
         binding
             .diagnostic_admission()

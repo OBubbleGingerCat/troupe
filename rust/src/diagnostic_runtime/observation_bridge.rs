@@ -19,7 +19,7 @@ mod active {
             message::{
                 AgentMessageCandidate, AgentMessageChunkObservation, AgentMessageNormalizer,
             },
-            payload::AgentToolPayloadCandidate,
+            payload::{AgentToolPayloadCandidate, SinkOnlyToolPayload, ToolPayloadSource},
             plan::{AgentPlanSnapshotCandidate, AgentPlanSnapshotMetadata},
             result::AgentResultCandidate,
             thinking::{
@@ -194,6 +194,7 @@ mod active {
         tools: AgentToolNormalizer,
         thinking_span: Option<ThinkingProjection>,
         tool_spans: HashMap<String, ToolProjection>,
+        pending_tool_payloads: Vec<SinkOnlyToolPayload>,
         last_sequence: SchemaU64,
         last_rejection_count: u64,
         pending_rejection_sequence: Option<SchemaU64>,
@@ -209,6 +210,7 @@ mod active {
                 tools: AgentToolNormalizer::new(),
                 thinking_span: None,
                 tool_spans: HashMap::new(),
+                pending_tool_payloads: Vec::new(),
                 last_sequence: initial_sequence,
                 last_rejection_count: 0,
                 pending_rejection_sequence: None,
@@ -227,6 +229,7 @@ mod active {
                 tools: AgentToolNormalizer::new(),
                 thinking_span: None,
                 tool_spans: HashMap::new(),
+                pending_tool_payloads: Vec::new(),
                 last_sequence: initial_sequence,
                 last_rejection_count: 0,
                 pending_rejection_sequence: None,
@@ -625,11 +628,17 @@ mod active {
                 .as_any()
                 .downcast_ref::<AgentToolPayloadCandidate>()
             {
-                if let Some(subscribers) = &self.subscribers {
-                    subscribers.deliver_tool_payload(
-                        candidate.turn().identity().act_id(),
-                        candidate.payload(),
-                    );
+                if self.subscribers.is_some() {
+                    let act_id = candidate.turn().identity().act_id();
+                    let lineage = act_lineage(candidate.turn())?;
+                    let mut state = lock(&self.state);
+                    ensure_turn(&mut state, candidate.turn(), lineage.containing_span_id())?;
+                    state
+                        .turns
+                        .get_mut(act_id)
+                        .expect("the turn projection was installed")
+                        .pending_tool_payloads
+                        .push(candidate.payload().clone());
                 }
                 return Ok(ObservationDisposition::SinkOnlyPayload);
             }
@@ -1264,7 +1273,19 @@ mod active {
                     }
                     let tool_id = next_tool_id(state)?;
                     let scope = tool_scope(lineage.event_scope(), tool_id);
+                    let canonical_tool_call_id = scope
+                        .tool_call_id()
+                        .ok_or(IDENTIFIER_INVALID)?
+                        .as_str()
+                        .to_owned();
                     let detail = tool_detail(started.metadata(), None);
+                    self.deliver_pending_tool_payload(
+                        state,
+                        act_id,
+                        &source_tool_call_id,
+                        ToolPayloadSource::Started,
+                        &canonical_tool_call_id,
+                    )?;
                     let span_id = self.admit_span_start(
                         ElapsedNs::new(started.elapsed_ns()),
                         scope.clone(),
@@ -1288,19 +1309,35 @@ mod active {
                     span_id
                 } else if let Some(updated) = candidate.updated() {
                     let source_tool_call_id = updated.metadata().source_tool_call_id();
-                    let tool = state
-                        .turns
-                        .get(act_id)
-                        .and_then(|turn| turn.tool_spans.get(source_tool_call_id))
-                        .ok_or(TOOL_TRANSITION_INVALID)?;
-                    if tool.finished {
-                        return Err(TOOL_TRANSITION_INVALID);
-                    }
+                    let (tool_scope, tool_span_id, canonical_tool_call_id) = {
+                        let tool = state
+                            .turns
+                            .get(act_id)
+                            .and_then(|turn| turn.tool_spans.get(source_tool_call_id))
+                            .ok_or(TOOL_TRANSITION_INVALID)?;
+                        if tool.finished {
+                            return Err(TOOL_TRANSITION_INVALID);
+                        }
+                        let canonical_tool_call_id = tool
+                            .scope
+                            .tool_call_id()
+                            .ok_or(IDENTIFIER_INVALID)?
+                            .as_str()
+                            .to_owned();
+                        (tool.scope.clone(), tool.span_id, canonical_tool_call_id)
+                    };
+                    self.deliver_pending_tool_payload(
+                        state,
+                        act_id,
+                        source_tool_call_id,
+                        ToolPayloadSource::Updated,
+                        &canonical_tool_call_id,
+                    )?;
                     self.admit_instant(
                         ElapsedNs::new(updated.elapsed_ns()),
-                        tool.scope.clone(),
+                        tool_scope,
                         InstantDetail::ToolUpdated(tool_detail(updated.metadata(), None)),
-                        Some(tool.span_id),
+                        Some(tool_span_id),
                         follows_from(previous),
                     )?
                 } else if let Some(finished) = candidate.finished() {
@@ -1354,6 +1391,28 @@ mod active {
                     .last_sequence = sequence;
             }
             Ok(ObservationDisposition::Admitted)
+        }
+
+        fn deliver_pending_tool_payload(
+            &self,
+            state: &mut BridgeState,
+            act_id: &str,
+            source_tool_call_id: &str,
+            source: ToolPayloadSource,
+            canonical_tool_call_id: &str,
+        ) -> Result<(), AgentDiagnosticErrorCode> {
+            let Some(subscribers) = &self.subscribers else {
+                return Ok(());
+            };
+            let turn = state.turns.get_mut(act_id).ok_or(TURN_IDENTITY_MISMATCH)?;
+            let Some(index) = turn.pending_tool_payloads.iter().position(|payload| {
+                payload.tool_call_id() == source_tool_call_id && payload.source() == source
+            }) else {
+                return Ok(());
+            };
+            let payload = turn.pending_tool_payloads.remove(index);
+            subscribers.deliver_tool_payload(act_id, canonical_tool_call_id, &payload);
+            Ok(())
         }
 
         fn now(&self) -> Result<ElapsedNs, AgentDiagnosticErrorCode> {

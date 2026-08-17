@@ -236,12 +236,17 @@ def test_cost_uses_a_carried_forward_context_sample_with_a_causal_link() -> None
 def test_a04_and_a09_are_typed_noncanonical_dispositions() -> None:
     source = _source()
     dispatch = _between(source, "fn observe_candidate(", "fn message_observed(")
+    delivery = _between(source, "fn deliver_pending_tool_payload(", "fn now(")
 
     assert dispatch.index("AgentTurnUsageCandidate") < dispatch.index("DeferredUsage")
     assert dispatch.index("AgentToolPayloadCandidate") < dispatch.index("SinkOnlyPayload")
     assert ".usage()" not in source
     assert dispatch.count("candidate.payload()") == 1
-    assert "subscribers.deliver_tool_payload(" in dispatch
+    assert ".pending_tool_payloads" in dispatch
+    assert "subscribers.deliver_tool_payload(" not in dispatch
+    assert "payload.tool_call_id() == source_tool_call_id" in delivery
+    assert "canonical_tool_call_id" in delivery
+    assert "subscribers.deliver_tool_payload(" in delivery
     assert "ActTokenUsageFinalized" not in source
     assert "SinkOnlyJsonValue" not in source
 

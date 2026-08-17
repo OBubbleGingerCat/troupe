@@ -8,6 +8,7 @@ use std::{
 
 use pyo3::types::{PyAny, PyAnyMethods, PyString, PyStringMethods, PyType, PyTypeMethods};
 use pyo3::{Bound, Py, PyErr, Python};
+use troupe_agent_runtime::AgentSessionDiagnosticContext;
 use troupe_diagnostics_core::{
     detail::{ActorDetail, InstantDetail, SpanStartDetail},
     event::DiagnosticScope,
@@ -125,6 +126,7 @@ struct ActorLifecycleProducer {
     context: DiagnosticRunContext,
     runtime: Option<Arc<RuntimeLifecycleProducer>>,
     scope: DiagnosticScope,
+    session: AgentSessionDiagnosticContext,
     detail: ActorDetail,
     handle_span_id: SchemaU64,
     state: Mutex<ActorLifecycleState>,
@@ -134,6 +136,7 @@ impl ActorLifecycleProducer {
     fn start(
         source: ActorEventSource,
         actor_id: RunLocalId,
+        session: AgentSessionDiagnosticContext,
         detail: ActorDetail,
     ) -> Result<Self, DiagnosticProducerError> {
         let scope = actor_scope(actor_id);
@@ -151,6 +154,7 @@ impl ActorLifecycleProducer {
             context: source.context,
             runtime: source.runtime,
             scope,
+            session,
             detail,
             handle_span_id,
             state: Mutex::new(ActorLifecycleState::default()),
@@ -474,6 +478,14 @@ pub(crate) fn lineage_snapshot(actor: &ActorCapability) -> Option<ActorLineageSn
         .and_then(|producer| producer.snapshot())
 }
 
+pub(crate) fn agent_session_context(
+    identity: &ActorIdentity,
+) -> Option<AgentSessionDiagnosticContext> {
+    lock(actors())
+        .get(&address(identity))
+        .map(|producer| producer.session.clone())
+}
+
 fn start_actor(identity: &Arc<ActorIdentity>, source: ActorEventSource, detail: ActorDetail) {
     let key = identity_key(identity);
     if lock(actors()).contains_key(&key) {
@@ -482,8 +494,8 @@ fn start_actor(identity: &Arc<ActorIdentity>, source: ActorEventSource, detail: 
         }
         return;
     }
-    let actor_id = match next_actor_id() {
-        Ok(actor_id) => actor_id,
+    let (actor_id, session) = match next_actor_id() {
+        Ok(identity) => identity,
         Err(code) => {
             if let Some(runtime) = &source.runtime {
                 runtime.latch_state_failure(code);
@@ -492,7 +504,7 @@ fn start_actor(identity: &Arc<ActorIdentity>, source: ActorEventSource, detail: 
         }
     };
     let runtime = source.runtime.clone();
-    let producer = match ActorLifecycleProducer::start(source, actor_id, detail) {
+    let producer = match ActorLifecycleProducer::start(source, actor_id, session, detail) {
         Ok(producer) => Arc::new(producer),
         Err(error) => {
             if let Some(runtime) = runtime {
@@ -580,13 +592,17 @@ fn actor_detail(
     Ok(ActorDetail::new(display_name, actor_type))
 }
 
-fn next_actor_id() -> Result<RunLocalId, &'static str> {
+fn next_actor_id() -> Result<(RunLocalId, AgentSessionDiagnosticContext), &'static str> {
     let value = NEXT_ACTOR_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .map_err(|_| "actor.identifier-exhausted")?;
-    RunLocalId::parse(&format!("actor-{value}")).map_err(|_| "actor.identifier-invalid")
+    let actor_id =
+        RunLocalId::parse(&format!("actor-{value}")).map_err(|_| "actor.identifier-invalid")?;
+    let session =
+        AgentSessionDiagnosticContext::new(actor_id.as_str(), format!("agent-session-{value}"));
+    Ok((actor_id, session))
 }
 
 fn actor_scope(actor_id: RunLocalId) -> DiagnosticScope {

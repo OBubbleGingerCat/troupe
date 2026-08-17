@@ -441,6 +441,25 @@ impl DiagnosticRunContext {
     }
 }
 
+impl DiagnosticActSubscriberLookup for DiagnosticRunContext {
+    fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>> {
+        self.subscribers
+            .get()
+            .and_then(|lookup| lookup.subscriber_for(act_id))
+    }
+
+    fn deliver_tool_payload(
+        &self,
+        act_id: &str,
+        canonical_tool_call_id: &str,
+        payload: &troupe_agent_runtime::diagnostics::payload::SinkOnlyToolPayload,
+    ) {
+        if let Some(lookup) = self.subscribers.get() {
+            lookup.deliver_tool_payload(act_id, canonical_tool_call_id, payload);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DiagnosticActSubscriberInstallError;
 

@@ -148,6 +148,7 @@ mod active {
         run_id: CanonicalUuid,
         context: DiagnosticRunContext,
         failure_owner: Arc<dyn ActDiagnosticFailureOwner>,
+        usage: Arc<UsageFinalizingObservationBridge>,
     ) -> Result<Arc<ActSinkAdmissionCapability>, DiagnosticActSubscriberInstallError> {
         let registry = Arc::new(ActSinkRegistry::default());
         let lookup: Arc<dyn DiagnosticActSubscriberLookup> = registry.clone();
@@ -159,6 +160,7 @@ mod active {
                 context,
                 registry,
                 failure_owner,
+                usage,
                 standalone: None,
                 sink_runtime: Mutex::new(None),
             }),
@@ -195,9 +197,9 @@ mod active {
                     context,
                     registry,
                     failure_owner,
+                    usage: Arc::clone(&usage),
                     standalone: Some(StandaloneResources {
                         observer,
-                        usage,
                         lineages: Mutex::new(StandaloneLineages::default()),
                     }),
                     sink_runtime: Mutex::new(None),
@@ -363,28 +365,7 @@ mod active {
             if let Some(authority) = prepared_authority {
                 authority.commit();
             }
-            if let Some(resources) = &self.state.standalone {
-                match resources.usage.bind_act(act_id.as_str()) {
-                    Ok(UsageObservationDisposition::LateIgnored) => {
-                        self.state
-                            .failure_owner
-                            .latch_state_failure("act.standalone-usage-bind-late");
-                        return Err(PyRuntimeError::new_err(
-                            "standalone diagnostic usage binding missed the admitted Act",
-                        ));
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        self.state
-                            .failure_owner
-                            .latch_state_failure("act.standalone-usage-bind-failed");
-                        return Err(PyRuntimeError::new_err(format!(
-                            "bind standalone diagnostic usage: {error}"
-                        )));
-                    }
-                }
-            }
-            Ok(())
+            self.bind_usage(&act_id)
         }
 
         fn admit_without_sink(
@@ -407,8 +388,23 @@ mod active {
             let Some(mut prepared_authority) =
                 custom_act_binding::prepare(py, run, cued, prepared.act_scope())?
             else {
+                let context = control.new_diagnostic_context(
+                    prepared.identity().clone(),
+                    None,
+                    ToolPayloadCapturePolicy::default(),
+                );
+                control
+                    .install_diagnostic_context(context)
+                    .map_err(|error| {
+                        self.state
+                            .failure_owner
+                            .latch_state_failure("act.production-context-attach-failed");
+                        PyRuntimeError::new_err(format!(
+                            "attach mandatory Production diagnostic context: {error}"
+                        ))
+                    })?;
                 prepared.commit();
-                return Ok(());
+                return self.bind_usage(&act_id);
             };
             let reservation = self.state.registry.reserve(act_id.as_str())?;
             let coordinator = ActSettlementCoordinator::new();
@@ -417,15 +413,60 @@ mod active {
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             let subscriber = Arc::new(AuthorityOnlySubscriber {
                 state: Arc::downgrade(&self.state),
-                act_id,
+                act_id: act_id.clone(),
                 authority: prepared_authority.authority(),
                 coordinator,
             });
             prepared_authority.stage(py)?;
+            let context = control.new_diagnostic_context(
+                prepared.identity().clone(),
+                None,
+                ToolPayloadCapturePolicy::default(),
+            );
+            control
+                .install_diagnostic_context(context)
+                .map_err(|error| {
+                    self.state
+                        .failure_owner
+                        .latch_state_failure("act.production-context-attach-failed");
+                    PyRuntimeError::new_err(format!(
+                        "attach mandatory Production diagnostic context: {error}"
+                    ))
+                })?;
             reservation.publish(Arc::clone(&subscriber));
             prepared.commit();
             prepared_authority.commit();
-            Ok(())
+            self.bind_usage(&act_id)
+        }
+
+        fn bind_usage(&self, act_id: &RunLocalId) -> PyResult<()> {
+            let (late_code, failed_code, label) = match self.state.profile {
+                DiagnosticAdmissionProfile::ProductionDurable => (
+                    "act.production-usage-bind-late",
+                    "act.production-usage-bind-failed",
+                    "mandatory Production",
+                ),
+                DiagnosticAdmissionProfile::SinkOnlyVolatile => (
+                    "act.standalone-usage-bind-late",
+                    "act.standalone-usage-bind-failed",
+                    "standalone",
+                ),
+            };
+            match self.state.usage.bind_act(act_id.as_str()) {
+                Ok(UsageObservationDisposition::LateIgnored) => {
+                    self.state.failure_owner.latch_state_failure(late_code);
+                    Err(PyRuntimeError::new_err(format!(
+                        "{label} diagnostic usage binding missed the admitted Act"
+                    )))
+                }
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    self.state.failure_owner.latch_state_failure(failed_code);
+                    Err(PyRuntimeError::new_err(format!(
+                        "bind {label} diagnostic usage: {error}"
+                    )))
+                }
+            }
         }
     }
 
@@ -466,6 +507,7 @@ mod active {
         context: DiagnosticRunContext,
         registry: Arc<ActSinkRegistry>,
         failure_owner: Arc<dyn ActDiagnosticFailureOwner>,
+        usage: Arc<UsageFinalizingObservationBridge>,
         standalone: Option<StandaloneResources>,
         sink_runtime: Mutex<Option<DiagnosticSinkRuntime>>,
     }
@@ -522,7 +564,6 @@ mod active {
 
     struct StandaloneResources {
         observer: AgentDiagnosticObserver,
-        usage: Arc<UsageFinalizingObservationBridge>,
         lineages: Mutex<StandaloneLineages>,
     }
 
@@ -751,9 +792,14 @@ mod active {
             self.subscriber(act_id)
         }
 
-        fn deliver_tool_payload(&self, act_id: &str, payload: &SinkOnlyToolPayload) {
+        fn deliver_tool_payload(
+            &self,
+            act_id: &str,
+            canonical_tool_call_id: &str,
+            payload: &SinkOnlyToolPayload,
+        ) {
             if let Some(subscriber) = self.bound(act_id) {
-                subscriber.deliver_tool_payload(payload);
+                subscriber.deliver_tool_payload(canonical_tool_call_id, payload);
             }
         }
     }
@@ -844,9 +890,14 @@ mod active {
     }
 
     impl ActSinkSubscriber {
-        fn deliver_tool_payload(&self, payload: &SinkOnlyToolPayload) {
+        fn deliver_tool_payload(
+            &self,
+            canonical_tool_call_id: &str,
+            payload: &SinkOnlyToolPayload,
+        ) {
             let mut state = lock(&self.payload);
-            let payload = prepare_sink_tool_payload(payload, &mut state.budget);
+            let payload =
+                prepare_sink_tool_payload(canonical_tool_call_id, payload, &mut state.budget);
             state.pending.push(payload);
         }
 

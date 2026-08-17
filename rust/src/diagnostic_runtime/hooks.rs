@@ -129,7 +129,13 @@ pub(crate) trait DiagnosticAdmissionCapability: Any + Send + Sync {
 pub(crate) trait DiagnosticActSubscriberLookup: Send + Sync + 'static {
     fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>>;
 
-    fn deliver_tool_payload(&self, _act_id: &str, _payload: &SinkOnlyToolPayload) {}
+    fn deliver_tool_payload(
+        &self,
+        _act_id: &str,
+        _canonical_tool_call_id: &str,
+        _payload: &SinkOnlyToolPayload,
+    ) {
+    }
 }
 
 #[derive(Debug, Default)]

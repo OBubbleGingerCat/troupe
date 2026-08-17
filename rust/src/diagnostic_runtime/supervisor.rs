@@ -159,6 +159,20 @@ impl FirstCoreFailure {
         self.latch(RuntimeInfrastructureFailure::producer(failure));
     }
 
+    pub(crate) fn report_agent_observation(
+        &self,
+        stage: &'static str,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.latch(RuntimeInfrastructureFailure::new(
+            "canonical_pipeline",
+            stage,
+            code,
+            message,
+        ));
+    }
+
     pub(crate) fn report_query(&self, failure: QueryCoreFailureSignal) {
         self.latch(RuntimeInfrastructureFailure::query(failure));
     }
