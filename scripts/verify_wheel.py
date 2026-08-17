@@ -912,7 +912,17 @@ def _validate_build_system(sdist: Path, expected: Mapping[str, Any]) -> None:
         ) from error
     if sdist_payload != source_payload:
         raise VerificationError("sdist pyproject.toml differs from source")
-    if source.get("build-system") != expected["build_system"]:
+    build_system = source.get("build-system")
+    if not isinstance(build_system, dict) or set(build_system) != {
+        "requires",
+        "build-backend",
+    }:
+        raise VerificationError("pyproject build-system table is not exact")
+    normalized = {
+        "requires": build_system["requires"],
+        "build_backend": build_system["build-backend"],
+    }
+    if normalized != expected["build_system"]:
         raise VerificationError("pyproject build requirement is not exactly maturin")
 
 

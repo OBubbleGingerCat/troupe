@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -320,6 +322,26 @@ def test_sdist_manifest_normalization_must_preserve_toml_semantics() -> None:
         b"same semantics\n",
         b"same  semantics\n",
     )
+
+
+def test_sdist_build_system_uses_the_json_contract_key_names(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    payload = (ROOT / "pyproject.toml").read_bytes()
+    sdist = tmp_path / "troupe-0.1.0.tar.gz"
+    member = tarfile.TarInfo("troupe-0.1.0/pyproject.toml")
+    member.size = len(payload)
+    with tarfile.open(sdist, "w:gz") as archive:
+        archive.addfile(member, io.BytesIO(payload))
+
+    expected = load_json(ROOT / EXPECTED_RELATIVE)
+    verifier._validate_build_system(sdist, expected)
+
+    expected["build_system"]["build_backend"] = "other"
+    with pytest.raises(
+        verifier.VerificationError,
+        match="build requirement is not exactly maturin",
+    ):
+        verifier._validate_build_system(sdist, expected)
 
 
 def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
