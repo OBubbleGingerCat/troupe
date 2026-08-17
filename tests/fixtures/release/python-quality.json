@@ -1,0 +1,48 @@
+{
+  "schema": "troupe.diagnostics.python-quality.v1",
+  "isolation": {
+    "provider": "F03",
+    "wheel": "current-worktree",
+    "origin": "validated",
+    "network": "forbidden"
+  },
+  "modes": [
+    {
+      "name": "pytest",
+      "argv": [
+        "pytest",
+        "-q"
+      ]
+    },
+    {
+      "name": "mypy",
+      "argv": [
+        "python",
+        "-m",
+        "mypy",
+        "--strict",
+        "--show-error-codes",
+        "tests/typing/positive.py"
+      ]
+    },
+    {
+      "name": "stubtest",
+      "argv": [
+        "python",
+        "-m",
+        "mypy.stubtest",
+        "troupe",
+        "--concise"
+      ]
+    },
+    {
+      "name": "doctest",
+      "argv": [
+        "python",
+        "-m",
+        "doctest",
+        "README.md"
+      ]
+    }
+  ]
+}
