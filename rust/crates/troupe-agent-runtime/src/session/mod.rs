@@ -1454,6 +1454,7 @@ impl AgentSessionSlot {
             Arc::clone(&profile),
         );
         slot.observe_opening();
+        slot.observe_opening_attempt(1);
         slot.commit_ready(
             AgentReadySnapshot {
                 pid: std::process::id(),
