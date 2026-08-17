@@ -75,37 +75,9 @@ WRITER_ROLES: Final = frozenset(
     {"create", "seam", "implement", "assemble", "generate", "remove"}
 )
 MODIFICATION_ROLES: Final = frozenset({"seam", "implement", "assemble"})
-ASSEMBLY_NODES: Final = frozenset(
-    {"P04", "T02", "H04", "D07", "W15", "V12", "O04", "V03"}
-)
+ASSEMBLY_NODES: Final = frozenset({"P04", "T02", "H04", "D07", "W15", "V12", "O04", "V03"})
 SEAM_NODES: Final = frozenset({"F04", "F05", "F06"})
 REMOVED_PLAN_PATHS: Final = {"rust/src/application/loader.rs": "L00"}
-POST_PLAN_REPAIRS: Final = {
-    "rust/crates/troupe-agent-runtime/src/launch/process.rs": (
-        "486243290beefc3eba16876de094dc04b85e4e01",
-        "3f95bbf18f4a2078917e166bbfb75594759fae48e2c10cb8d6afd145608488a8",
-    ),
-    "tests/integration/test_cli.py": (
-        "b89873ca446e07879fedd45729f895cf706f4b30",
-        "b00864fdaa3914dcfc0b70a6569005e4ed420b8a329a112692a88e84659c9fc3",
-    ),
-    "tests/integration/test_lifecycle.py": (
-        "d58a085614e16d4d18249b1567f3492b97b5ebd6",
-        "b75a406b1c562fbc9429bd705e231aa1259c87d24590669988750a9bc46fe79f",
-    ),
-    "tests/unit/test_agent_adapters.py": (
-        "486243290beefc3eba16876de094dc04b85e4e01",
-        "74b4912b962e67a73640db61fbe12dcdcfb25fbb15ebf839bb2b748d553ad349",
-    ),
-    "tests/unit/test_documentation.py": (
-        "486243290beefc3eba16876de094dc04b85e4e01",
-        "7c954ea2659d0a7bddb5e84211659b2254abd5d129511d5a75a00a317ece60f9",
-    ),
-    "tests/unit/test_examples.py": (
-        "486243290beefc3eba16876de094dc04b85e4e01",
-        "dc831625328b8789bd5c92df660c6824bf92da0763d47ed12dbd7cef87eb51ed",
-    ),
-}
 
 
 class OwnershipAuditError(RuntimeError):
@@ -220,9 +192,7 @@ def _changed_paths(repository_root: Path, base: str) -> dict[str, str]:
         except ValueError as error:
             raise OwnershipAuditError(f"malformed git diff entry: {line!r}") from error
         if status not in {"A", "M", "D"}:
-            raise OwnershipAuditError(
-                f"unsupported git diff status {status!r} for {path}"
-            )
+            raise OwnershipAuditError(f"unsupported git diff status {status!r} for {path}")
         if path in result:
             raise OwnershipAuditError(f"duplicate git diff path: {path}")
         result[path] = status
@@ -240,9 +210,7 @@ def _pairs_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_pairs_object
-        )
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs_object)
     except OwnershipAuditError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -271,25 +239,17 @@ def _canonical_path(value: str, context: str) -> str:
         or "\n" in value
         or any(part in {"", ".", ".."} for part in value.split("/"))
     ):
-        raise OwnershipAuditError(
-            f"{context} is not a canonical repository path: {value!r}"
-        )
+        raise OwnershipAuditError(f"{context} is not a canonical repository path: {value!r}")
     if any(character in value for character in "*?[]{}"):
-        raise OwnershipAuditError(
-            f"{context} must not contain a glob or subset: {value!r}"
-        )
+        raise OwnershipAuditError(f"{context} must not contain a glob or subset: {value!r}")
     path = PurePosixPath(value)
     if value.endswith("/"):
         raise OwnershipAuditError(f"{context} must name a file: {value!r}")
     if len(path.parts) == 1:
         if value not in ALLOWED_ROOT_FILES:
-            raise OwnershipAuditError(
-                f"{context} has an unknown repository root: {value!r}"
-            )
+            raise OwnershipAuditError(f"{context} has an unknown repository root: {value!r}")
     elif path.parts[0] not in ALLOWED_ROOTS:
-        raise OwnershipAuditError(
-            f"{context} has an unknown repository root: {value!r}"
-        )
+        raise OwnershipAuditError(f"{context} has an unknown repository root: {value!r}")
     return value
 
 
@@ -298,9 +258,7 @@ def _plan_validator() -> ModuleType:
     if _PLAN_VALIDATOR is not None:
         return _PLAN_VALIDATOR
     path = ROOT / "docs/plan/verify_production_diagnostics_plan.py"
-    spec = importlib.util.spec_from_file_location(
-        "production_diagnostics_plan_validator", path
-    )
+    spec = importlib.util.spec_from_file_location("production_diagnostics_plan_validator", path)
     if spec is None or spec.loader is None:
         raise OwnershipAuditError("could not load the accepted plan validator")
     module = importlib.util.module_from_spec(spec)
@@ -313,9 +271,7 @@ def _read_plan(plan_path: Path) -> str:
     try:
         return plan_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
-        raise OwnershipAuditError(
-            f"could not read the diagnostics plan: {error}"
-        ) from error
+        raise OwnershipAuditError(f"could not read the diagnostics plan: {error}") from error
 
 
 def _baseline_sha(text: str) -> str:
@@ -427,9 +383,7 @@ def _project_gate_argv(
                 raise OwnershipAuditError(f"{node} Gate contains an empty command")
             commands.append(argv)
         if not commands:
-            raise OwnershipAuditError(
-                f"{node} Gate has no projected descriptor command"
-            )
+            raise OwnershipAuditError(f"{node} Gate has no projected descriptor command")
         result[node] = tuple(commands)
     return result
 
@@ -488,9 +442,7 @@ def project_plan(
         artifact_path = f"tests/fixtures/artifact_layout/nodes/{node}.json"
         gate_path = f"tests/fixtures/diagnostic_node_gates/{node}.json"
         if artifact_path in path_writers or gate_path in path_writers:
-            raise OwnershipAuditError(
-                f"lifecycle family collides with an exact artifact: {node}"
-            )
+            raise OwnershipAuditError(f"lifecycle family collides with an exact artifact: {node}")
         path_writers[artifact_path] = ("F00",) if node == "F00" else ("F00", node)
         path_writers[gate_path] = ("F00",) if node == "F00" else ("F00", node)
 
@@ -513,9 +465,7 @@ def project_plan(
                 )
 
     grant = _frozen_generated_grant(validator)
-    nodes_with_artifacts = {
-        writer for writers in path_writers.values() for writer in writers
-    }
+    nodes_with_artifacts = {writer for writers in path_writers.values() for writer in writers}
     nodes_with_artifacts.add(grant.owner)
     missing_nodes = sorted(set(node_ids) - nodes_with_artifacts)
     if missing_nodes:
@@ -555,9 +505,7 @@ def load_ownership_ledger(repository_root: Path = ROOT) -> OwnershipLedger:
         baseline_state = raw_entry["baseline_state"]
         raw_writers = raw_entry["writers"]
         if not isinstance(path, str):
-            raise OwnershipAuditError(
-                f"ownership path {position} path must be a string"
-            )
+            raise OwnershipAuditError(f"ownership path {position} path must be a string")
         _canonical_path(path, f"ownership path {position}")
         if path in seen_paths:
             raise OwnershipAuditError(f"duplicate ownership path: {path}")
@@ -567,9 +515,7 @@ def load_ownership_ledger(repository_root: Path = ROOT) -> OwnershipLedger:
                 f"ownership path {path} has invalid baseline_state: {baseline_state!r}"
             )
         if not isinstance(raw_writers, list) or not raw_writers:
-            raise OwnershipAuditError(
-                f"ownership path {path} writers must be non-empty"
-            )
+            raise OwnershipAuditError(f"ownership path {path} writers must be non-empty")
         writers: list[Writer] = []
         seen_writers: set[str] = set()
         for writer_position, raw_writer in enumerate(raw_writers):
@@ -577,21 +523,13 @@ def load_ownership_ledger(repository_root: Path = ROOT) -> OwnershipLedger:
                 raise OwnershipAuditError(
                     f"ownership path {path} writer {writer_position} must be an object"
                 )
-            _closed(
-                raw_writer,
-                WRITER_FIELDS,
-                f"ownership path {path} writer {writer_position}",
-            )
+            _closed(raw_writer, WRITER_FIELDS, f"ownership path {path} writer {writer_position}")
             node = raw_writer["node"]
             role = raw_writer["role"]
             if not isinstance(node, str) or node not in node_ids:
-                raise OwnershipAuditError(
-                    f"ownership path {path} has unknown writer: {node!r}"
-                )
+                raise OwnershipAuditError(f"ownership path {path} has unknown writer: {node!r}")
             if node in seen_writers:
-                raise OwnershipAuditError(
-                    f"ownership path {path} has a duplicate writer: {node}"
-                )
+                raise OwnershipAuditError(f"ownership path {path} has a duplicate writer: {node}")
             seen_writers.add(node)
             if not isinstance(role, str) or role not in WRITER_ROLES:
                 raise OwnershipAuditError(
@@ -633,26 +571,18 @@ def load_ownership_ledger(repository_root: Path = ROOT) -> OwnershipLedger:
             )
         }
         if any(not isinstance(item, str) for item in strings.values()):
-            raise OwnershipAuditError(
-                f"generated grant {grant_id} fields must be strings"
-            )
+            raise OwnershipAuditError(f"generated grant {grant_id} fields must be strings")
         if strings["owner"] not in node_ids:
             raise OwnershipAuditError(
                 f"generated grant {grant_id} has unknown writer: {strings['owner']!r}"
             )
         cardinality = raw_grant["cardinality"]
-        if (
-            isinstance(cardinality, bool)
-            or not isinstance(cardinality, int)
-            or cardinality < 1
-        ):
+        if isinstance(cardinality, bool) or not isinstance(cardinality, int) or cardinality < 1:
             raise OwnershipAuditError(
                 f"generated grant {grant_id} has invalid cardinality"
             )
         if strings["role"] != "generate":
-            raise OwnershipAuditError(
-                f"generated grant {grant_id} has invalid writer role"
-            )
+            raise OwnershipAuditError(f"generated grant {grant_id} has invalid writer role")
         grants.append(
             GeneratedGrant(
                 id=grant_id,
@@ -725,9 +655,7 @@ def validate_projection(projection: PlanProjection, ledger: OwnershipLedger) -> 
                     f"planned ownership path first writer must create: {path}"
                 )
             if writer.role == "remove" and position != len(entry.writers) - 1:
-                raise OwnershipAuditError(
-                    f"remove role is not the final writer: {path}"
-                )
+                raise OwnershipAuditError(f"remove role is not the final writer: {path}")
             if writer.role == "remove" and REMOVED_PLAN_PATHS.get(path) != writer.node:
                 raise OwnershipAuditError(f"remove role is not plan-authorized: {path}")
 
@@ -758,9 +686,7 @@ def _argv_repository_paths(argv: tuple[str, ...]) -> set[str]:
         and argv[1] == "frontend/diagnostics/scripts/maintain.mjs"
     )
     for token in argv:
-        value = (
-            token.split("=", 1)[1] if token.startswith("--") and "=" in token else token
-        )
+        value = token.split("=", 1)[1] if token.startswith("--") and "=" in token else token
         for candidate in value.split(","):
             candidate = candidate.split("::", 1)[0]
             if not candidate or "$" in candidate:
@@ -802,8 +728,14 @@ def _validate_gate_paths(
 
 def _lifecycle_paths(node_ids: tuple[str, ...]) -> frozenset[str]:
     return frozenset(
-        {f"tests/fixtures/artifact_layout/nodes/{node}.json" for node in node_ids}
-        | {f"tests/fixtures/diagnostic_node_gates/{node}.json" for node in node_ids}
+        {
+            f"tests/fixtures/artifact_layout/nodes/{node}.json"
+            for node in node_ids
+        }
+        | {
+            f"tests/fixtures/diagnostic_node_gates/{node}.json"
+            for node in node_ids
+        }
     )
 
 
@@ -816,9 +748,7 @@ def _category_paths(fragment: ArtifactFragment) -> dict[str, str]:
     ):
         for path in paths:
             if path in result:
-                raise OwnershipAuditError(
-                    f"artifact path repeats across categories: {path}"
-                )
+                raise OwnershipAuditError(f"artifact path repeats across categories: {path}")
             result[path] = category
     return result
 
@@ -849,9 +779,7 @@ def validate_lifecycle(
     if layout.node_ids != projection.node_ids or tuple(gates) != projection.node_ids:
         raise OwnershipAuditError("lifecycle index differs from the plan projection")
     realized_artifacts = {
-        node
-        for node, fragment in layout.fragments.items()
-        if fragment.state == "realized"
+        node for node, fragment in layout.fragments.items() if fragment.state == "realized"
     }
     realized_gates = {node for node, gate in gates.items() if gate.state == "realized"}
     if realized_artifacts != realized_gates:
@@ -889,9 +817,7 @@ def validate_lifecycle(
         for entry in ledger.paths:
             if entry.path in lifecycle_paths:
                 continue
-            writer = next(
-                (writer for writer in entry.writers if writer.node == node), None
-            )
+            writer = next((writer for writer in entry.writers if writer.node == node), None)
             if writer is not None:
                 expected_paths[entry.path] = _expected_category(writer.role)
         if set(actual_categories) != set(expected_paths):
@@ -928,9 +854,7 @@ def validate_lifecycle(
                 writer for writer in entry.writers if writer.node in realized_artifacts
             ]
             if realized_writers != list(entry.writers[: len(realized_writers)]):
-                raise OwnershipAuditError(
-                    f"realized writer prefix is not closed for {path}"
-                )
+                raise OwnershipAuditError(f"realized writer prefix is not closed for {path}")
             exists = (repository_root / path).is_file()
             expected_exists = entry.baseline_state == "existing"
             if realized_writers:
@@ -946,46 +870,29 @@ def _validate_planning_bundle(
     repository_root: Path,
     projection: PlanProjection,
 ) -> None:
-    overlap = sorted(
-        set(ledger_path for ledger_path in projection.path_writers)
-        & PLANNING_BUNDLE_PATHS
-    )
+    overlap = sorted(set(ledger_path for ledger_path in projection.path_writers) & PLANNING_BUNDLE_PATHS)
     if overlap:
-        raise OwnershipAuditError(
-            f"accepted planning bundle has node owners: {overlap}"
-        )
-    output = str(
-        _git(repository_root, "ls-files", "--", *sorted(PLANNING_BUNDLE_PATHS))
-    )
+        raise OwnershipAuditError(f"accepted planning bundle has node owners: {overlap}")
+    output = str(_git(repository_root, "ls-files", "--", *sorted(PLANNING_BUNDLE_PATHS)))
     tracked = set(output.splitlines())
     if tracked != set(PLANNING_BUNDLE_PATHS):
         raise OwnershipAuditError(
             "accepted planning bundle files are not tracked exactly: "
             f"missing={sorted(PLANNING_BUNDLE_PATHS - tracked)}"
         )
-    review_path = (
-        repository_root / "docs/plan/production-diagnostics-plan-review-record.md"
-    )
+    review_path = repository_root / "docs/plan/production-diagnostics-plan-review-record.md"
     try:
         review = review_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
-        raise OwnershipAuditError(
-            f"could not read the plan review record: {error}"
-        ) from error
+        raise OwnershipAuditError(f"could not read the plan review record: {error}") from error
     for path, label in FROZEN_HASH_LABELS.items():
-        matches = re.findall(
-            rf"^- {re.escape(label)}: `([0-9a-f]{{64}})`$", review, re.MULTILINE
-        )
+        matches = re.findall(rf"^- {re.escape(label)}: `([0-9a-f]{{64}})`$", review, re.MULTILINE)
         if len(matches) != 1:
-            raise OwnershipAuditError(
-                f"review record has no unique frozen hash for {path}"
-            )
+            raise OwnershipAuditError(f"review record has no unique frozen hash for {path}")
         try:
             digest = hashlib.sha256((repository_root / path).read_bytes()).hexdigest()
         except OSError as error:
-            raise OwnershipAuditError(
-                f"could not hash accepted planning input {path}"
-            ) from error
+            raise OwnershipAuditError(f"could not hash accepted planning input {path}") from error
         if digest != matches[0]:
             raise OwnershipAuditError(
                 f"accepted planning bundle hash differs for {path}: {digest} != {matches[0]}"
@@ -1002,9 +909,7 @@ def audit_plan(
     try:
         actual_plan = plan_path.resolve(strict=True)
     except OSError as error:
-        raise OwnershipAuditError(
-            f"could not resolve the accepted diagnostics plan: {error}"
-        ) from error
+        raise OwnershipAuditError(f"could not resolve the accepted diagnostics plan: {error}") from error
     if actual_plan != expected_plan:
         raise OwnershipAuditError(
             f"plan-only audit requires the tracked accepted plan: {expected_plan}"
@@ -1038,9 +943,7 @@ def _regular_file_without_symlink_parent(
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(root)
     except (OSError, ValueError) as error:
-        raise OwnershipAuditError(
-            f"{context} escapes the repository: {relative}"
-        ) from error
+        raise OwnershipAuditError(f"{context} escapes the repository: {relative}") from error
     if not resolved.is_file():
         raise OwnershipAuditError(f"{context} is not a regular file: {relative}")
     return resolved
@@ -1069,15 +972,11 @@ def _generated_members(repository_root: Path, grant: GeneratedGrant) -> tuple[st
             )
         path = _canonical_path(raw_file["path"], f"generated grant {grant.id} member")
         if not path.startswith(grant.exact_parent):
-            raise OwnershipAuditError(
-                f"generated grant {grant.id} member has wrong parent: {path}"
-            )
+            raise OwnershipAuditError(f"generated grant {grant.id} member has wrong parent: {path}")
         basename = path.removeprefix(grant.exact_parent)
         match = ASSET_NAME_RE.fullmatch(basename)
         if match is None:
-            raise OwnershipAuditError(
-                f"generated grant {grant.id} member name is invalid: {path}"
-            )
+            raise OwnershipAuditError(f"generated grant {grant.id} member name is invalid: {path}")
         build_hashes.add(match.group("build"))
         combinations.add((match.group("kind"), match.group("encoding")))
         member_path = _regular_file_without_symlink_parent(
@@ -1086,10 +985,7 @@ def _generated_members(repository_root: Path, grant: GeneratedGrant) -> tuple[st
             f"generated grant {grant.id} member",
         )
         declared_sha = raw_file.get("sha256")
-        if (
-            not isinstance(declared_sha, str)
-            or SHA256_RE.fullmatch(declared_sha) is None
-        ):
+        if not isinstance(declared_sha, str) or SHA256_RE.fullmatch(declared_sha) is None:
             raise OwnershipAuditError(
                 f"generated grant {grant.id} member SHA is malformed: {path}"
             )
@@ -1099,13 +995,11 @@ def _generated_members(repository_root: Path, grant: GeneratedGrant) -> tuple[st
             )
         members.append(path)
     expected_combinations = {
-        (kind, encoding) for kind in ("js", "css") for encoding in ("raw", "gz", "br")
+        (kind, encoding)
+        for kind in ("js", "css")
+        for encoding in ("raw", "gz", "br")
     }
-    if (
-        len(set(members)) != grant.cardinality
-        or len(build_hashes) != 1
-        or combinations != expected_combinations
-    ):
+    if len(set(members)) != grant.cardinality or len(build_hashes) != 1 or combinations != expected_combinations:
         raise OwnershipAuditError(f"generated grant {grant.id} members are not exact")
     return tuple(sorted(members))
 
@@ -1120,13 +1014,9 @@ def _legacy_audit_node(node_id: str, base: str, repository_root: Path) -> None:
         raise OwnershipAuditError(f"unknown diagnostic node: {node_id}")
     fragment = layout.fragments[node_id]
     if fragment.state != "realized" or gates[node_id].state != "realized":
-        raise OwnershipAuditError(
-            f"artifact and gate lifecycle must both be realized for {node_id}"
-        )
+        raise OwnershipAuditError(f"artifact and gate lifecycle must both be realized for {node_id}")
     if fragment.generated:
-        raise OwnershipAuditError(
-            "generated grants require the F02 ownership ledger audit"
-        )
+        raise OwnershipAuditError("generated grants require the F02 ownership ledger audit")
     resolved_base = _resolve_commit(repository_root, base)
     expected = _expected_fragment_diff(fragment)
     actual = _changed_paths(repository_root, resolved_base)
@@ -1163,16 +1053,12 @@ def _expected_fragment_diff(fragment: ArtifactFragment) -> dict[str, str]:
     ):
         for path in paths:
             if path in expected:
-                raise OwnershipAuditError(
-                    f"artifact path appears in multiple categories: {path}"
-                )
+                raise OwnershipAuditError(f"artifact path appears in multiple categories: {path}")
             expected[path] = status
     return expected
 
 
-def _compare_diff(
-    node_id: str, expected: dict[str, str], actual: dict[str, str]
-) -> None:
+def _compare_diff(node_id: str, expected: dict[str, str], actual: dict[str, str]) -> None:
     if actual == expected:
         return
     missing = sorted(set(expected) - set(actual))
@@ -1193,42 +1079,14 @@ def _validate_removed_preimages(
 ) -> None:
     for removed in fragment.removed:
         try:
-            previous = _git(
-                repository_root, "show", f"{base}:{removed.path}", binary=True
-            )
+            previous = _git(repository_root, "show", f"{base}:{removed.path}", binary=True)
         except OwnershipAuditError as error:
             raise OwnershipAuditError(
                 f"removed path did not exist at base: {removed.path}"
             ) from error
         assert isinstance(previous, bytes)
         if hashlib.sha256(previous).hexdigest() != removed.sha256:
-            raise OwnershipAuditError(
-                f"removed path preimage hash differs: {removed.path}"
-            )
-
-
-def _validated_post_plan_repairs(repository_root: Path) -> dict[str, str]:
-    repairs: dict[str, str] = {}
-    for path, (commit, expected_sha256) in POST_PLAN_REPAIRS.items():
-        candidate = repository_root / path
-        if not candidate.is_file() or candidate.is_symlink():
-            raise OwnershipAuditError(f"post-plan repair is not a regular file: {path}")
-        actual_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        if actual_sha256 != expected_sha256:
-            raise OwnershipAuditError(f"post-plan repair content differs: {path}")
-        latest = str(
-            _git(repository_root, "log", "-1", "--format=%H", "--", path)
-        ).strip()
-        if latest != commit:
-            raise OwnershipAuditError(f"post-plan repair commit differs: {path}")
-        try:
-            _git(repository_root, "merge-base", "--is-ancestor", commit, "HEAD")
-        except OwnershipAuditError as error:
-            raise OwnershipAuditError(
-                f"post-plan repair commit is not an ancestor: {path}"
-            ) from error
-        repairs[path] = "M"
-    return repairs
+            raise OwnershipAuditError(f"removed path preimage hash differs: {removed.path}")
 
 
 def audit_node(node_id: str, base: str) -> None:
@@ -1263,18 +1121,14 @@ def audit_node(node_id: str, base: str) -> None:
             )
         return
     if fragment.state != "realized" or gate.state != "realized":
-        raise OwnershipAuditError(
-            f"artifact and gate lifecycle must advance together for {node_id}"
-        )
+        raise OwnershipAuditError(f"artifact and gate lifecycle must advance together for {node_id}")
 
     expected = _expected_fragment_diff(fragment)
     for grant in ledger.generated_grants:
         if grant.owner == node_id:
             for path in _generated_members(repository_root, grant):
                 if path in expected:
-                    raise OwnershipAuditError(
-                        f"generated member overlaps a static artifact: {path}"
-                    )
+                    raise OwnershipAuditError(f"generated member overlaps a static artifact: {path}")
                 expected[path] = "A"
     lifecycle = (
         {
@@ -1293,9 +1147,7 @@ def audit_node(node_id: str, base: str) -> None:
     )
     for path in lifecycle:
         if path in expected:
-            raise OwnershipAuditError(
-                f"lifecycle path leaks into artifact fragment: {path}"
-            )
+            raise OwnershipAuditError(f"lifecycle path leaks into artifact fragment: {path}")
         expected[path] = "A" if node_id == "F00" else "M"
     actual = _changed_paths(repository_root, resolved_base)
     _compare_diff(node_id, expected, actual)
@@ -1324,16 +1176,8 @@ def audit_all_realized(base: str, plan_path: Path) -> None:
     for grant in ledger.generated_grants:
         for path in _generated_members(ROOT, grant):
             if path in expected:
-                raise OwnershipAuditError(
-                    f"generated member overlaps a static artifact: {path}"
-                )
+                raise OwnershipAuditError(f"generated member overlaps a static artifact: {path}")
             expected[path] = "A"
-    for path, status in _validated_post_plan_repairs(ROOT).items():
-        if path in expected:
-            raise OwnershipAuditError(
-                f"post-plan repair overlaps planned ownership: {path}"
-            )
-        expected[path] = status
     actual = _changed_paths(ROOT, resolved_base)
     _compare_diff("all-realized", expected, actual)
     for fragment in layout.fragments.values():
