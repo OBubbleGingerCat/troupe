@@ -33,6 +33,9 @@ record = {
     "http_proxy": os.environ.get("http_proxy"),
     "https_proxy": os.environ.get("https_proxy"),
     "no_proxy": os.environ.get("NO_PROXY"),
+    "pyo3_python": os.environ.get("PYO3_PYTHON"),
+    "pythonhome": os.environ.get("PYTHONHOME"),
+    "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
 }
 with Path(os.environ["TROUPE_RUST_QUALITY_LOG"]).open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(record) + "\n")
@@ -199,6 +202,33 @@ def _summary(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     return value
 
 
+def _selected_python_runtime(environment: dict[str, str]) -> tuple[str, str, str]:
+    selected = shutil.which("python3", path=environment["PATH"]) or shutil.which(
+        "python", path=environment["PATH"]
+    )
+    assert selected is not None
+    executable = str(Path(selected).resolve())
+    query_environment = dict(environment)
+    query_environment.pop("PYTHONHOME", None)
+    result = subprocess.run(
+        [
+            executable,
+            "-c",
+            (
+                "import sys, sysconfig; "
+                "print(sys.base_prefix); "
+                "print(sysconfig.get_config_var('LIBDIR') or '')"
+            ),
+        ],
+        env=query_environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    prefix, library = result.stdout.splitlines()
+    return executable, str(Path(prefix).resolve()), str(Path(library).resolve())
+
+
 def test_checked_in_contract_and_descriptors_are_exact() -> None:
     assert json.loads((ROOT / FIXTURE_RELATIVE).read_text(encoding="utf-8")) == {
         "schema": "troupe.diagnostics.rust-quality.v1",
@@ -239,6 +269,14 @@ def test_success_runs_exact_offline_stage_order_and_emits_one_summary(
     tmp_path: Path,
 ) -> None:
     repository, environment, log = _sandbox(tmp_path)
+    environment.update(
+        {
+            "PYO3_PYTHON": "/caller/python",
+            "PYTHONHOME": "/caller/python-home",
+            "LD_LIBRARY_PATH": "/caller/lib",
+        }
+    )
+    python, pythonhome, python_library = _selected_python_runtime(environment)
     result = _run(repository, environment)
 
     assert result.returncode == 0
@@ -256,6 +294,11 @@ def test_success_runs_exact_offline_stage_order_and_emits_one_summary(
     }
     assert {record["no_proxy"] for record in records} == {
         "localhost,127.0.0.1,::1"
+    }
+    assert {record["pyo3_python"] for record in records} == {python}
+    assert {record["pythonhome"] for record in records} == {pythonhome}
+    assert {record["ld_library_path"] for record in records} == {
+        f"{python_library}{os.pathsep}/caller/lib"
     }
     summary = _summary(result)
     assert summary["result"] == "passed"

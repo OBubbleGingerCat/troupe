@@ -17,6 +17,37 @@ if [[ "$(git -C "$repository_root" rev-parse --show-toplevel 2>/dev/null)" != "$
   exit 1
 fi
 
+python_executable="$(command -v python3 || command -v python)" || {
+  printf 'Rust quality runner requires Python for PyO3 tests\n' >&2
+  exit 1
+}
+python_executable="$(readlink -f -- "$python_executable")" || exit 1
+if [[ ! -f "$python_executable" || ! -x "$python_executable" ]]; then
+  printf 'Rust quality Python must resolve to an executable regular file\n' >&2
+  exit 1
+fi
+python_prefix="$(
+  env -u PYTHONHOME "$python_executable" -c \
+    'import sys; print(sys.base_prefix)'
+)" || exit 1
+python_library="$(
+  env -u PYTHONHOME "$python_executable" -c \
+    'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")'
+)" || exit 1
+if [[ "$python_prefix" != /* || ! -d "$python_prefix" || -L "$python_prefix" ]]; then
+  printf 'Rust quality Python base prefix must be an absolute real directory\n' >&2
+  exit 1
+fi
+if [[ "$python_library" != /* || ! -d "$python_library" || -L "$python_library" ]]; then
+  printf 'Rust quality Python library path must be an absolute real directory\n' >&2
+  exit 1
+fi
+python_prefix="$(CDPATH= cd -- "$python_prefix" && pwd -P)" || exit 1
+python_library="$(CDPATH= cd -- "$python_library" && pwd -P)" || exit 1
+export PYO3_PYTHON="$python_executable"
+export PYTHONHOME="$python_prefix"
+export LD_LIBRARY_PATH="$python_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 checkout_fingerprint() {
   (
     cd -- "$repository_root" || exit 1
