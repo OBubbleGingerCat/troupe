@@ -145,6 +145,7 @@ def run(repository: Path, arguments: list[str]) -> int:
         container_tools.mkdir()
         (container_tools / "git").symlink_to("/usr/local/bin/git")
         (container_tools / "patchelf").symlink_to("/usr/local/bin/patchelf")
+        (container_tools / "cmake").symlink_to("/usr/local/bin/cmake")
         cargo_root = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
         cargo_registry = exact_directory(cargo_root / "registry", "Cargo registry")
         environment = dict(os.environ)
@@ -190,8 +191,13 @@ def run(repository: Path, arguments: list[str]) -> int:
                 str(container_tools),
                 "/opt/python/cp310-cp310/bin",
                 "/root/.cargo/bin",
+                "/opt/clang/bin",
+                "/opt/rh/devtoolset-10/root/usr/bin",
+                "/usr/local/sbin",
                 "/usr/bin",
+                "/usr/sbin",
                 "/bin",
+                "/sbin",
             )
         )
         container_environment = {
@@ -249,6 +255,35 @@ restore_ownership() {
   exit "$original_status"
 }
 trap restore_ownership EXIT
+
+required_tools=(
+  python maturin cargo rustc cc c++ ar ranlib ld strip cmake make perl
+  pkg-config git patchelf
+)
+for tool in "${required_tools[@]}"; do
+  command -v "$tool" >/dev/null
+done
+for tool in node nodejs npm npx protoc perfetto trace_processor_shell uv; do
+  if command -v "$tool" >/dev/null; then
+    printf 'forbidden build tool is available: %s\n' "$tool" >&2
+    exit 97
+  fi
+done
+printf 'int main(void) { return 0; }\n' | cc -x c - -o "${TMPDIR:?}/cc-smoke"
+"${TMPDIR:?}/cc-smoke"
+printf 'fn main() {}\n' > "${TMPDIR:?}/rustc-smoke.rs"
+rustc --target x86_64-unknown-linux-gnu \
+  "${TMPDIR:?}/rustc-smoke.rs" \
+  -o "${TMPDIR:?}/rustc-smoke"
+"${TMPDIR:?}/rustc-smoke"
+cargo metadata \
+  --offline \
+  --locked \
+  --no-deps \
+  --format-version 1 \
+  --manifest-path "$PWD/rust/Cargo.toml" \
+  >/dev/null
+git rev-parse --verify HEAD >/dev/null
 
 "$container_python" "$verifier" \
   --build \

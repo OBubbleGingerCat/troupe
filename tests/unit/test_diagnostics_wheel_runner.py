@@ -311,6 +311,17 @@ def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
     assert f"type=bind,src={repository},dst={repository},readonly" in mounts
     assert f"type=bind,src={gate},dst={gate}" in mounts
     assert any(mount.endswith("dst=/root/.cargo/registry,readonly") for mount in mounts)
+    container_script = docker_arguments[docker_arguments.index("-c") + 1]
+    assert "printf 'int main(void) { return 0; }" in container_script
+    assert "rustc --target x86_64-unknown-linux-gnu" in container_script
+    assert "cargo metadata" in container_script
+    container_path = next(
+        value.removeprefix("PATH=")
+        for value in docker_arguments
+        if value.startswith("PATH=")
+    )
+    assert "/opt/rh/devtoolset-10/root/usr/bin" in container_path.split(os.pathsep)
+    assert "/usr/local/bin" not in container_path.split(os.pathsep)
     summary = json.loads(result.stdout)
     assert summary == {
         "schema": "troupe.diagnostics.wheel-runner.v1",
