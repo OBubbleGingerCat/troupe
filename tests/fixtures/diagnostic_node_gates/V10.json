@@ -1,6 +1,18 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "pytest",
+      "-q",
+      "tests/unit/test_diagnostics_rust_quality_runner.py"
+    ],
+    [
+      "scripts/test_diagnostics_rust_quality.sh",
+      "--all",
+      "--locked",
+      "--deny-warnings"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
   "cache_requirements": [],
