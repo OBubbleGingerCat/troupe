@@ -430,13 +430,17 @@ test("serves HEAD, conditional, and representation-specific cache contracts", as
   });
   expect(raw.status()).toBe(200);
   expect(gzip.status()).toBe(200);
-  expect(raw.headers().etag).not.toBe(gzip.headers().etag);
+  const gzipEtag = gzip.headers().etag;
+  if (gzipEtag === undefined) {
+    throw new Error("gzip asset response is missing ETag");
+  }
+  expect(raw.headers().etag).not.toBe(gzipEtag);
   expect(gzip.headers()["content-encoding"]).toBe("gzip");
 
   const notModified = await request.get(`${base}${assetPath!}`, {
     headers: {
       "Accept-Encoding": "gzip",
-      "If-None-Match": gzip.headers().etag,
+      "If-None-Match": gzipEtag,
     },
   });
   expect(notModified.status()).toBe(304);
