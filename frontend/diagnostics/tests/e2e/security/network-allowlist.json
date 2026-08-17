@@ -1,0 +1,12 @@
+{
+  "schema": "troupe.diagnostics.browser-security-network.v1",
+  "same_origin_only": true,
+  "path_prefixes": [
+    "/__v13",
+    "/@id/",
+    "/@vite/",
+    "/@fs/",
+    "/node_modules/",
+    "/src/"
+  ]
+}

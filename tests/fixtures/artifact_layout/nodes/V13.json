@@ -1,6 +1,12 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/tests/e2e/security/malicious-events.json",
+    "frontend/diagnostics/tests/e2e/security/network-allowlist.json",
+    "frontend/diagnostics/tests/e2e/security/response-headers.json",
+    "frontend/diagnostics/tests/e2e/security/security.spec.ts",
+    "scripts/test_diagnostics_browser_security.sh"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
