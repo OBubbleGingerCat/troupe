@@ -106,7 +106,7 @@ export ALL_PROXY=http://127.0.0.1:9/
 export all_proxy=http://127.0.0.1:9/
 export NO_PROXY=localhost,127.0.0.1,::1
 export no_proxy=localhost,127.0.0.1,::1
-unset PYTHONPATH
+unset PYTHONPATH TROUPE_PERFETTO_CACHE TROUPE_PLAYWRIGHT_CACHE TROUPE_NPM_CACHE
 
 python_executable="$(command -v python 2>/dev/null || true)"
 if [[ -z "$python_executable" ]]; then

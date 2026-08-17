@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_RELATIVE = Path("scripts/test_perfetto_ui_compatibility.sh")
@@ -24,6 +26,18 @@ FIXTURE_NAMES = (
     "open",
     "overlap",
     "repeated-dump",
+)
+
+pytestmark = pytest.mark.skipif(
+    any(
+        not os.environ.get(name)
+        for name in (
+            "TROUPE_PERFETTO_CACHE",
+            "TROUPE_PLAYWRIGHT_CACHE",
+            "TROUPE_NPM_CACHE",
+        )
+    ),
+    reason="Perfetto UI compatibility runs only under the T07 Gate",
 )
 
 

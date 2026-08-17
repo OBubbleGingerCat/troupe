@@ -169,7 +169,7 @@ def test_admission_binds_once_and_rejects_reuse_before_prompt_submission(
     asyncio.run(scenario())
 
     assert reuse_codes == ["already_bound"]
-    assert _base_state(diagnostics, sink) == "BOUND"
+    assert _base_state(diagnostics, sink) == "CLOSED"
     assert callback_events
     act_ids = {event.scope.act_id for event in callback_events}
     assert len(act_ids) == 1

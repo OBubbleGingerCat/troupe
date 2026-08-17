@@ -33,8 +33,8 @@ use crate::adapter::{AcpAgentAdapter, agent_adapter};
 use crate::diagnostics::observer::AgentDiagnosticObserver;
 use crate::diagnostics::session::{
     self as diagnostic_session, AgentDiagnosticProvider, AgentDiagnosticSnapshotError,
-    AgentSessionDiagnosticContext, AgentSessionDiagnosticMetadata, SessionDiagnosticCleanupHandle,
-    SessionDiagnostics,
+    AgentSessionDiagnosticContext, AgentSessionDiagnosticMetadata, AgentSessionDiagnosticProfile,
+    SessionDiagnosticCleanupHandle, SessionDiagnostics,
 };
 use crate::error::{AgentSessionFailure, AgentStartupFailure};
 #[cfg(feature = "agent-test-support")]
@@ -1318,7 +1318,7 @@ pub struct AgentSessionSlot {
     state: Mutex<AgentSessionState>,
     diagnostics: SessionDiagnostics,
     diagnostic_provider: Option<AgentDiagnosticProvider>,
-    diagnostic_profile: Option<Arc<ResolvedAgentProfile>>,
+    diagnostic_profile: Option<AgentSessionDiagnosticProfile>,
     changed: Notify,
     cancellation: CancellationToken,
     terminal_fault: CancellationToken,
@@ -1388,11 +1388,16 @@ impl AgentSessionSlot {
         diagnostic_context: Option<AgentSessionDiagnosticContext>,
         profile: Arc<ResolvedAgentProfile>,
     ) -> Arc<Self> {
-        let provider = AgentDiagnosticProvider::from_agent_kind(profile.agent);
+        let diagnostic_profile = AgentSessionDiagnosticProfile::from_profile(&profile);
+        let provider = diagnostic_profile.provider();
         Self::new_with_profile(
-            SessionDiagnostics::from_profile(diagnostic_observer, diagnostic_context, &profile),
+            SessionDiagnostics::from_profile(
+                diagnostic_observer,
+                diagnostic_context,
+                &diagnostic_profile,
+            ),
             Some(provider),
-            Some(profile),
+            Some(diagnostic_profile),
         )
     }
 
@@ -1407,7 +1412,7 @@ impl AgentSessionSlot {
     fn new_with_profile(
         diagnostics: SessionDiagnostics,
         diagnostic_provider: Option<AgentDiagnosticProvider>,
-        diagnostic_profile: Option<Arc<ResolvedAgentProfile>>,
+        diagnostic_profile: Option<AgentSessionDiagnosticProfile>,
     ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(AgentSessionState::Opening),
@@ -1488,7 +1493,6 @@ impl AgentSessionSlot {
             .diagnostic_profile
             .as_ref()
             .ok_or(AgentDiagnosticSnapshotError::ProfileUnavailable)?;
-        let provider = AgentDiagnosticProvider::from_agent_kind(profile.agent);
         let ready = {
             let state = lock(&self.state);
             match &*state {
@@ -1506,7 +1510,6 @@ impl AgentSessionSlot {
         };
         Ok(Arc::new(AgentSessionDiagnosticMetadata::snapshot(
             context,
-            provider,
             profile,
             ready.as_deref(),
         )))

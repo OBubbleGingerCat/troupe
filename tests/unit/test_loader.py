@@ -183,7 +183,8 @@ def test_loader_source_exposes_path_class_and_construct_phases() -> None:
 
     invocation_source = (application / "invocation.rs").read_text(encoding="utf-8")
     assert "type ProductionInvocation<'py>" in invocation_source
-    assert "Result<ProductionInvocation<'py>, InvocationError>" in invocation_source
+    assert "Result<ParsedInvocation<'py>, InvocationError>" in invocation_source
+    assert "PyResult<ProductionInvocation<'py>>" in invocation_source
 
 
 def test_recording_package_loads_with_canonical_identity(

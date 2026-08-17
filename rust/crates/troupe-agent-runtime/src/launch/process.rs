@@ -3,6 +3,7 @@ use std::mem::{MaybeUninit, size_of};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
@@ -12,6 +13,7 @@ use crate::launch::fd_registry::{ForkExecGuard, ForkTracked};
 use crate::profile::WorkspaceLeaseV1;
 
 const PROC_CHILDREN: &std::ffi::CStr = c"/proc/thread-self/children";
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(crate) struct SpawnedAgent {
     pub(crate) guardian: Child,
@@ -26,6 +28,13 @@ pub(crate) async fn terminate_and_reap(
     guardian: &mut Child,
     shutdown: &mut Option<ForkTracked<OwnedFd>>,
 ) {
+    if matches!(
+        tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, guardian.wait()).await,
+        Ok(Ok(_))
+    ) {
+        drop(shutdown.take());
+        return;
+    }
     drop(shutdown.take());
     let _ = guardian.wait().await;
 }

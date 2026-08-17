@@ -51,6 +51,27 @@ impl AgentDiagnosticProvider {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AgentSessionDiagnosticProfile {
+    provider: AgentDiagnosticProvider,
+    requested_model: Arc<str>,
+    requested_effort: Option<Arc<str>>,
+}
+
+impl AgentSessionDiagnosticProfile {
+    pub(crate) fn from_profile(profile: &ResolvedAgentProfile) -> Self {
+        Self {
+            provider: AgentDiagnosticProvider::from_agent_kind(profile.agent),
+            requested_model: Arc::from(profile.requested_model.as_str()),
+            requested_effort: profile.requested_effort.as_deref().map(Arc::<str>::from),
+        }
+    }
+
+    pub(crate) const fn provider(&self) -> AgentDiagnosticProvider {
+        self.provider
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AgentSessionDiagnosticContext {
     actor_id: Arc<str>,
@@ -121,16 +142,15 @@ impl AgentSessionDiagnosticMetadata {
 
     fn opening(
         context: AgentSessionDiagnosticContext,
-        provider: AgentDiagnosticProvider,
-        profile: &ResolvedAgentProfile,
+        profile: &AgentSessionDiagnosticProfile,
     ) -> Self {
         Self {
             context,
-            provider,
+            provider: profile.provider,
             generation: None,
             provider_session_id: None,
-            requested_model: Arc::from(profile.requested_model.as_str()),
-            requested_effort: profile.requested_effort.as_deref().map(Arc::<str>::from),
+            requested_model: Arc::clone(&profile.requested_model),
+            requested_effort: profile.requested_effort.clone(),
             effective_model: None,
             effective_effort: None,
         }
@@ -138,11 +158,10 @@ impl AgentSessionDiagnosticMetadata {
 
     pub(crate) fn snapshot(
         context: AgentSessionDiagnosticContext,
-        provider: AgentDiagnosticProvider,
-        profile: &ResolvedAgentProfile,
+        profile: &AgentSessionDiagnosticProfile,
         ready: Option<&AgentReadySnapshot>,
     ) -> Self {
-        let mut metadata = Self::opening(context, provider, profile);
+        let mut metadata = Self::opening(context, profile);
         if let Some(ready) = ready {
             metadata.apply_ready(ready);
         }
@@ -522,16 +541,12 @@ impl SessionDiagnostics {
     pub(crate) fn from_profile(
         observer: Option<AgentDiagnosticObserver>,
         context: Option<AgentSessionDiagnosticContext>,
-        profile: &ResolvedAgentProfile,
+        profile: &AgentSessionDiagnosticProfile,
     ) -> Self {
         let lifecycle = observer.as_ref().zip(context).map(|(observer, context)| {
             Arc::new(SessionDiagnosticLifecycle::new(
                 observer.clone(),
-                AgentSessionDiagnosticMetadata::opening(
-                    context,
-                    AgentDiagnosticProvider::from_agent_kind(profile.agent),
-                    profile,
-                ),
+                AgentSessionDiagnosticMetadata::opening(context, profile),
             ))
         });
         Self {

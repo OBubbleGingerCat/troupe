@@ -32,14 +32,15 @@ def _live_acceptance_module() -> Any:
     return module
 
 
-def test_mcp_official_acp_dependency_pins_the_sdk_not_an_unstable_transport() -> None:
+def test_mcp_official_acp_dependency_pins_the_sdk_and_turn_usage_feature() -> None:
     with (
         ROOT / "rust" / "crates" / "troupe-agent-runtime" / "Cargo.toml"
     ).open("rb") as handle:
         manifest = tomllib.load(handle)
 
     assert manifest["dependencies"]["agent-client-protocol"] == {
-        "version": "=2.0.0"
+        "version": "=2.0.0",
+        "features": ["unstable_end_turn_token_usage"],
     }
     assert manifest["dependencies"]["getrandom"] == "0.4"
     assert manifest["features"] == {

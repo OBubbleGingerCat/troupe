@@ -139,11 +139,16 @@ def test_a04_projection_has_six_exact_fields_and_no_derived_accounting() -> None
     assert ".get()" not in projection
 
 
-def test_a04_is_deferred_and_s11_reads_only_the_canonical_terminal_fact() -> None:
+def test_a04_is_deferred_and_s11_act_totals_read_only_the_terminal_fact() -> None:
     bridge = _source(BRIDGE)
     a04 = _source(A04)
     projector = _source(S11)
     candidate = _between(projector, "fn candidate_for_event(", "fn validate_position(")
+    context_branch = _between(
+        candidate,
+        "DiagnosticEvent::ContextUsageSampled(context)",
+        "DiagnosticEvent::ActTokenUsageFinalized(event)",
+    )
 
     assert "pub struct AgentTurnUsageCandidate" in a04
     assert "AgentTurnUsageCandidate" in bridge
@@ -151,5 +156,5 @@ def test_a04_is_deferred_and_s11_reads_only_the_canonical_terminal_fact() -> Non
     assert "ActTokenUsageFinalized" not in bridge
     assert candidate.count("DiagnosticEvent::ActTokenUsageFinalized") == 1
     assert "ProjectedActUsage::from_event(event, act_id)" in candidate
-    assert "ContextUsageSampled" not in projector
-    assert "AgentTurnUsageCandidate" not in projector
+    assert "aggregate" not in context_branch
+    assert "AgentTurnUsageCandidate" not in candidate

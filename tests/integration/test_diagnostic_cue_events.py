@@ -136,7 +136,9 @@ def test_caller_drop_and_scene_shutdown_use_the_existing_cancel_transition() -> 
     scene_context = SCENE_CONTEXT.read_text(encoding="utf-8")
 
     close = _method(cue_future, "close", "__await__")
-    assert close.index("operation.request_cancel()") < close.index("self.finish()")
+    assert close.index("operation.request_cancel()") < close.index(
+        "self.finish(CueCallerOutcome::Abandoned)"
+    )
     cancel = _method(mailbox, "request_cancel", "completion_snapshot")
     assert cancel.index("CueHook::CancelRequested") < cancel.index(
         "self.perform_terminal_action(action)"

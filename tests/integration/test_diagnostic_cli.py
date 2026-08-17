@@ -23,7 +23,7 @@ def test_top_level_branch_returns_before_the_production_loader() -> None:
 
     diagnostic_branch = "Invocation::Diagnostic(command) => return run_diagnostic(py, command)"
     assert diagnostic_branch in source
-    assert source.index(diagnostic_branch) < source.index("load_production(py")
+    assert source.index(diagnostic_branch) < source.index("activation::activate")
     for required in (
         "DiagnosticSignalGuard::install",
         "Builder::new_current_thread()",

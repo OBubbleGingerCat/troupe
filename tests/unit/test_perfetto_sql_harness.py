@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_RELATIVE = Path("scripts/test_perfetto_sql_compatibility.sh")
@@ -14,6 +16,11 @@ SCRIPT = REPO_ROOT / SCRIPT_RELATIVE
 SQL_ROOT_RELATIVE = Path("tests/perfetto/sql")
 TOOLS_ROOT_RELATIVE = Path("tests/perfetto/tools")
 TRACES_RELATIVE = Path("tests/fixtures/perfetto/traces")
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("TROUPE_PERFETTO_CACHE"),
+    reason="Perfetto SQL compatibility runs only under the T06 Gate",
+)
 
 
 def _cache() -> Path:

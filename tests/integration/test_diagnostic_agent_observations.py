@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BRIDGE = ROOT / "rust/src/diagnostic_runtime/observation_bridge.rs"
+HOOKS = ROOT / "rust/src/diagnostic_runtime/hooks.rs"
 FIXTURE = ROOT / "tests/fixtures/diagnostics/agent-observations.json"
 
 
@@ -239,19 +240,22 @@ def test_a04_and_a09_are_typed_noncanonical_dispositions() -> None:
     assert dispatch.index("AgentTurnUsageCandidate") < dispatch.index("DeferredUsage")
     assert dispatch.index("AgentToolPayloadCandidate") < dispatch.index("SinkOnlyPayload")
     assert ".usage()" not in source
-    assert ".payload()" not in source
+    assert dispatch.count("candidate.payload()") == 1
+    assert "subscribers.deliver_tool_payload(" in dispatch
     assert "ActTokenUsageFinalized" not in source
     assert "SinkOnlyJsonValue" not in source
 
 
 def test_per_act_subscriber_lookup_never_applies_to_session_scope() -> None:
     source = _source()
+    hooks = HOOKS.read_text(encoding="utf-8")
     admission = _between(source, "fn admit_event<F>(", "fn admit_span_start(")
 
     assert "scope.act_id().and_then" in admission
     assert "lookup.subscriber_for(act_id.as_str())" in admission
     assert "production_with_subscribers" in source
-    assert "trait ActObservationSubscriberLookup" in source
+    assert "DiagnosticActSubscriberLookup" in source
+    assert "pub(crate) trait DiagnosticActSubscriberLookup" in hooks
     assert "session_scope(" in source
     assert "None,\n            generation.map(SchemaU64::new)" in source
 

@@ -12,7 +12,7 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_private_parser_slots_are_loader_free_and_not_wired_to_execution() -> None:
+def test_private_parser_slots_are_loader_free_and_wired_only_at_the_entry_point() -> None:
     sources = {
         name: _read(CLI_ROOT / name)
         for name in ("args.rs", "target.rs", "values.rs")
@@ -35,12 +35,14 @@ def test_private_parser_slots_are_loader_free_and_not_wired_to_execution() -> No
     for module in ("args", "target", "values"):
         assert f"pub(crate) mod {module};" in module_root
 
-    # D07 owns the application entry-point join. D00 must remain a private,
-    # independently testable parser and leave existing top-level behavior alone.
-    assert "diagnostic_cli" not in _read(ROOT / "rust" / "src" / "application" / "cli.rs")
-    assert "diagnostic_cli" not in _read(
-        ROOT / "rust" / "src" / "application" / "invocation.rs"
-    )
+    # D07 owns the application entry-point join. The D00 parser modules remain
+    # independently testable and are consumed only by the two assembly modules.
+    cli = _read(ROOT / "rust" / "src" / "application" / "cli.rs")
+    invocation = _read(ROOT / "rust" / "src" / "application" / "invocation.rs")
+    assert "use crate::application::diagnostic_cli" in cli
+    assert "use crate::application::diagnostic_cli" in invocation
+    assert "ParsedInvocation::Diagnostic(command)" in cli
+    assert "TroupeInvocation::Diagnostic(command)" in invocation
 
 
 def test_frozen_command_and_option_surface_is_explicit() -> None:
