@@ -791,15 +791,18 @@ parent、template、cardinality和SHA绑定。任何其他artifact placeholder�
 | `rust/src/application/loader.rs` | L00 | 等价迁移后由L00在fragment的`removed`登记 |
 | `rust/src/application/invocation.rs` | L00 -> D07 | loader return type后才接diagnostic CLI dispatch |
 | `rust/src/application/mod.rs` | F05 -> D07 | private module declaration后才公开dispatch |
-| `rust/src/application/cli.rs` | D07 -> X00 | CLI family join后才接mandatory Runtime activation |
-| `rust/src/orchestration/{mod,actor_handle,actor_registry,cue,cue_future,effect,mailbox,production,runtime}.rs` | F05 | F05一次性放置typed no-op calls；B节点只填`diagnostic_runtime/`slot |
-| `rust/src/orchestration/{python_task,scene_context}.rs` | F05 -> B14 | F05建立lineage seam；B14加入generation-bound Act task authority |
+| `rust/src/application/cli.rs` | D07 -> X00 -> X01 | CLI family join后接mandatory Runtime activation；X01只接fatal supervisor与独立exit surface |
+| `rust/src/orchestration/{mod,actor_handle,actor_registry,cue,cue_future,effect,mailbox,production}.rs` | F05 | F05一次性放置typed no-op calls；B节点只填`diagnostic_runtime/`slot |
+| `rust/src/orchestration/runtime.rs` | F05 -> X01 | F05建立Runtime cancellation seam；X01只让`start()` hook响应同一core cancellation |
+| `rust/src/orchestration/python_task.rs` | F05 -> B14 -> X01 | F05建立lineage seam；B14加入generation-bound Act task authority；X01只增加hook task cancellation/settlement |
+| `rust/src/orchestration/scene_context.rs` | F05 -> B14 | F05建立lineage seam；B14加入generation-bound Act task authority |
 | `rust/src/orchestration/actor.rs` | F05 -> B06 | F05放置compile-safe signature/preflight seam；B06唯一加入PyO3 keyword和同步validation调用 |
 | `rust/src/diagnostic_sink/mod.rs` | F05 -> B16 | F05声明sink modules；B16只导出settlement所需crate-private types |
 | `rust/src/diagnostic_runtime/sink_binding.rs` | F05 -> B18 -> B16 -> B14 | binding、settlement hook、authority transaction按DAG有序接线 |
 | `rust/crates/troupe-agent-runtime/src/{lib.rs,session/mod.rs,session/supervisor.rs,session/turn.rs}` | F06 | F06一次性放置typed optional observer calls；A节点只填`diagnostics/`slot |
 | `rust/src/diagnostic_python/install.rs` | F05 -> P04 | P04唯一组装Python module |
-| `rust/src/diagnostic_runtime/activation.rs` | F05 -> X00 | X00唯一启用mandatory Runtime path |
+| `rust/src/diagnostic_runtime/activation.rs` | F05 -> X00 -> X01 | X00唯一启用mandatory Runtime path；X01只接active failure reporters与guard probe |
+| `rust/src/diagnostic_runtime/bootstrap.rs` | F05 -> B00 -> X01 | F05创建slot，B00拥有bootstrap/guard；X01只暴露fatal后seal normal ingress的guard操作 |
 | `rust/src/application/diagnostic_cli/{mod,dispatch}.rs` | F05 -> D07 | D07唯一组装command families |
 | `rust/crates/troupe-diagnostics-runtime/src/server/assembly.rs` | F04 -> H04 | H04唯一组装active/archive route matrix |
 | `src/troupe/__init__.py` | P04 | Python re-export |
@@ -1818,7 +1821,7 @@ tests以byte-exact fixture验收，任何warning/progress只允许stderr。
 
 #### X01 - Core fatal supervision 与 Production cancellation convergence
 
-- **产物**：`rust/src/diagnostic_runtime/supervisor.rs`；`tests/fixtures/diagnostics/runtime-failure-matrix.json`；`tests/integration/test_diagnostic_runtime_failure.py`。
+- **产物**：填充`rust/src/diagnostic_runtime/supervisor.rs`，并按第4.2节修改`rust/src/diagnostic_runtime/{activation,bootstrap}.rs`、`rust/src/application/cli.rs`与`rust/src/orchestration/{runtime,python_task}.rs`接fatal reporters、guard probe、Runtime cancellation和独立exit surface；`tests/fixtures/diagnostics/runtime-failure-matrix.json`；`tests/integration/test_diagnostic_runtime_failure.py`。
 - **验收**：server execution context/listener、hub canonical path、writer task/commit/store、S04 budget、S06 stall、S07 quota、active Q00 reader的SQLite corruption/identity/dense-prefix invariant failure以及active Q01/H03 query worker/execution-context系统性退出，任一不可恢复failure只latch first core cause、seal newwork并触发Production/Cue cancellation+finite settlement，最终非零；用户捕获publication call附近异常不能恢复Run；尽可能按dense order写component_failed/gap但失败也不跳尾；archive保持incomplete除非完整terminal transaction；single HTTP client/request、SSE slow/overflow、archive reader/query/store failure、Python sink callback/overflow和on-demand exporter failure明确局部且不触发Production；用户Production failure和diagnostic infrastructure failure保留不同surface/precedence。
 - **Gate**：`scripts/run_diagnostic_node_gate.sh X01`，descriptor执行`pytest -q tests/integration/test_diagnostic_runtime_failure.py`。
 - **边界**：不把fatal当Act/Actor error，不自动重启core component。

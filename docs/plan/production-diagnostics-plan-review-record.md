@@ -1,12 +1,12 @@
 # Production Diagnostics Plan Review Record
 
 - Plan: `docs/plan/production-diagnostics-implementation-plan.md`
-- Status: round 13 plus the user-authorized Perfetto ingestion and Gate projection corrections are root-self-reviewed; implementation may continue
+- Status: round 13 plus the user-authorized implementation-time corrections, including the X01 supervisor call surface, are root-self-reviewed; implementation may continue
 - Actor Design SHA-256: `acb963576a100e98415418dbc6f68cb4b605c642d06f2c06620ffc4e29a19021`
 - Diagnostics Design SHA-256: `b06d3a8097780787fce3d73f7b623526ef0f4ec30b09c2c9277227b5c74a454d`
-- Plan SHA-256: `d7e38ff23bf2bcbc7ad8c4e493d1a9a2365412e7338ab968618270d4a1151501`
-- Validator SHA-256: `7ea28f559a67f75459a3fc305304be4485ac5dfe1159de5ec46c876219b85ad4`
-- Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 46 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
+- Plan SHA-256: `cbb222c5ebf9c53158cc13d233095b67ad4fa71f08370f3a2740d1c58e94d2f2`
+- Validator SHA-256: `e877c8236c236e5696661333cb68ab672f6bbbd48612e393d25b50de46dc8d02`
+- Validator: `145 nodes; 254 direct edges; 109 subprojects; 141 slots; 47 shared paths; 131 behavior owners; 2 parameterized families; 1 generated grant; self-test passed`
 - Baseline: validator normal/mutation self-test, derived DAG/schedule, ownership closure, balanced planning diffs,
   conflict-marker scan, and whitespace checks passed; no product code changed, so product build/Gates were not rerun
 - Review round: current 13 plus implementation-time corrections (frozen by explicit user-authorized root self-review)
@@ -416,3 +416,22 @@ Root self-review evidence:
 
 Verdict: `ACCEPT` for continued implementation with zero known planning blockers. This is a user-authorized root
 self-review, not four independent votes. Final implementation review remains mandatory.
+
+## X01 Implementation-Time Amendment
+
+At 123/145 merged nodes, the X01 implementation audit found that its frozen product list owned only
+`diagnostic_runtime/supervisor.rs`, while a functioning supervisor necessarily has to receive the existing active
+query/View/SSE reporters, inspect the B00 guard, request Runtime cancellation, cancel an in-flight `start()` hook,
+and select the infrastructure exit surface in the top-level CLI. With no successor writers for those call sites,
+the node could compile only as an unreachable implementation.
+
+The user explicitly authorized a fast root repair and self-review without four new independent votes. The plan and
+ledger now add X01 only as the ordered successor writer for `application/cli.rs`,
+`diagnostic_runtime/{activation,bootstrap}.rs`, and `orchestration/{runtime,python_task}.rs`. X01 remains the sole
+behavior owner of `supervisor.rs`; the DAG, dependencies, Gate, event schema, public API, X02 final transaction and
+shutdown ordering, and the no-restart boundary are unchanged. The normal validator, mutation self-test, plan-only
+ownership audit, JSON/whitespace checks, and exact five-path ownership review are the blocking evidence for this
+amendment.
+
+Verdict: `ACCEPT` for X01 implementation on the hash tuple at the top of this record. This is a user-authorized
+root self-review, not four independent votes.
