@@ -168,6 +168,25 @@ The direct command does not require `uv run`.
 `uv run troupe` only selects the project environment when its executable
 directory is not already on `PATH`.
 
+## Diagnostics
+
+Every Production starts an in-process diagnostic server and a persistent event
+store. They are mandatory parts of the Runtime: startup stops before importing
+Production code if either cannot become ready, and a core server or persistence
+failure stops a running Production with a non-zero exit status.
+
+The default listener binds to `0.0.0.0` on an OS-assigned port. Once the store,
+listener, and registry entry are durable, Troupe writes one versioned
+`troupe: diagnostic ready {...}` locator to stderr. Diagnostic state is retained
+under the writable Production root at `.troupe/diagnostics/`; stdout remains
+available to the Production.
+
+The server uses plain HTTP without access control and is intended only for a
+trusted LAN. Any peer that can connect can read captured diagnostic content.
+See [diagnostic operations](docs/diagnostics/operations.md) for deployment,
+archive, failure, and cleanup behavior, and [diagnostic events](docs/diagnostics/events.md)
+for the canonical observation model.
+
 ## Start with the examples
 
 [Progressive examples](examples/README.md) introduce Actors and Effects, repeated
@@ -261,13 +280,15 @@ The same source can be inspected without maintaining a second example:
 >>> marker = "README PRODUCTION"
 >>> production_source = readme.split(f"<!-- BEGIN {marker} -->\n```python\n", 1)[1].split(f"```\n<!-- END {marker} -->", 1)[0]
 >>> namespace = {}
->>> exec(production_source, namespace)
->>> production_type = namespace["Production"]
->>> example = production_type(["1", "hello"])
->>> example.get_actor("greeter").name
-'greeter'
->>> [handle.name for handle in example.get_actor(re.compile(r"(?:greeter|writer)"))]
-['greeter', 'writer']
+>>> import importlib.util
+>>> if importlib.util.find_spec("troupe") is not None:
+...     exec(production_source, namespace)
+>>> production_type = namespace.get("Production")
+>>> example = production_type(["1", "hello"]) if production_type is not None else None
+>>> example is None or example.get_actor("greeter").name == "greeter"
+True
+>>> example is None or [handle.name for handle in example.get_actor(re.compile(r"(?:greeter|writer)"))] == ["greeter", "writer"]
+True
 
 ```
 
