@@ -1,8 +1,21 @@
 {
-  "state": "planned",
-  "argv": [],
-  "env": {},
-  "maturin_features": [],
+  "state": "realized",
+  "argv": [
+    [
+      "scripts/test_diagnostics_e2e_happy.sh",
+      "--repeat",
+      "2",
+      "--matrix",
+      "tests/e2e/diagnostics/matrix.json"
+    ]
+  ],
+  "env": {
+    "TROUPE_GATE_TMP": "optional"
+  },
+  "maturin_features": [
+    "agent-test-support",
+    "diagnostics-test-support"
+  ],
   "cache_requirements": [],
   "exclusive_resources": []
 }
