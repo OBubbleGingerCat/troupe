@@ -91,6 +91,10 @@ POST_PLAN_REPAIRS: Final = {
         "d58a085614e16d4d18249b1567f3492b97b5ebd6",
         "b75a406b1c562fbc9429bd705e231aa1259c87d24590669988750a9bc46fe79f",
     ),
+    "tests/support/mock_acp_agent.py": (
+        "48287f3eafc6e786efd2b4037c77c1b5c0e9e7ad",
+        "6e779a634016458926383e3782eebe5d24e7c31de6e1d4a4cef40de431204437",
+    ),
     "tests/unit/test_agent_adapters.py": (
         "486243290beefc3eba16876de094dc04b85e4e01",
         "74b4912b962e67a73640db61fbe12dcdcfb25fbb15ebf839bb2b748d553ad349",
