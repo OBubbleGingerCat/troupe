@@ -420,6 +420,37 @@ def test_publisher_failure_is_propagated_without_retry_or_report_cleanup(
     _assert_no_runner_temp(temporary)
 
 
+def test_zero_audit_rejects_relative_diagnostic_process_with_repository_cwd(
+    tmp_path: Path,
+) -> None:
+    environment, child_log, publisher_log, temporary = _environment(tmp_path)
+    arguments, evidence, acceptance = _arguments(tmp_path)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            "troupe-diagnostic-relative",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        completed = _run(arguments, environment)
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+    assert completed.returncode == 1
+    assert "diagnostic child process remains" in completed.stderr
+    assert len(_records(child_log)) == 11
+    assert _records(publisher_log) == []
+    assert not acceptance.exists()
+    assert not (evidence / "V03-final-evidence.json").exists()
+    _assert_no_runner_temp(temporary)
+
+
 @pytest.mark.parametrize("preexisting", ["report", "acceptance"])
 def test_fresh_attempt_and_no_overwrite_are_checked_before_dispatch(
     tmp_path: Path, preexisting: str

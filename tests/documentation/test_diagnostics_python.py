@@ -237,7 +237,7 @@ def test_node_descriptors_project_the_exact_documentation_gate() -> None:
             ["python", "-m", "mypy", "--strict", "tests/typing/diagnostics_examples.py"],
         ],
         "env": {},
-        "maturin_features": [],
+        "maturin_features": ["diagnostics-test-support"],
         "cache_requirements": [],
         "exclusive_resources": [],
     }

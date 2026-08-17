@@ -8,6 +8,10 @@ publish = false
 default = []
 agent-test-support = []
 
+[[test]]
+name = "diagnostic_result"
+required-features = ["agent-test-support"]
+
 [dependencies]
 agent-client-protocol = { version = "=2.0.0", features = ["unstable_end_turn_token_usage"] }
 base64 = "0.22"

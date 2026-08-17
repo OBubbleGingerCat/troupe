@@ -215,8 +215,15 @@ def zero_audit(initial_status: bytes, runner_tmp: Path) -> None:
             command = (entry / "cmdline").read_bytes()
         except OSError:
             continue
+        try:
+            cwd = (entry / "cwd").resolve(strict=True)
+        except OSError:
+            cwd = None
         lowered = command.lower()
-        if repository_bytes in command and (b"troupe" in lowered or b"diagnostic" in lowered):
+        references_repository = repository_bytes in command or (
+            cwd is not None and (cwd == ROOT or ROOT in cwd.parents)
+        )
+        if references_repository and (b"troupe" in lowered or b"diagnostic" in lowered):
             fail(f"diagnostic child process remains: pid {entry.name}")
 
     for candidate in runner_tmp.parent.glob("troupe-diagnostics-final.*"):
@@ -576,7 +583,7 @@ def run() -> int:
                 environment=environment,
                 timeout_seconds=timeout_seconds,
             )
-            if index == 11 and status == 0 and not verify_dispatch:
+            if index == 11 and status == 0:
                 try:
                     zero_audit(initial_status, runner_tmp)
                 except (FinalRunnerError, OSError, subprocess.SubprocessError) as error:
