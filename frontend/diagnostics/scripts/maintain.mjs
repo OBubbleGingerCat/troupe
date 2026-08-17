@@ -892,6 +892,7 @@ async function runSelectedActions(options, installation, environment, ownedRoot,
     const taskEnvironment = {
       ...environment,
       NODE_PATH: join(installation, "node_modules"),
+      PWTEST_CACHE_DIR: join(ownedRoot, "playwright-transform-cache"),
       TROUPE_GATE_TMP: ownedRoot,
     };
     if (options.auditFixtures) {

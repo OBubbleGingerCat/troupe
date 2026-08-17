@@ -2,7 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 
 export default defineConfig({
-  testDir: "./tests/e2e",
+  testDir: "./tests",
   outputDir: process.env.TROUPE_FRONTEND_TEST_OUTPUT ?? "test-results",
   fullyParallel: false,
   forbidOnly: true,

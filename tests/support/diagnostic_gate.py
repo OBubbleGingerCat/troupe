@@ -280,6 +280,7 @@ def gate_environment(
             "PYTEST_ADDOPTS": "-p no:cacheprovider",
             "TMP": str(workspace.tmp),
             "TMPDIR": str(workspace.tmp),
+            "TROUPE_GATE_TMP": str(workspace.tmp),
             "UV_CACHE_DIR": str(workspace.uv_cache),
             "UV_PROJECT_ENVIRONMENT": str(workspace.venv),
             "XDG_CACHE_HOME": str(workspace.home / ".cache"),

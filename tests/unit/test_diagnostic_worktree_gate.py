@@ -112,6 +112,7 @@ def test_workspace_environment_is_fully_owned_and_ignores_shared_caches(
         )
         assert environment["HOME"] == str(workspace.home)
         assert environment["TMPDIR"] == str(workspace.tmp)
+        assert environment["TROUPE_GATE_TMP"] == str(workspace.tmp)
         assert environment["UV_CACHE_DIR"] == str(workspace.uv_cache)
         assert environment["UV_PROJECT_ENVIRONMENT"] == str(workspace.venv)
         assert environment["CARGO_TARGET_DIR"] == str(workspace.target)
@@ -127,6 +128,7 @@ def test_workspace_environment_is_fully_owned_and_ignores_shared_caches(
             environment["UV_PROJECT_ENVIRONMENT"],
             environment["CARGO_TARGET_DIR"],
             environment["NPM_CONFIG_CACHE"],
+            environment["TROUPE_GATE_TMP"],
         ):
             assert Path(value).is_relative_to(workspace.root)
     finally:
