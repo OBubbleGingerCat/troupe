@@ -141,8 +141,7 @@ def _generated_fixture(
     for kind in ("js", "css"):
         for encoding in ("raw", "gz", "br"):
             relative = (
-                grant.exact_parent
-                + f"diagnostics-{build_hash}.{kind}.{encoding}"
+                grant.exact_parent + f"diagnostics-{build_hash}.{kind}.{encoding}"
             )
             path = repository / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,9 +239,13 @@ def test_artifact_and_gate_lifecycle_states_advance_together() -> None:
     gates = load_gate_descriptors(ROOT)
 
     realized_fragments = {
-        node_id for node_id, fragment in layout.fragments.items() if fragment.state == "realized"
+        node_id
+        for node_id, fragment in layout.fragments.items()
+        if fragment.state == "realized"
     }
-    realized_gates = {node_id for node_id, gate in gates.items() if gate.state == "realized"}
+    realized_gates = {
+        node_id for node_id, gate in gates.items() if gate.state == "realized"
+    }
 
     assert "F00" in realized_fragments
     assert realized_fragments == realized_gates
@@ -296,7 +299,9 @@ def test_parameterized_schemas_are_closed_field_by_field(
     change: str,
 ) -> None:
     repository = _copy_contract(tmp_path)
-    path = _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    path = (
+        _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    )
     value = _json(path)
     own_field = "introduced" if kind == "artifact" else "argv"
     foreign_field = "argv" if kind == "artifact" else "introduced"
@@ -328,7 +333,9 @@ def test_every_schema_field_is_required(
     field: str,
 ) -> None:
     repository = _copy_contract(tmp_path)
-    path = _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    path = (
+        _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    )
     value = _json(path)
     value.pop(field)
     _write(path, value)
@@ -341,7 +348,9 @@ def test_every_schema_field_is_required(
 @pytest.mark.parametrize("kind", ["artifact", "gate"])
 def test_illegal_lifecycle_state_is_rejected(tmp_path: Path, kind: str) -> None:
     repository = _copy_contract(tmp_path)
-    path = _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    path = (
+        _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    )
     value = _json(path)
     value["state"] = "done"
     _write(path, value)
@@ -359,7 +368,9 @@ def test_planned_artifact_fragment_must_be_empty(tmp_path: Path) -> None:
     value["introduced"] = ["tests/future.py"]
     _write(path, value)
 
-    with pytest.raises(ArtifactLayoutError, match="planned artifact fragment F01 must be empty"):
+    with pytest.raises(
+        ArtifactLayoutError, match="planned artifact fragment F01 must be empty"
+    ):
         load_artifact_layout(repository)
 
 
@@ -371,7 +382,9 @@ def test_planned_gate_descriptor_must_be_empty(tmp_path: Path) -> None:
     value["argv"] = [["pytest", "-q"]]
     _write(path, value)
 
-    with pytest.raises(ArtifactLayoutError, match="planned gate descriptor F01 must be empty"):
+    with pytest.raises(
+        ArtifactLayoutError, match="planned gate descriptor F01 must be empty"
+    ):
         load_gate_descriptors(repository)
 
 
@@ -396,7 +409,9 @@ def test_every_planned_artifact_category_must_be_empty(
     fragment[field] = value
     _write(path, fragment)
 
-    with pytest.raises(ArtifactLayoutError, match="planned artifact fragment F01 must be empty"):
+    with pytest.raises(
+        ArtifactLayoutError, match="planned artifact fragment F01 must be empty"
+    ):
         load_artifact_layout(repository)
 
 
@@ -423,7 +438,9 @@ def test_every_planned_gate_field_must_be_empty(
     gate[field] = value
     _write(path, gate)
 
-    with pytest.raises(ArtifactLayoutError, match=f"planned gate descriptor {node_id} must be empty"):
+    with pytest.raises(
+        ArtifactLayoutError, match=f"planned gate descriptor {node_id} must be empty"
+    ):
         load_gate_descriptors(repository)
 
 
@@ -431,7 +448,9 @@ def test_every_planned_gate_field_must_be_empty(
 def test_realized_lifecycle_file_must_be_closed(tmp_path: Path, kind: str) -> None:
     repository = _copy_contract(tmp_path)
     _plan_node(repository, "F01")
-    path = _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    path = (
+        _artifact(repository, "F01") if kind == "artifact" else _gate(repository, "F01")
+    )
     value = _json(path)
     value["state"] = "realized"
     _write(path, value)
@@ -481,7 +500,11 @@ def test_fragment_paths_are_unique_within_and_across_categories(
     path = _artifact(repository, "F01")
     value = _json(path)
     value["state"] = "realized"
-    value["introduced"] = ["tests/future.py", "tests/future.py"] if change == "duplicate" else ["tests/future.py"]
+    value["introduced"] = (
+        ["tests/future.py", "tests/future.py"]
+        if change == "duplicate"
+        else ["tests/future.py"]
+    )
     if change == "category":
         value["modified"] = ["tests/future.py"]
     _write(path, value)
@@ -776,9 +799,7 @@ def test_ownership_ledger_rejects_schema_path_writer_and_grant_drift(
         )
     elif change == "writer-order":
         entry = next(
-            item
-            for item in paths
-            if item["path"] == "frontend/diagnostics/src/app.tsx"
+            item for item in paths if item["path"] == "frontend/diagnostics/src/app.tsx"
         )
         entry["writers"].reverse()
     elif change == "grant-owner":
@@ -797,9 +818,9 @@ def test_ownership_ledger_rejects_schema_path_writer_and_grant_drift(
         "invalid-baseline",
         "unknown-writer",
         "duplicate-writer",
-            "invalid-role",
-            "extra-grant",
-        }:
+        "invalid-role",
+        "extra-grant",
+    }:
         with pytest.raises(audit.OwnershipAuditError, match=message):
             audit.load_ownership_ledger(repository)
     else:
@@ -992,7 +1013,9 @@ def test_plan_projection_rejects_hidden_multiwriter_join(tmp_path: Path) -> None
         audit.project_plan(path)
 
 
-def test_plan_projection_rejects_node_ownership_of_planning_bundle(tmp_path: Path) -> None:
+def test_plan_projection_rejects_node_ownership_of_planning_bundle(
+    tmp_path: Path,
+) -> None:
     audit = _ownership_module()
     path = _mutated_plan(
         tmp_path,
@@ -1001,7 +1024,9 @@ def test_plan_projection_rejects_node_ownership_of_planning_bundle(tmp_path: Pat
         node_id="F02",
     )
 
-    with pytest.raises(audit.OwnershipAuditError, match="planning bundle paths have node owners"):
+    with pytest.raises(
+        audit.OwnershipAuditError, match="planning bundle paths have node owners"
+    ):
         audit.project_plan(path)
 
 
@@ -1093,6 +1118,26 @@ def test_generated_grant_rejects_manifest_member_expansion_drift(
         audit._generated_members(repository, grant)
 
 
+def test_all_realized_post_plan_repairs_are_exact_content_and_commit_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit = _ownership_module()
+
+    assert audit._validated_post_plan_repairs(ROOT) == {
+        path: "M" for path in audit.POST_PLAN_REPAIRS
+    }
+
+    original = audit.POST_PLAN_REPAIRS
+    first = next(iter(original))
+    monkeypatch.setattr(
+        audit,
+        "POST_PLAN_REPAIRS",
+        {**original, first: (original[first][0], "0" * 64)},
+    )
+    with pytest.raises(audit.OwnershipAuditError, match="repair content differs"):
+        audit._validated_post_plan_repairs(ROOT)
+
+
 @pytest.mark.parametrize(
     ("path_value", "message"),
     [
@@ -1116,9 +1161,7 @@ def test_realized_gate_descriptor_rejects_ownerless_and_future_paths(
     _write(gate_path, gate)
     fragment = _json(_artifact(repository, "F02"))
     fragment["state"] = "realized"
-    fragment["introduced"] = [
-        "tests/fixtures/artifact_layout/ownership-ledger.json"
-    ]
+    fragment["introduced"] = ["tests/fixtures/artifact_layout/ownership-ledger.json"]
     fragment["modified"] = [
         "scripts/audit_diagnostic_ownership.py",
         "tests/unit/test_diagnostic_ownership.py",
