@@ -56,6 +56,7 @@ use crate::{
             current_production_construction,
         },
         runtime_producer,
+        supervisor::{FirstCoreFailure, RuntimeFailureProbe, RuntimeInfrastructureFailure},
         view_compile::{ViewStartupLifecycle, prepare_production_views},
     },
     orchestration::{
@@ -145,21 +146,35 @@ pub(crate) struct ActivatedProduction {
 }
 
 impl ActivatedProduction {
-    pub(crate) fn into_parts(self) -> (Py<PyAny>, ActivatedRuntime) {
-        (self.production, self.runtime)
+    pub(crate) fn into_parts(self) -> (Py<PyAny>, ActiveDiagnosticRuntime) {
+        (self.production, self.runtime.into_active())
     }
 }
 
 pub(crate) struct ActivatedRuntime {
     guard: Option<DiagnosticRuntimeGuard>,
     run_id: CanonicalUuid,
+    failures: FirstCoreFailure,
 }
 
 impl ActivatedRuntime {
-    fn new(guard: DiagnosticRuntimeGuard) -> Self {
+    fn new(guard: DiagnosticRuntimeGuard, failures: FirstCoreFailure) -> Self {
         Self {
             run_id: guard.run_id(),
             guard: Some(guard),
+            failures,
+        }
+    }
+
+    fn into_active(mut self) -> ActiveDiagnosticRuntime {
+        ActiveDiagnosticRuntime {
+            guard: Arc::new(Mutex::new(Some(
+                self.guard
+                    .take()
+                    .expect("an activated Runtime owns its diagnostic guard"),
+            ))),
+            run_id: self.run_id,
+            failures: self.failures,
         }
     }
 
@@ -176,6 +191,97 @@ impl ActivatedRuntime {
         self.guard
             .as_ref()
             .expect("an activated Runtime owns its diagnostic guard")
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveDiagnosticRuntime {
+    guard: Arc<Mutex<Option<DiagnosticRuntimeGuard>>>,
+    run_id: CanonicalUuid,
+    failures: FirstCoreFailure,
+}
+
+impl ActiveDiagnosticRuntime {
+    #[cfg(test)]
+    pub(crate) const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_directory(&self) -> std::path::PathBuf {
+        lock(&self.guard)
+            .as_ref()
+            .expect("an active Runtime owns its diagnostic guard")
+            .layout()
+            .run_directory()
+            .to_path_buf()
+    }
+
+    pub(crate) fn failure_probe(&self) -> ActiveFailureProbe {
+        ActiveFailureProbe {
+            runtime: self.clone(),
+            producer: Arc::new(OnceLock::new()),
+        }
+    }
+
+    pub(crate) fn shutdown(self) -> Result<(), ActivationError> {
+        remove_pending_run(self.run_id);
+        lock(&self.guard)
+            .take()
+            .expect("an active Runtime owns its diagnostic guard")
+            .shutdown()
+            .map_err(|error| ActivationError::diagnostic("diagnostic_activation.shutdown", error))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveFailureProbe {
+    runtime: ActiveDiagnosticRuntime,
+    producer: Arc<OnceLock<Arc<runtime_producer::RuntimeLifecycleProducer>>>,
+}
+
+impl ActiveFailureProbe {
+    pub(crate) fn bind_producer(
+        &self,
+        producer: Arc<runtime_producer::RuntimeLifecycleProducer>,
+    ) -> Result<(), RuntimeInfrastructureFailure> {
+        self.producer.set(producer).map_err(|_| {
+            RuntimeInfrastructureFailure::new(
+                "canonical_pipeline",
+                "binding",
+                "runtime.diagnostic-producer-rebound",
+                "Runtime diagnostic producer was bound more than once",
+            )
+        })
+    }
+}
+
+impl RuntimeFailureProbe for ActiveFailureProbe {
+    fn try_core_failure(&self) -> Option<RuntimeInfrastructureFailure> {
+        if let Some(failure) = self.runtime.failures.failure() {
+            return Some(failure);
+        }
+        let guard_failure = lock(&self.runtime.guard)
+            .as_ref()
+            .expect("an active Runtime owns its diagnostic guard")
+            .try_core_failure();
+        if let Some(failure) = guard_failure {
+            self.runtime.failures.report_guard(failure);
+        }
+        if self.runtime.failures.failure().is_none()
+            && let Some(failure) = self.producer.get().and_then(|producer| producer.failure())
+        {
+            self.runtime.failures.report_producer(failure);
+        }
+        self.runtime.failures.failure()
+    }
+
+    fn seal_new_work(&self) -> Result<(), RuntimeInfrastructureFailure> {
+        lock(&self.runtime.guard)
+            .as_ref()
+            .expect("an active Runtime owns its diagnostic guard")
+            .seal_for_core_failure()
+            .map_err(RuntimeInfrastructureFailure::guard)
     }
 }
 
@@ -304,6 +410,7 @@ impl CapturedPrefixDumpProducer for RuntimePerfettoDumpProducer {
 fn active_routes(
     context: BootstrapRouteContext,
     commits: &DeferredCommitObserver,
+    failures: FirstCoreFailure,
 ) -> Result<
     Vec<troupe_diagnostics_runtime::server::routes::RouteDefinition>,
     BootstrapRouteAssemblyError,
@@ -317,21 +424,26 @@ fn active_routes(
         .map_err(route_assembly_error)?;
     let driver_config =
         ReplayDriverConfig::new(SSE_HEARTBEAT_INTERVAL).map_err(route_assembly_error)?;
+    let query_failures = failures.clone();
+    let sse_failures = failures.clone();
+    let view_failures = failures;
     let assembly = ActiveRouteAssembly::new(
-        QueryEndpoints::active_unobserved(run_id, Arc::clone(&lease), |_failure| {}),
+        QueryEndpoints::active_unobserved(run_id, Arc::clone(&lease), move |failure| {
+            query_failures.report_query(failure);
+        }),
         SseEndpoint::active(
             ActiveReplaySource::new(run_id, Arc::clone(&lease)),
             commit_signal,
             subscriber_limits,
             driver_config,
-            |_failure| {},
+            move |failure| sse_failures.report_sse(failure),
         )
         .map_err(route_assembly_error)?,
         ViewEndpoints::active(
             run_id,
             Arc::clone(&lease),
             ViewQueryEngine::default(),
-            |_failure| {},
+            move |failure| view_failures.report_view(failure),
         ),
         DumpEndpoints::active(run_id, lease, RuntimePerfettoDumpProducer::new()),
     )
@@ -343,13 +455,13 @@ fn route_assembly_error(error: impl fmt::Display) -> BootstrapRouteAssemblyError
     BootstrapRouteAssemblyError::new(error.to_string())
 }
 
-fn bootstrap_components() -> BootstrapComponents {
+fn bootstrap_components(failures: FirstCoreFailure) -> BootstrapComponents {
     let commits = DeferredCommitObserver::default();
     let route_commits = commits.clone();
     BootstrapComponents::new(
         Box::new(IgnoreLiveEvents),
         Box::new(commits),
-        move |context| active_routes(context, &route_commits),
+        move |context| active_routes(context, &route_commits, failures),
     )
 }
 
@@ -473,12 +585,13 @@ pub(crate) fn activate(
 ) -> Result<ActivatedProduction, ActivationError> {
     let root = prevalidate_production_root(py, package_dir).map_err(ActivationError::Python)?;
     let config = bootstrap_config(py, arguments)?;
-    let guard =
-        bootstrap::bootstrap(py, &root, config, bootstrap_components()).map_err(|error| {
+    let failures = FirstCoreFailure::default();
+    let guard = bootstrap::bootstrap(py, &root, config, bootstrap_components(failures.clone()))
+        .map_err(|error| {
             let code = error.code().to_owned();
             ActivationError::diagnostic(code, error)
         })?;
-    let runtime = ActivatedRuntime::new(guard);
+    let runtime = ActivatedRuntime::new(guard, failures);
     let loader = match ProductionLoadProducer::new(runtime.guard()) {
         Ok(loader) => loader,
         Err(error) => {
@@ -632,22 +745,22 @@ pub(crate) fn bind_run(
     core: &RuntimeCore,
     production: &ProductionState,
     binding: &Arc<RunBinding>,
-) -> PyResult<()> {
+) -> PyResult<Option<Arc<runtime_producer::RuntimeLifecycleProducer>>> {
     let pending = {
         let mut productions = lock(pending_productions());
         let Some(pending) = productions.remove(&production_key(production)) else {
-            return Ok(());
+            return Ok(None);
         };
         if pending
             .production
             .upgrade()
             .is_none_or(|owner| !std::ptr::eq(owner.as_ref(), production))
         {
-            return Ok(());
+            return Ok(None);
         }
         pending
     };
-    let _producer = runtime_producer::install(core, binding, pending.context.clone())
+    let producer = runtime_producer::install(core, binding, pending.context.clone())
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
     #[cfg(not(test))]
@@ -657,7 +770,7 @@ pub(crate) fn bind_run(
             sink_binding,
         };
 
-        let failure_owner: Arc<dyn ActDiagnosticFailureOwner> = _producer.clone();
+        let failure_owner: Arc<dyn ActDiagnosticFailureOwner> = producer.clone();
         let capability =
             sink_binding::production_capability(pending.run_id, pending.context, failure_owner)
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -669,7 +782,7 @@ pub(crate) fn bind_run(
     }
 
     custom_binding::bind_run(py, binding)?;
-    Ok(())
+    Ok(Some(producer))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -841,8 +954,8 @@ class Production(builtins.{BASE_NAME}):
                 .extract::<String>()?;
             let calls = streams.calls.bind(py).extract::<Vec<String>>()?;
             let (production, runtime) = activated.into_parts();
-            let run_id = runtime.run_id;
-            let archive_directory = runtime.guard().layout().run_directory().to_path_buf();
+            let run_id = runtime.run_id();
+            let archive_directory = runtime.run_directory();
             drop(production);
             runtime
                 .shutdown()

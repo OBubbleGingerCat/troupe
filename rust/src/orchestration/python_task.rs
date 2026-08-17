@@ -10,6 +10,7 @@ use pyo3::types::{
 };
 use pyo3_async_runtimes::TaskLocals;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use crate::diagnostic_runtime::custom_act_binding::ActTaskAuthority;
 use crate::diagnostic_runtime::scene_producer::{self, SceneHook};
@@ -899,14 +900,65 @@ pub(crate) async fn await_hook(
     binding: Arc<RunBinding>,
     phase: RuntimeTaskPhase,
     hook: &'static str,
+    cancellation: Option<CancellationToken>,
 ) -> PyResult<()> {
     let (lineage, _guard) = TaskLineage::from_runtime(&binding, phase);
-    let awaitable = dispatch_hook(locals, production, binding, lineage, hook).await?;
+    let task = dispatch_hook(locals, production, binding, lineage, hook).await?;
     let future = Python::attach(|py| {
-        pyo3_async_runtimes::into_future_with_locals(locals, awaitable.into_bound(py))
+        pyo3_async_runtimes::into_future_with_locals(locals, task.clone_ref(py).into_bound(py))
     })?;
-    future.await?;
-    Ok(())
+    tokio::pin!(future);
+    match cancellation {
+        None => future.await.map(|_| ()),
+        Some(cancellation) => {
+            tokio::select! {
+                result = future.as_mut() => result.map(|_| ()),
+                _ = cancellation.cancelled() => {
+                    let cancel_result = cancel_python_task(locals, &task).await;
+                    let completion_result = future.as_mut().await.map(|_| ());
+                    resolve_cancelled_hook(cancel_result, completion_result)
+                }
+            }
+        }
+    }
+}
+
+fn resolve_cancelled_hook(
+    cancel_result: PyResult<()>,
+    completion_result: PyResult<()>,
+) -> PyResult<()> {
+    match completion_result {
+        Err(error) if !is_cancelled_error(&error) => Err(error),
+        completion_result => match cancel_result {
+            Ok(()) => completion_result,
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn is_cancelled_error(error: &PyErr) -> bool {
+    Python::attach(|py| {
+        py.import("asyncio")
+            .and_then(|asyncio| asyncio.getattr("CancelledError"))
+            .is_ok_and(|cancelled| error.is_instance(py, &cancelled))
+    })
+}
+
+async fn cancel_python_task(locals: &TaskLocals, task: &Py<PyAny>) -> PyResult<()> {
+    let receiver = Python::attach(|py| {
+        let (sender, receiver) = oneshot::channel();
+        let callback = Py::new(py, TaskCancelCallback::new(task.clone_ref(py), sender))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("context", locals.context(py))?;
+        locals
+            .event_loop(py)
+            .call_method("call_soon_threadsafe", (callback,), Some(&kwargs))?;
+        Ok::<_, PyErr>(receiver)
+    })?;
+
+    receiver.await.map_err(|_| {
+        PyRuntimeError::new_err("Python task cancellation callback did not return a result")
+    })?
 }
 
 pub(crate) async fn apply_task_factory_action(
@@ -997,25 +1049,7 @@ pub(crate) struct PythonTask {
 
 impl PythonTask {
     pub(crate) async fn cancel(&self, locals: &TaskLocals) -> PyResult<()> {
-        let receiver = Python::attach(|py| {
-            let (sender, receiver) = oneshot::channel();
-            let callback = Py::new(py, TaskCancelCallback::new(self.task.clone_ref(py), sender))?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("context", locals.context(py))?;
-            locals.event_loop(py).call_method(
-                "call_soon_threadsafe",
-                (callback,),
-                Some(&kwargs),
-            )?;
-            Ok::<_, PyErr>(receiver)
-        })?;
-
-        match receiver.await {
-            Ok(result) => result,
-            Err(_) => Err(PyRuntimeError::new_err(
-                "Python task cancellation callback did not return a result",
-            )),
-        }
+        cancel_python_task(locals, &self.task).await
     }
 
     pub(crate) async fn wait(&self, locals: &TaskLocals) -> PyResult<()> {

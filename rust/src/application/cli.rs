@@ -16,7 +16,7 @@ use crate::application::failure::ProductionFailed;
 use crate::application::invocation::{InvocationError, ParsedInvocation, parse_arguments};
 use crate::application::loader::ProductionLoadError;
 use crate::application::signals::SignalGuard;
-use crate::diagnostic_runtime::{activation, runtime_producer};
+use crate::diagnostic_runtime::{activation, runtime_producer, supervisor};
 use crate::orchestration::production::Production;
 use crate::orchestration::python_task::create_run_binding;
 use crate::orchestration::runtime::{RuntimeCore, run_lifecycle};
@@ -272,23 +272,45 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
         .begin()
         .expect("a new CLI runtime must accept its first run");
     let production_state = production.bind(py).cast::<Production>()?.borrow().state();
+    let diagnostic_probe_runtime = diagnostic_runtime.clone();
+    let probe = diagnostic_probe_runtime.failure_probe();
+    let producer_binding = probe.clone();
+    let operation_core = Arc::clone(&core);
     let run_result = pyo3_async_runtimes::tokio::run(py, async move {
-        let locals = Python::attach(pyo3_async_runtimes::tokio::get_current_locals)?;
-        let result = async {
+        let operation = async move {
+            let locals = Python::attach(pyo3_async_runtimes::tokio::get_current_locals)?;
             let binding = create_run_binding(&locals, &production).await?;
-            Python::attach(|py| {
+            let producer = Python::attach(|py| {
                 let production_state = production.bind(py).cast::<Production>()?.borrow().state();
-                activation::bind_run(py, &core, &production_state, &binding)
+                activation::bind_run(py, &operation_core, &production_state, &binding)
+            })?
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "mandatory Production diagnostics were not bound to the Runtime",
+                )
             })?;
-            runtime_producer::run_started(&core, &binding);
-            run_lifecycle(permit, locals, production, binding).await
-        }
-        .await;
-        production_state.shutdown_agent_sessions().await;
-        result
+            producer_binding
+                .bind_producer(producer)
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+            runtime_producer::run_started(&operation_core, &binding);
+            let result = run_lifecycle(permit, locals, production, binding).await;
+            production_state.shutdown_agent_sessions().await;
+            result
+        };
+        Ok(supervisor::supervise(probe, core, operation).await)
     });
     let restore_result = guard.restore(py);
     let diagnostic_shutdown = diagnostic_runtime.shutdown();
+
+    let supervised = run_result?;
+    let (run_result, infrastructure_failure) = supervised.into_parts();
+    if let Some(failure) = infrastructure_failure {
+        write_stream(py, "stderr", &failure.line())?;
+        if let Err(error) = diagnostic_shutdown {
+            write_stream(py, "stderr", &error.line())?;
+        }
+        return Ok(1);
+    }
 
     match (run_result, restore_result, diagnostic_shutdown) {
         (Err(error), _, shutdown) if error.is_instance_of::<ProductionFailed>(py) => {

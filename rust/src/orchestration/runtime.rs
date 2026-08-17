@@ -61,8 +61,12 @@ impl RuntimeCore {
         }
     }
 
-    fn shutdown_requested(&self) -> bool {
+    pub(crate) fn shutdown_requested(&self) -> bool {
         self.shutdown.is_cancelled()
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     #[cfg(test)]
@@ -128,6 +132,7 @@ pub(crate) async fn run_lifecycle(
         Arc::clone(&binding),
         RuntimeTaskPhase::Start,
         "start",
+        Some(permit.core.shutdown_token()),
     )
     .await;
     runtime_producer::observe_binding(
@@ -233,6 +238,7 @@ pub(crate) async fn run_lifecycle(
         Arc::clone(&binding),
         RuntimeTaskPhase::Stop,
         "stop",
+        None,
     )
     .await;
     runtime_producer::observe_binding(

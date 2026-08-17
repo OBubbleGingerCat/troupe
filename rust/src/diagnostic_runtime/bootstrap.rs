@@ -631,6 +631,22 @@ impl DiagnosticRuntimeGuard {
             })
     }
 
+    pub(crate) fn seal_for_core_failure(&self) -> Result<(), DiagnosticCoreFailure> {
+        self.ingress
+            .as_ref()
+            .expect("a live diagnostic guard owns its ingress")
+            .seal_for_external_core_failure()
+            .map(|_| ())
+            .map_err(|error| {
+                DiagnosticCoreFailure::new(
+                    "ingress",
+                    "seal",
+                    "diagnostic_ingress.seal_failed",
+                    error.to_string(),
+                )
+            })
+    }
+
     pub(crate) fn shutdown(mut self) -> Result<(), DiagnosticShutdownError> {
         self.shutdown_attempted = true;
         let failures = cleanup_resources(

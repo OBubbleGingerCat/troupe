@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "first_cause_policy": "latch_once",
+  "fatal_sources": [
+    {"id": "server_execution_context", "reporter": "guard"},
+    {"id": "listener", "reporter": "guard"},
+    {"id": "hub_canonical_path", "reporter": "producer"},
+    {"id": "writer_task", "reporter": "guard"},
+    {"id": "writer_commit", "reporter": "guard"},
+    {"id": "persistent_store", "reporter": "guard"},
+    {"id": "mandatory_ingress_budget", "reporter": "guard"},
+    {"id": "writer_stall", "reporter": "guard"},
+    {"id": "run_quota", "reporter": "guard"},
+    {"id": "active_reader_sqlite_corruption", "reporter": "query"},
+    {"id": "active_reader_identity", "reporter": "query"},
+    {"id": "active_reader_dense_prefix", "reporter": "query"},
+    {"id": "active_query_execution_context", "reporter": "query"},
+    {"id": "active_view_query_worker", "reporter": "view"},
+    {"id": "active_sse_reader", "reporter": "sse"}
+  ],
+  "local_sources": [
+    {"id": "single_http_client", "surface": "request"},
+    {"id": "single_http_request", "surface": "request"},
+    {"id": "invalid_http_request", "surface": "request"},
+    {"id": "sse_slow_client", "surface": "subscriber"},
+    {"id": "sse_subscriber_overflow", "surface": "subscriber"},
+    {"id": "archive_reader", "surface": "operation"},
+    {"id": "archive_query", "surface": "operation"},
+    {"id": "archive_store", "surface": "operation"},
+    {"id": "python_sink_callback", "surface": "sink"},
+    {"id": "python_sink_overflow", "surface": "sink"},
+    {"id": "on_demand_exporter", "surface": "request"}
+  ],
+  "fatal_convergence": {
+    "seal_new_work": true,
+    "cancel_runtime": true,
+    "wait_for_current_operation": true,
+    "exit_nonzero": true,
+    "archive_clean_shutdown_requires_x02_terminal_transaction": true,
+    "restart_component": false
+  },
+  "failure_precedence": [
+    "diagnostic_infrastructure",
+    "production_lifecycle",
+    "diagnostic_shutdown"
+  ]
+}
