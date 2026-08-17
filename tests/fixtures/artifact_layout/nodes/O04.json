@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "docs/diagnostics/index.md",
+    "tests/documentation/test_diagnostics_index.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
