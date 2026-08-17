@@ -1,8 +1,20 @@
 {
-  "state": "planned",
-  "argv": [],
+  "state": "realized",
+  "argv": [
+    [
+      "scripts/test_diagnostics_accessibility.sh",
+      "--all-engines",
+      "--npm-cache",
+      "${TROUPE_NPM_CACHE:?}",
+      "--browser-cache",
+      "${TROUPE_PLAYWRIGHT_CACHE:?}"
+    ]
+  ],
   "env": {},
   "maturin_features": [],
-  "cache_requirements": [],
+  "cache_requirements": [
+    "npm",
+    "playwright"
+  ],
   "exclusive_resources": []
 }

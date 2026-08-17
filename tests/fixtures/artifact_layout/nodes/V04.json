@@ -1,6 +1,11 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "frontend/diagnostics/tests/e2e/accessibility/accessibility.spec.ts",
+    "frontend/diagnostics/tests/e2e/accessibility/axe-allowlist.json",
+    "frontend/diagnostics/tests/e2e/accessibility/keyboard-touch.spec.ts",
+    "scripts/test_diagnostics_accessibility.sh"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
