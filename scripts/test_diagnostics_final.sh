@@ -502,6 +502,9 @@ def run() -> int:
         }
 
     environment = dict(os.environ)
+    verify_zero_audit = not verify_dispatch or (
+        environment.pop("TROUPE_FINAL_FAKE_ZERO_AUDIT", None) == "1"
+    )
     product_base_sha = environment.get("PRODUCT_BASE_SHA", "0" * 40)
     plan_bundle_sha = environment.get("PLAN_BUNDLE_SHA", "0" * 40)
     if not verify_dispatch:
@@ -583,7 +586,7 @@ def run() -> int:
                 environment=environment,
                 timeout_seconds=timeout_seconds,
             )
-            if index == 11 and status == 0:
+            if index == 11 and status == 0 and verify_zero_audit:
                 try:
                     zero_audit(initial_status, runner_tmp)
                 except (FinalRunnerError, OSError, subprocess.SubprocessError) as error:

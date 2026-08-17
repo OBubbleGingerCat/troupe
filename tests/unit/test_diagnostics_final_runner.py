@@ -424,6 +424,7 @@ def test_zero_audit_rejects_relative_diagnostic_process_with_repository_cwd(
     tmp_path: Path,
 ) -> None:
     environment, child_log, publisher_log, temporary = _environment(tmp_path)
+    environment["TROUPE_FINAL_FAKE_ZERO_AUDIT"] = "1"
     arguments, evidence, acceptance = _arguments(tmp_path)
     process = subprocess.Popen(
         [
