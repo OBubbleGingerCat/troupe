@@ -169,6 +169,14 @@ build() {
     -w /io \
     -v "$repository_root:/io" \
     -v "$uv_executable:/usr/local/bin/uv:ro" \
+    -e HTTP_PROXY \
+    -e HTTPS_PROXY \
+    -e NO_PROXY \
+    -e ALL_PROXY \
+    -e http_proxy \
+    -e https_proxy \
+    -e no_proxy \
+    -e all_proxy \
     -e UV_PYTHON=/opt/python/cp310-cp310/bin/python \
     -e UV_PROJECT_ENVIRONMENT=/tmp/troupe-venv \
     ghcr.io/pyo3/maturin:v1.14.1 \
