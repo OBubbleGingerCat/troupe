@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,6 +27,7 @@ CONSOLE = Path(sys.executable).parent / "troupe"
 TIMEOUT = 10.0
 LOAD_HEADER = "troupe: failed to load production"
 PHASE_PREFIX = "troupe: production failed during "
+READY_PREFIX = "troupe: diagnostic ready "
 
 
 def _native() -> ModuleType:
@@ -43,6 +45,45 @@ def _records(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _copy_production(tmp_path: Path, source: Path) -> Path:
+    destination = tmp_path / "productions" / source.name
+    if not destination.exists():
+        destination.parent.mkdir(exist_ok=True)
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(".troupe", "__pycache__"),
+        )
+    return destination
+
+
+def _without_ready(stderr: str) -> str:
+    ready, separator, remaining = stderr.partition("\n")
+    assert separator == "\n"
+    assert ready.startswith(READY_PREFIX)
+    assert READY_PREFIX not in remaining
+    locator = json.loads(ready.removeprefix(READY_PREFIX))
+    assert set(locator) == {
+        "locator_schema_version",
+        "run_id",
+        "local_url",
+        "advertise_url",
+        "archive_directory",
+        "security_scope",
+    }
+    assert locator["locator_schema_version"] == 1
+    assert type(locator["run_id"]) is str and locator["run_id"]
+    assert locator["local_url"].startswith("http://127.0.0.1:")
+    assert locator["advertise_url"] is None
+    assert Path(locator["archive_directory"]).is_absolute()
+    assert locator["security_scope"] == "trusted_network"
+    return remaining
+
+
+def _without_ready_bytes(stderr: bytes) -> bytes:
+    return _without_ready(stderr.decode("utf-8")).encode("utf-8")
 
 
 class FakeSignals:
@@ -137,10 +178,12 @@ def test_same_process_loader_failure_does_not_install_signals(
 def test_production_argparse_system_exit_propagates_before_signal_install(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
+    tmp_path: Path,
     argument: str,
     code: int,
 ) -> None:
     fake = FakeSignals()
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     _clear_package("recording_production")
     try:
         with pytest.raises(SystemExit) as captured_exit:
@@ -149,24 +192,25 @@ def test_production_argparse_system_exit_propagates_before_signal_install(
                 [
                     "troupe",
                     "--production",
-                    str(RECORDING_PACKAGE),
+                    str(package),
                     "--",
                     argument,
                 ],
                 fake,
             )
         captured = capfd.readouterr()
+        stderr = _without_ready(captured.err)
 
         assert captured_exit.value.code == code
         fake.assert_never_touched()
-        assert LOAD_HEADER not in captured.err
-        assert PHASE_PREFIX not in captured.err
+        assert LOAD_HEADER not in stderr
+        assert PHASE_PREFIX not in stderr
         if code == 0:
             assert "usage: recording-production" in captured.out
-            assert captured.err == ""
+            assert stderr == ""
         else:
             assert captured.out == ""
-            assert "recording-production: error:" in captured.err
+            assert "recording-production: error:" in stderr
     finally:
         _clear_package("recording_production")
 
@@ -176,6 +220,7 @@ def test_same_process_normal_and_lifecycle_failure_restore_both_signals(
     capfd: pytest.CaptureFixture[str],
     tmp_path: Path,
 ) -> None:
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     for mode, expected in (("cli-normal", 0), ("dual-fails", 1)):
         events = tmp_path / f"{mode}.jsonl"
         fake = FakeSignals()
@@ -186,7 +231,7 @@ def test_same_process_normal_and_lifecycle_failure_restore_both_signals(
                 [
                     "troupe",
                     "--production",
-                    str(RECORDING_PACKAGE),
+                    str(package),
                     "--",
                     "--events",
                     str(events),
@@ -202,12 +247,13 @@ def test_same_process_normal_and_lifecycle_failure_restore_both_signals(
         assert result == expected
         fake.assert_installed_and_restored()
         assert captured.out == ""
+        stderr = _without_ready(captured.err)
         if mode == "cli-normal":
-            assert captured.err == ""
+            assert stderr == ""
         else:
-            assert captured.err.count(PHASE_PREFIX) == 2
-            assert "scene phase" in captured.err
-            assert "stop phase" in captured.err
+            assert stderr.count(PHASE_PREFIX) == 2
+            assert "scene phase" in stderr
+            assert "stop phase" in stderr
 
 
 def test_main_uses_one_policy_loop_on_the_python_main_thread(
@@ -216,6 +262,7 @@ def test_main_uses_one_policy_loop_on_the_python_main_thread(
     tmp_path: Path,
 ) -> None:
     events = tmp_path / "loop.jsonl"
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     fake = FakeSignals()
     original_policy = asyncio.get_event_loop_policy()
     original_run = asyncio.run
@@ -244,7 +291,7 @@ def test_main_uses_one_policy_loop_on_the_python_main_thread(
             [
                 "troupe",
                 "--production",
-                str(RECORDING_PACKAGE),
+                str(package),
                 "--",
                 "--events",
                 str(events),
@@ -261,7 +308,7 @@ def test_main_uses_one_policy_loop_on_the_python_main_thread(
     assert type(result) is int
     assert result == 0
     assert captured.out == ""
-    assert captured.err == ""
+    assert _without_ready(captured.err) == ""
     fake.assert_installed_and_restored()
     assert len(policy.loops) == 1
     hooks = [record for record in _records(events) if record["event"] in {"start", "scene", "stop"}]
@@ -275,6 +322,7 @@ def test_unexpected_loop_bridge_error_restores_signals_and_preserves_identity(
     tmp_path: Path,
 ) -> None:
     events = tmp_path / "unused.jsonl"
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     fake = FakeSignals()
     loop_error = RuntimeError("loop marker")
     original_policy = asyncio.get_event_loop_policy()
@@ -294,7 +342,7 @@ def test_unexpected_loop_bridge_error_restores_signals_and_preserves_identity(
                 [
                     "troupe",
                     "--production",
-                    str(RECORDING_PACKAGE),
+                    str(package),
                     "--",
                     "--events",
                     str(events),
@@ -316,6 +364,7 @@ def test_partial_signal_install_restores_the_first_handler_without_starting_loop
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     install_error = RuntimeError("signal install marker")
     originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
     current = dict(originals)
@@ -352,7 +401,7 @@ def test_partial_signal_install_restores_the_first_handler_without_starting_loop
             [
                 "troupe",
                 "--production",
-                str(RECORDING_PACKAGE),
+                str(package),
                 "--",
                 "cli-normal",
             ],
@@ -390,6 +439,7 @@ def _run_console(
 
 
 def test_direct_console_help_usage_and_raw_args_from_outside_repository(tmp_path: Path) -> None:
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     help_result = _run_console(["--help"], cwd=tmp_path)
     missing_result = _run_console([], cwd=tmp_path)
     unknown_result = _run_console(["--unknown"], cwd=tmp_path)
@@ -398,7 +448,7 @@ def test_direct_console_help_usage_and_raw_args_from_outside_repository(tmp_path
     raw_result = _run_console(
         [
             "--production",
-            str(RECORDING_PACKAGE),
+            str(package),
             "--",
             "--events",
             str(events),
@@ -418,17 +468,18 @@ def test_direct_console_help_usage_and_raw_args_from_outside_repository(tmp_path
         assert "Usage:" in result.stderr
     assert raw_result.returncode == 0
     assert raw_result.stdout == ""
-    assert raw_result.stderr == ""
+    assert _without_ready(raw_result.stderr) == ""
     args_records = [record for record in _records(events) if record["event"] == "args"]
     assert args_records == [{"event": "args", "args": raw}]
 
 
 def test_direct_console_phase_diagnostics_and_lifecycle_order(tmp_path: Path) -> None:
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     start_events = tmp_path / "start.jsonl"
     start_result = _run_console(
         [
             "--production",
-            str(RECORDING_PACKAGE),
+            str(package),
             "--",
             "--events",
             str(start_events),
@@ -436,21 +487,22 @@ def test_direct_console_phase_diagnostics_and_lifecycle_order(tmp_path: Path) ->
         ],
         cwd=tmp_path,
     )
+    start_stderr = _without_ready(start_result.stderr)
     assert start_result.returncode == 1
     assert start_result.stdout == ""
-    assert start_result.stderr.count("troupe: production failed during start phase") == 1
-    assert start_result.stderr.count("Traceback (most recent call last):") == 1
-    assert "StartBoom: start marker" in start_result.stderr
-    assert "production.py" in start_result.stderr
-    assert "in start" in start_result.stderr
-    assert "ProductionFailed" not in start_result.stderr
+    assert start_stderr.count("troupe: production failed during start phase") == 1
+    assert start_stderr.count("Traceback (most recent call last):") == 1
+    assert "StartBoom: start marker" in start_stderr
+    assert "production.py" in start_stderr
+    assert "in start" in start_stderr
+    assert "ProductionFailed" not in start_stderr
     assert [record["event"] for record in _records(start_events)] == ["start"]
 
     dual_events = tmp_path / "dual.jsonl"
     dual_result = _run_console(
         [
             "--production",
-            str(RECORDING_PACKAGE),
+            str(package),
             "--",
             "--events",
             str(dual_events),
@@ -458,15 +510,16 @@ def test_direct_console_phase_diagnostics_and_lifecycle_order(tmp_path: Path) ->
         ],
         cwd=tmp_path,
     )
+    dual_stderr = _without_ready(dual_result.stderr)
     assert dual_result.returncode == 1
     assert dual_result.stdout == ""
     scene_header = "troupe: production failed during scene phase"
     stop_header = "troupe: production failed during stop phase"
-    assert dual_result.stderr.count(scene_header) == 1
-    assert dual_result.stderr.count(stop_header) == 1
-    assert dual_result.stderr.count("Traceback (most recent call last):") == 2
-    assert dual_result.stderr.index(scene_header) < dual_result.stderr.index(stop_header)
-    scene_section, stop_section = dual_result.stderr.split(stop_header)
+    assert dual_stderr.count(scene_header) == 1
+    assert dual_stderr.count(stop_header) == 1
+    assert dual_stderr.count("Traceback (most recent call last):") == 2
+    assert dual_stderr.index(scene_header) < dual_stderr.index(stop_header)
+    scene_section, stop_section = dual_stderr.split(stop_header)
     assert "SceneBoom: scene marker" in scene_section
     assert scene_section.count("Traceback (most recent call last):") == 1
     assert "in scene" in scene_section
@@ -475,7 +528,7 @@ def test_direct_console_phase_diagnostics_and_lifecycle_order(tmp_path: Path) ->
     assert stop_section.count("Traceback (most recent call last):") == 1
     assert "in stop" in stop_section
     assert "SceneBoom" not in stop_section
-    assert "ProductionFailed" not in dual_result.stderr
+    assert "ProductionFailed" not in dual_stderr
     assert [record["event"] for record in _records(dual_events)] == ["start", "scene", "stop"]
 
 
@@ -485,29 +538,32 @@ def test_direct_console_preserves_production_argparse(
     argument: str,
     code: int,
 ) -> None:
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     result = _run_console(
-        ["--production", str(RECORDING_PACKAGE), "--", argument],
+        ["--production", str(package), "--", argument],
         cwd=tmp_path,
     )
+    stderr = _without_ready(result.stderr)
 
     assert result.returncode == code
-    assert LOAD_HEADER not in result.stderr
-    assert PHASE_PREFIX not in result.stderr
+    assert LOAD_HEADER not in stderr
+    assert PHASE_PREFIX not in stderr
     if code == 0:
         assert "usage: recording-production" in result.stdout
-        assert result.stderr == ""
+        assert stderr == ""
     else:
         assert result.stdout == ""
-        assert "recording-production: error:" in result.stderr
+        assert "recording-production: error:" in stderr
 
 
 def test_direct_console_preserves_surrogateescape_argv(tmp_path: Path) -> None:
     assert CONSOLE.is_file(), "maturin develop must install the troupe console script"
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     result = subprocess.run(
         [
             os.fsencode(CONSOLE),
             b"--production",
-            os.fsencode(RECORDING_PACKAGE),
+            os.fsencode(package),
             b"--",
             b"\xff",
         ],
@@ -520,7 +576,7 @@ def test_direct_console_preserves_surrogateescape_argv(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stdout == b""
-    assert result.stderr == b""
+    assert _without_ready_bytes(result.stderr) == b""
 
 
 @pytest.mark.parametrize(
@@ -542,17 +598,19 @@ def test_direct_console_loader_cause_diagnostics(
     marker: str,
     frame: str,
 ) -> None:
+    package = _copy_production(tmp_path, package)
     result = _run_console(["--production", str(package)], cwd=tmp_path)
+    stderr = _without_ready(result.stderr)
 
     assert result.returncode == 1
     assert result.stdout == ""
-    assert result.stderr.count(LOAD_HEADER) == 1
-    assert reason in result.stderr
-    assert marker in result.stderr
-    assert frame in result.stderr
-    assert "The above exception was the direct cause" in result.stderr
-    assert "troupe._runtime.ProductionLoadError:" in result.stderr
-    assert PHASE_PREFIX not in result.stderr
+    assert stderr.count(LOAD_HEADER) == 1
+    assert reason in stderr
+    assert marker in stderr
+    assert frame in stderr
+    assert "The above exception was the direct cause" in stderr
+    assert "troupe._runtime.ProductionLoadError:" in stderr
+    assert PHASE_PREFIX not in stderr
 
 
 def test_direct_console_missing_directory_diagnostic(tmp_path: Path) -> None:
@@ -644,6 +702,7 @@ class SignalChild:
 
 def _signal_child(tmp_path: Path, mode: str) -> Iterator[SignalChild]:
     assert CONSOLE.is_file(), "maturin develop must install the troupe console script"
+    package = _copy_production(tmp_path, RECORDING_PACKAGE)
     event_read, event_write = os.pipe()
     control_read, control_write = os.pipe()
     process: subprocess.Popen[bytes] | None = None
@@ -653,7 +712,7 @@ def _signal_child(tmp_path: Path, mode: str) -> Iterator[SignalChild]:
             [
                 str(CONSOLE),
                 "--production",
-                str(RECORDING_PACKAGE),
+                str(package),
                 "--",
                 "--events-fd",
                 str(event_write),
@@ -707,7 +766,7 @@ def test_linux_signal_cancels_scene_before_stop(
 
         assert returncode == 0
         assert stdout == b""
-        assert stderr == b""
+        assert _without_ready_bytes(stderr) == b""
         assert [record["event"] for record in child.seen] == [
             "start",
             "scene-enter",
@@ -743,7 +802,7 @@ def test_repeated_signal_is_idempotent_while_scene_cleans_up(tmp_path: Path) -> 
         assert cleanup["count"] == 1
         assert returncode == 0
         assert stdout == b""
-        assert stderr == b""
+        assert _without_ready_bytes(stderr) == b""
         assert [record["event"] for record in child.seen] == [
             "start",
             "scene-enter",
