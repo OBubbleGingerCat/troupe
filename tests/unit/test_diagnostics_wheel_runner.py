@@ -230,6 +230,18 @@ def test_checked_contract_and_node_descriptors_are_exact() -> None:
     assert expected["target"] == BUILD_TARGET
     assert expected["smoke_modes"] == ["active", "archive"]
     assert expected["forbidden_tools"] == FORBIDDEN
+    assert expected["wheel_members"] == [
+        "troupe/__init__.py",
+        "troupe/__init__.pyi",
+        "troupe/act_schema.pyi",
+        "troupe/diagnostics.pyi",
+        "troupe/py.typed",
+        "troupe/<native>",
+        "troupe-0.1.0.dist-info/METADATA",
+        "troupe-0.1.0.dist-info/WHEEL",
+        "troupe-0.1.0.dist-info/entry_points.txt",
+        "troupe-0.1.0.dist-info/RECORD",
+    ]
     assert expected["size_is_informational"] is True
     assert load_json(ROOT / ARTIFACT_RELATIVE) == {
         "state": "realized",
@@ -257,6 +269,29 @@ def test_checked_contract_and_node_descriptors_are_exact() -> None:
     assert schema["properties"]["exporter_size"]["properties"]["hard_limit"] == {
         "const": False
     }
+
+
+def test_verifier_uses_the_realized_repository_contract() -> None:
+    verifier = load_verifier()
+    expected = load_json(ROOT / EXPECTED_RELATIVE)
+
+    assert sorted(verifier._validate_source(verifier.SOURCE_PACKAGE)) == [
+        "__init__.py",
+        "__init__.pyi",
+        "act_schema.pyi",
+        "diagnostics.pyi",
+        "py.typed",
+    ]
+    assert {
+        "diagnostics/custom.py",
+        "diagnostics/sink.py",
+        "diagnostics/views.py",
+    } <= set(verifier._source_examples(verifier.SOURCE_PACKAGE))
+    assert verifier.REALIZED_PUBLIC_EXPORTS == [
+        *verifier.PUBLIC_EXPORTS,
+        "diagnostics",
+    ]
+    verifier._validate_expected_contract(expected)
 
 
 def test_success_dispatches_one_offline_build_and_preserves_only_the_report(

@@ -37,15 +37,44 @@ SOURCE_PACKAGE = ROOT / "src" / "troupe"
 SUPPORT = ROOT / "tests" / "support"
 sys.path.insert(0, str(SUPPORT))
 
-from artifact_layout import load_artifact_layout  # noqa: E402
+from artifact_layout import expected_package_members, load_artifact_layout  # noqa: E402
 
 
-BASE_ARTIFACTS = load_artifact_layout(ROOT).base
+ARTIFACT_LAYOUT = load_artifact_layout(ROOT)
+BASE_ARTIFACTS = ARTIFACT_LAYOUT.base
+REALIZED_PACKAGE_PYTHON = expected_package_members(ARTIFACT_LAYOUT, ".py")
+REALIZED_PACKAGE_STUBS = expected_package_members(ARTIFACT_LAYOUT, ".pyi")
+REALIZED_PACKAGE_MEMBERS = (
+    *REALIZED_PACKAGE_PYTHON,
+    *REALIZED_PACKAGE_STUBS,
+    "py.typed",
+)
+REALIZED_WHEEL_MEMBERS = (
+    *(f"troupe/{name}" for name in REALIZED_PACKAGE_MEMBERS),
+    "troupe/<native>",
+    *(name for name in BASE_ARTIFACTS.wheel_members if not name.startswith("troupe/")),
+)
+_realized_examples = set(BASE_ARTIFACTS.examples)
+for _fragment in ARTIFACT_LAYOUT.fragments.values():
+    if _fragment.state != "realized":
+        continue
+    _realized_examples.update(
+        path.removeprefix("examples/")
+        for path in _fragment.introduced
+        if path.startswith("examples/")
+    )
+    _realized_examples.difference_update(
+        removed.path.removeprefix("examples/")
+        for removed in _fragment.removed
+        if removed.path.startswith("examples/")
+    )
+REALIZED_EXAMPLE_FILES = tuple(sorted(_realized_examples))
 EXPECTED_WRAPPER = BASE_ARTIFACTS.package_files["__init__.py"].data
 EXPECTED_STUB = BASE_ARTIFACTS.package_files["__init__.pyi"].data
 EXPECTED_ACT_SCHEMA_STUB_SHA256 = BASE_ARTIFACTS.package_files["act_schema.pyi"].sha256
 EXPECTED_PY_TYPED = BASE_ARTIFACTS.package_files["py.typed"].data
 PUBLIC_EXPORTS = list(BASE_ARTIFACTS.public_exports)
+REALIZED_PUBLIC_EXPORTS = [*PUBLIC_EXPORTS, "diagnostics"]
 EXPECTED_EXAMPLE_FILES = tuple(BASE_ARTIFACTS.examples)
 SMOKE_TIMEOUT = 10.0
 DIAGNOSTICS_SMOKE_TIMEOUT = 60.0
@@ -352,25 +381,41 @@ def _relative_package_files(names: Sequence[str], prefix: str) -> list[str]:
     return sorted(name.removeprefix(prefix) for name in names if name.startswith(prefix))
 
 
-def _assert_thin_package(names: Sequence[str], prefix: str) -> None:
+def _assert_thin_package(
+    names: Sequence[str],
+    prefix: str,
+    python_members: Sequence[str],
+    stub_members: Sequence[str],
+) -> None:
     relative = _relative_package_files(names, prefix)
     python_files = [name for name in relative if name.endswith(".py")]
     stub_files = [name for name in relative if name.endswith(".pyi")]
-    if python_files != list(BASE_ARTIFACTS.package_python_members):
+    if python_files != list(python_members):
         raise VerificationError(f"unexpected Python package files: {python_files}")
-    if stub_files != list(BASE_ARTIFACTS.package_stub_members):
+    if stub_files != list(stub_members):
         raise VerificationError(f"unexpected stub files: {stub_files}")
     if relative.count("py.typed") != 1:
         raise VerificationError("py.typed is missing or ambiguous")
 
 
-def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes, bytes]:
+def _validate_source(source_package: Path) -> dict[str, bytes]:
     try:
+        repository_source = source_package.resolve(strict=True) == SOURCE_PACKAGE
+        python_members = (
+            REALIZED_PACKAGE_PYTHON
+            if repository_source
+            else BASE_ARTIFACTS.package_python_members
+        )
+        stub_members = (
+            REALIZED_PACKAGE_STUBS
+            if repository_source
+            else BASE_ARTIFACTS.package_stub_members
+        )
         files = [path for path in source_package.rglob("*") if path.is_file()]
         names = [path.relative_to(source_package).as_posix() for path in files]
-        _assert_thin_package(names, "")
+        _assert_thin_package(names, "", python_members, stub_members)
 
-        allowed = {"__init__.py", "__init__.pyi", "act_schema.pyi", "py.typed"}
+        allowed = {*python_members, *stub_members, "py.typed"}
         for name in names:
             if name in allowed:
                 continue
@@ -380,19 +425,17 @@ def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes, bytes]:
                 continue
             raise VerificationError(f"unexpected source package file: {name}")
 
-        wrapper = (source_package / "__init__.py").read_bytes()
-        stub = (source_package / "__init__.pyi").read_bytes()
-        act_schema_stub = (source_package / "act_schema.pyi").read_bytes()
-        py_typed = (source_package / "py.typed").read_bytes()
-        if wrapper != EXPECTED_WRAPPER:
-            raise VerificationError("source wrapper is not the approved thin wrapper")
-        if stub != EXPECTED_STUB:
-            raise VerificationError("source stub is not the approved public API")
-        if hashlib.sha256(act_schema_stub).hexdigest() != EXPECTED_ACT_SCHEMA_STUB_SHA256:
-            raise VerificationError("source act_schema stub is not the approved public API")
-        if py_typed != EXPECTED_PY_TYPED:
-            raise VerificationError("source py.typed marker is not exact")
-        return wrapper, stub, act_schema_stub, py_typed
+        payloads = {name: (source_package / name).read_bytes() for name in allowed}
+        for name, snapshot in BASE_ARTIFACTS.package_files.items():
+            if repository_source and ARTIFACT_LAYOUT.is_changed_after_base(
+                f"src/troupe/{name}"
+            ):
+                continue
+            if payloads[name] != snapshot.data:
+                raise VerificationError(
+                    f"source package member is not the approved public API: {name}"
+                )
+        return payloads
     except VerificationError:
         raise
     except OSError as error:
@@ -423,6 +466,10 @@ def _sdist_package_prefix(names: Sequence[str]) -> str:
 def _source_examples(source_package: Path) -> dict[str, bytes]:
     examples = source_package.parent.parent / "examples"
     try:
+        repository_source = source_package.resolve(strict=True) == SOURCE_PACKAGE
+        expected_names = (
+            REALIZED_EXAMPLE_FILES if repository_source else EXPECTED_EXAMPLE_FILES
+        )
         files: dict[str, bytes] = {}
         for path in examples.rglob("*"):
             if not path.is_file():
@@ -432,7 +479,7 @@ def _source_examples(source_package: Path) -> dict[str, bytes]:
             if "__pycache__" in parts or path.suffix in (".pyc", ".pyo"):
                 continue
             files[name] = path.read_bytes()
-        if tuple(sorted(files)) != EXPECTED_EXAMPLE_FILES:
+        if tuple(sorted(files)) != expected_names:
             raise VerificationError("source examples inventory is not exact")
         return files
     except VerificationError:
@@ -472,11 +519,15 @@ def _validate_sdist(
     source_package: Path,
     sdist: Path,
     *,
-    expected: tuple[bytes, bytes, bytes, bytes] | None = None,
+    expected: Mapping[str, bytes] | None = None,
 ) -> None:
-    wrapper, stub, act_schema_stub, py_typed = (
+    package_payloads = dict(
         expected if expected is not None else _validate_source(source_package)
     )
+    python_members = sorted(
+        name for name in package_payloads if name.endswith(".py")
+    )
+    stub_members = sorted(name for name in package_payloads if name.endswith(".pyi"))
     source_examples = _source_examples(source_package)
     source_rust_inputs = _source_rust_build_inputs(source_package)
     try:
@@ -493,9 +544,9 @@ def _validate_sdist(
             regular_names = [member.name for member in members if member.isfile()]
             prefix = _sdist_package_prefix(regular_names)
             package_names = [name for name in regular_names if name.startswith(prefix)]
-            _assert_thin_package(package_names, prefix)
+            _assert_thin_package(package_names, prefix, python_members, stub_members)
             expected_package_names = {
-                f"{prefix}{name}" for name in BASE_ARTIFACTS.sdist_package_members
+                f"{prefix}{name}" for name in package_payloads
             }
             if set(package_names) != expected_package_names:
                 raise VerificationError("sdist runtime package inventory is not exact")
@@ -528,21 +579,12 @@ def _validate_sdist(
             if rust_names != expected_rust_names:
                 raise VerificationError("sdist Rust build input inventory is not exact")
 
-            wrapper_member = archive.extractfile(f"{prefix}__init__.py")
-            stub_member = archive.extractfile(f"{prefix}__init__.pyi")
-            act_schema_stub_member = archive.extractfile(f"{prefix}act_schema.pyi")
-            py_typed_member = archive.extractfile(f"{prefix}py.typed")
-            if wrapper_member is None or wrapper_member.read() != wrapper:
-                raise VerificationError("sdist wrapper differs from source")
-            if stub_member is None or stub_member.read() != stub:
-                raise VerificationError("sdist stub differs from source")
-            if (
-                act_schema_stub_member is None
-                or act_schema_stub_member.read() != act_schema_stub
-            ):
-                raise VerificationError("sdist act_schema stub differs from source")
-            if py_typed_member is None or py_typed_member.read() != py_typed:
-                raise VerificationError("sdist py.typed marker differs from source")
+            for name, payload in package_payloads.items():
+                member = archive.extractfile(f"{prefix}{name}")
+                if member is None or member.read() != payload:
+                    raise VerificationError(
+                        f"sdist package member differs from source: {name}"
+                    )
             for name, data in source_examples.items():
                 member = archive.extractfile(f"{examples_prefix}{name}")
                 if member is None or member.read() != data:
@@ -644,9 +686,9 @@ def _validate_wheel(
     wheel: Path,
     *,
     required_manylinux: str | None,
-    expected: tuple[bytes, bytes, bytes, bytes] | None = None,
+    expected: Mapping[str, bytes] | None = None,
 ) -> None:
-    wrapper, stub, act_schema_stub, py_typed = (
+    package_payloads = dict(
         expected if expected is not None else _validate_source(source_package)
     )
     filename_tags, filename_platforms = _parse_wheel_filename(wheel)
@@ -679,7 +721,15 @@ def _validate_wheel(
             record = f"{dist_info}/RECORD"
             expected_names = {
                 native_libraries[0] if name == "troupe/<native>" else name
-                for name in BASE_ARTIFACTS.wheel_members
+                for name in (
+                    *(f"troupe/{member}" for member in package_payloads),
+                    "troupe/<native>",
+                    *(
+                        member
+                        for member in BASE_ARTIFACTS.wheel_members
+                        if not member.startswith("troupe/")
+                    ),
+                )
             }
             if set(names) != expected_names:
                 unexpected = sorted(set(names) - expected_names)
@@ -690,14 +740,11 @@ def _validate_wheel(
 
             for info in infos:
                 archive.read(info)
-            if archive.read("troupe/__init__.py") != wrapper:
-                raise VerificationError("wheel wrapper differs from source")
-            if archive.read("troupe/__init__.pyi") != stub:
-                raise VerificationError("wheel stub differs from source")
-            if archive.read("troupe/act_schema.pyi") != act_schema_stub:
-                raise VerificationError("wheel act_schema stub differs from source")
-            if archive.read("troupe/py.typed") != py_typed:
-                raise VerificationError("wheel py.typed marker differs from source")
+            for name, payload in package_payloads.items():
+                if archive.read(f"troupe/{name}") != payload:
+                    raise VerificationError(
+                        f"wheel package member differs from source: {name}"
+                    )
 
             metadata = _parse_metadata(archive.read(f"{dist_info}/METADATA"))
             if metadata.get("Name") != "troupe":
@@ -773,7 +820,7 @@ def _validate_expected_contract(expected: Mapping[str, Any]) -> None:
         raise VerificationError("diagnostics wheel target contract drifted")
     if expected["smoke_modes"] != ["active", "archive"]:
         raise VerificationError("diagnostics wheel smoke contract drifted")
-    if expected["wheel_members"] != list(BASE_ARTIFACTS.wheel_members):
+    if expected["wheel_members"] != list(REALIZED_WHEEL_MEMBERS):
         raise VerificationError("diagnostics wheel member contract drifted")
     forbidden = expected["forbidden_tools"]
     if forbidden != [
@@ -1389,7 +1436,11 @@ public_exports = [
     "Production",
     "act_schema",
 ]
-public_type_exports = [name for name in public_exports if name != "act_schema"]
+module_exports = ["act_schema"]
+if hasattr(troupe, "diagnostics"):
+    public_exports.append("diagnostics")
+    module_exports.append("diagnostics")
+public_type_exports = [name for name in public_exports if name not in module_exports]
 native_exports = [name for name in public_type_exports if name != "AgentProfile"]
 schema_exports = [
     "BoolValue",
@@ -1415,11 +1466,14 @@ schema_contract = (
         for name in schema_exports
     )
 )
-public_identities = troupe.act_schema is runtime.act_schema and all(
-    getattr(troupe, name) is getattr(runtime, name) for name in native_exports
+public_identities = all(
+    getattr(troupe, name) is getattr(runtime, name)
+    for name in [*native_exports, *module_exports]
 )
-public_modules = troupe.act_schema.__name__ == "troupe.act_schema" and all(
+public_modules = all(
     getattr(troupe, name).__module__ == "troupe" for name in public_type_exports
+) and all(
+    getattr(troupe, name).__name__ == f"troupe.{name}" for name in module_exports
 )
 assert troupe.Production is runtime.Production
 assert troupe.Production.__module__ == "troupe"
@@ -1632,11 +1686,16 @@ def _build_dependency_wheel(workspace: Path) -> Path:
     return wheel
 
 
-def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> None:
+def _validate_smoke_payload(
+    child_venv: Path,
+    payload: Mapping[str, object],
+    *,
+    diagnostics: bool = False,
+) -> None:
     expected_values: dict[str, object] = {
         "production_identity": True,
         "production_module": "troupe",
-        "exports": PUBLIC_EXPORTS,
+        "exports": REALIZED_PUBLIC_EXPORTS if diagnostics else PUBLIC_EXPORTS,
         "public_identities": True,
         "public_modules": True,
         "schema_contract": True,
@@ -1897,7 +1956,11 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> dict[str, Any] | None:
         raise VerificationError("wheel smoke did not return valid JSON metadata") from error
     if not isinstance(payload, dict):
         raise VerificationError("wheel smoke metadata must be an object")
-    _validate_smoke_payload(child_venv, payload)
+    _validate_smoke_payload(
+        child_venv,
+        payload,
+        diagnostics=diagnostics is not None,
+    )
     _validate_smoke_tools(child_venv, env, diagnostics=diagnostics is not None)
 
     _run(["troupe", "--help"], cwd=outside, env=env, forbidden_stderr="troupe:")

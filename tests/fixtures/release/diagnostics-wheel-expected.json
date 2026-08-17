@@ -21,6 +21,7 @@
     "troupe/__init__.py",
     "troupe/__init__.pyi",
     "troupe/act_schema.pyi",
+    "troupe/diagnostics.pyi",
     "troupe/py.typed",
     "troupe/<native>",
     "troupe-0.1.0.dist-info/METADATA",
