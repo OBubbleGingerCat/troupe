@@ -332,7 +332,7 @@ fn hook_slots_freeze_typed_identity_scope_outcome_and_error_inputs() {
     for input in [
         "&RuntimeCore",
         "&ProductionState",
-        "&RunBinding",
+        "&Arc<RunBinding>",
         "PyResult<()>",
     ] {
         assert!(activation.contains(input), "activation is missing {input}");
