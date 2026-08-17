@@ -512,6 +512,28 @@ def test_descriptor_cache_requirement_injects_exact_caller_value(
     assert environment[name] == f"/readonly/{cache}"
 
 
+def test_descriptor_npm_cache_removes_implicit_cache_and_registry_authority() -> None:
+    environment = gate._descriptor_environment(
+        "V00",
+        {
+            "TROUPE_NPM_CACHE": "/readonly/npm",
+            "TROUPE_PLAYWRIGHT_CACHE": "/readonly/playwright",
+            "NPM_CONFIG_CACHE": "/owned/generic-cache",
+            "npm_config_cache": "/caller/cache",
+            "NpM_Config_Registry": "https://registry.example.invalid/",
+            "npm_config_audit": "false",
+        },
+        {},
+        ("npm", "playwright"),
+    )
+
+    assert environment["TROUPE_NPM_CACHE"] == "/readonly/npm"
+    assert environment["npm_config_audit"] == "false"
+    assert not {
+        name.casefold() for name in environment
+    } & {"npm_config_cache", "npm_config_registry"}
+
+
 @pytest.mark.parametrize("value", [None, ""])
 def test_descriptor_cache_requirement_rejects_missing_or_empty_caller_value(
     value: str | None,

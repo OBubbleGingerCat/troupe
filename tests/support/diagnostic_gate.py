@@ -642,6 +642,10 @@ def _descriptor_environment(
     if node_id not in PERSISTENT_EVIDENCE_NODES and PERSISTENT_EVIDENCE_ENV & policies.keys():
         raise GateError("ordinary diagnostic node must not request persistent evidence environment")
     result = dict(environment)
+    if "npm" in cache_requirements:
+        for name in tuple(result):
+            if name.casefold() in {"npm_config_cache", "npm_config_registry"}:
+                result.pop(name)
     caller_values = {name: result.get(name) for name in GATE_ENV_NAMES}
     for name in GATE_ENV_NAMES:
         result.pop(name, None)
