@@ -15,6 +15,7 @@ use tokio::io::AsyncWrite;
 use troupe_diagnostics_core::{
     hub::{AcceptedDiagnosticEvent, DeliveryFailure, LiveEventNotifier},
     id::CanonicalUuid,
+    kinds::SpanOutcome,
     scalar::SchemaU64,
 };
 use troupe_diagnostics_perfetto::{
@@ -40,6 +41,7 @@ use troupe_diagnostics_runtime::{
     store::{
         progress::WriterDeadlines,
         watermark::{CommitNotification, CommitObserver},
+        writer::FinalProductionOutcome,
     },
 };
 
@@ -48,7 +50,8 @@ use crate::{
     diagnostic_runtime::{
         bootstrap::{
             self, BootstrapComponents, BootstrapConfig, BootstrapRouteAssemblyError,
-            BootstrapRouteContext, DiagnosticRuntimeGuard, DiagnosticShutdownError,
+            BootstrapRouteContext, CleanupFailure, DiagnosticRuntimeGuard, DiagnosticShutdownError,
+            FinalStreamCloser,
         },
         custom_binding,
         load_producer::{
@@ -56,6 +59,7 @@ use crate::{
             current_production_construction,
         },
         runtime_producer,
+        shutdown::ShutdownMetadata,
         supervisor::{FirstCoreFailure, RuntimeFailureProbe, RuntimeInfrastructureFailure},
         view_compile::{ViewStartupLifecycle, prepare_production_views},
     },
@@ -67,6 +71,7 @@ use crate::{
 
 pub(crate) const READY_PREFIX: &str = "troupe: diagnostic ready ";
 const STARTUP_FAILURE_PREFIX: &str = "troupe: diagnostic startup failed: ";
+const SHUTDOWN_FAILURE_PREFIX: &str = "troupe: diagnostic shutdown failed: ";
 const LOCATOR_SCHEMA_VERSION: u8 = 1;
 const SSE_MAX_BUFFERED_EVENTS: usize = 1_024;
 const SSE_MAX_BUFFERED_BYTES: usize = 1024 * 1024;
@@ -105,6 +110,10 @@ impl ActivationError {
 
     pub(crate) fn line(&self) -> String {
         format!("{STARTUP_FAILURE_PREFIX}{self}\n")
+    }
+
+    pub(crate) fn shutdown_line(&self) -> String {
+        format!("{SHUTDOWN_FAILURE_PREFIX}{self}\n")
     }
 }
 
@@ -167,6 +176,7 @@ impl ActivatedRuntime {
     }
 
     fn into_active(mut self) -> ActiveDiagnosticRuntime {
+        let producer = Arc::new(OnceLock::new());
         ActiveDiagnosticRuntime {
             guard: Arc::new(Mutex::new(Some(
                 self.guard
@@ -175,16 +185,28 @@ impl ActivatedRuntime {
             ))),
             run_id: self.run_id,
             failures: self.failures,
+            producer,
         }
     }
 
-    pub(crate) fn shutdown(mut self) -> Result<(), ActivationError> {
+    pub(crate) fn abort(mut self) -> Result<(), ActivationError> {
         remove_pending_run(self.run_id);
         self.guard
             .take()
             .expect("an activated Runtime owns its diagnostic guard")
             .shutdown()
             .map_err(|error| ActivationError::diagnostic("diagnostic_activation.shutdown", error))
+    }
+
+    fn finalize_failed(mut self) -> Result<(), ActivationError> {
+        remove_pending_run(self.run_id);
+        shutdown_clean_or_abort(
+            self.guard
+                .take()
+                .expect("an activated Runtime owns its diagnostic guard"),
+            FinalProductionOutcome::Failed,
+        )
+        .map_err(|error| ActivationError::diagnostic("diagnostic_activation.shutdown", error))
     }
 
     fn guard(&self) -> &DiagnosticRuntimeGuard {
@@ -199,6 +221,7 @@ pub(crate) struct ActiveDiagnosticRuntime {
     guard: Arc<Mutex<Option<DiagnosticRuntimeGuard>>>,
     run_id: CanonicalUuid,
     failures: FirstCoreFailure,
+    producer: Arc<OnceLock<Arc<runtime_producer::RuntimeLifecycleProducer>>>,
 }
 
 impl ActiveDiagnosticRuntime {
@@ -220,11 +243,45 @@ impl ActiveDiagnosticRuntime {
     pub(crate) fn failure_probe(&self) -> ActiveFailureProbe {
         ActiveFailureProbe {
             runtime: self.clone(),
-            producer: Arc::new(OnceLock::new()),
+            producer: Arc::clone(&self.producer),
         }
     }
 
-    pub(crate) fn shutdown(self) -> Result<(), ActivationError> {
+    pub(crate) fn shutdown_ordered(self) -> Result<(), ActivationError> {
+        remove_pending_run(self.run_id);
+        let guard = lock(&self.guard)
+            .take()
+            .expect("an active Runtime owns its diagnostic guard");
+        if self.failures.failure().is_some() {
+            return guard.shutdown().map_err(|error| {
+                ActivationError::diagnostic("diagnostic_activation.shutdown", error)
+            });
+        }
+        let Some(producer) = self.producer.get() else {
+            return Err(abort_with_error(
+                guard,
+                ActivationError::diagnostic(
+                    "diagnostic_activation.terminal_producer_missing",
+                    "Runtime completed without a bound lifecycle producer",
+                ),
+            ));
+        };
+        let outcome = match producer.terminal_outcome() {
+            Ok(outcome) => final_production_outcome(outcome),
+            Err(error) => {
+                let code = error.code().to_owned();
+                return Err(abort_with_error(
+                    guard,
+                    ActivationError::diagnostic(code, error),
+                ));
+            }
+        };
+        shutdown_clean_or_abort(guard, outcome)
+            .map_err(|error| ActivationError::diagnostic("diagnostic_activation.shutdown", error))
+    }
+
+    #[cfg(test)]
+    fn abort(self) -> Result<(), ActivationError> {
         remove_pending_run(self.run_id);
         lock(&self.guard)
             .take()
@@ -308,11 +365,13 @@ impl ViewStartupLifecycle for StartupLifecycle {
 
     fn finalize_user_failure(mut self) -> Result<(), Self::Error> {
         remove_pending_run(self.runtime.run_id);
-        self.runtime
-            .guard
-            .take()
-            .expect("startup lifecycle owns its diagnostic guard")
-            .shutdown()
+        shutdown_clean_or_abort(
+            self.runtime
+                .guard
+                .take()
+                .expect("startup lifecycle owns its diagnostic guard"),
+            FinalProductionOutcome::Failed,
+        )
     }
 
     fn abort_core_failure(mut self) -> Result<(), Self::Error> {
@@ -367,6 +426,18 @@ impl CommitObserver for DeferredCommitObserver {
             Some(signal) => CommitObserver::committed(signal, notification),
             None => state.pending.push(notification),
         }
+    }
+}
+
+impl FinalStreamCloser for DeferredCommitObserver {
+    fn close_stream(&self, reason: &str, final_watermark: SchemaU64) -> Result<(), String> {
+        let signal = lock(&self.state)
+            .signal
+            .clone()
+            .ok_or_else(|| "commit observer was never bound".to_owned())?;
+        signal
+            .close(reason, final_watermark)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -458,11 +529,13 @@ fn route_assembly_error(error: impl fmt::Display) -> BootstrapRouteAssemblyError
 fn bootstrap_components(failures: FirstCoreFailure) -> BootstrapComponents {
     let commits = DeferredCommitObserver::default();
     let route_commits = commits.clone();
+    let final_commits = commits.clone();
     BootstrapComponents::new(
         Box::new(IgnoreLiveEvents),
         Box::new(commits),
         move |context| active_routes(context, &route_commits, failures),
     )
+    .with_final_stream_closer(Box::new(final_commits))
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -494,6 +567,42 @@ fn started_at(py: Python<'_>) -> Result<String, ActivationError> {
     time.call_method1("strftime", ("%Y-%m-%dT%H:%M:%SZ", utc))
         .and_then(|value| value.extract::<String>())
         .map_err(ActivationError::Python)
+}
+
+fn final_production_outcome(outcome: SpanOutcome) -> FinalProductionOutcome {
+    match outcome {
+        SpanOutcome::Completed => FinalProductionOutcome::Completed,
+        SpanOutcome::Failed => FinalProductionOutcome::Failed,
+        SpanOutcome::Cancelled => FinalProductionOutcome::Cancelled,
+    }
+}
+
+fn terminal_timestamp() -> Result<String, CleanupFailure> {
+    Python::attach(started_at)
+        .map_err(|error| CleanupFailure::new("clock", "terminal_timestamp_unavailable", error))
+}
+
+fn shutdown_clean_or_abort(
+    guard: DiagnosticRuntimeGuard,
+    outcome: FinalProductionOutcome,
+) -> Result<(), DiagnosticShutdownError> {
+    match terminal_timestamp() {
+        Ok(ended_at) => guard.shutdown_clean(ShutdownMetadata::new(ended_at, outcome)),
+        Err(timestamp_failure) => {
+            let mut failures = vec![timestamp_failure];
+            if let Err(cleanup) = guard.shutdown() {
+                failures.extend(cleanup.failures().iter().cloned());
+            }
+            Err(DiagnosticShutdownError::new(failures))
+        }
+    }
+}
+
+fn abort_with_error(guard: DiagnosticRuntimeGuard, error: ActivationError) -> ActivationError {
+    match guard.shutdown() {
+        Ok(()) => error,
+        Err(cleanup) => error.with_cleanup(cleanup),
+    }
 }
 
 fn bootstrap_config(
@@ -570,10 +679,30 @@ fn load_error(error: LoadProducerError) -> ActivationError {
     }
 }
 
-fn shutdown_after_error(runtime: ActivatedRuntime, error: ActivationError) -> ActivationError {
-    match runtime.shutdown() {
+fn abort_after_error(runtime: ActivatedRuntime, error: ActivationError) -> ActivationError {
+    match runtime.abort() {
         Ok(()) => error,
         Err(cleanup) => error.with_cleanup(cleanup),
+    }
+}
+
+fn finalize_after_error(runtime: ActivatedRuntime, error: ActivationError) -> ActivationError {
+    match runtime.finalize_failed() {
+        Ok(()) => error,
+        Err(cleanup) => error.with_cleanup(cleanup),
+    }
+}
+
+fn shutdown_after_load_error(
+    runtime: ActivatedRuntime,
+    error: LoadProducerError,
+) -> ActivationError {
+    let diagnostic_failed = error.diagnostic_error().is_some();
+    let error = load_error(error);
+    if diagnostic_failed {
+        abort_after_error(runtime, error)
+    } else {
+        finalize_after_error(runtime, error)
     }
 }
 
@@ -596,23 +725,23 @@ pub(crate) fn activate(
         Ok(loader) => loader,
         Err(error) => {
             let code = error.code().to_owned();
-            return Err(shutdown_after_error(
+            return Err(abort_after_error(
                 runtime,
                 ActivationError::diagnostic(code, error),
             ));
         }
     };
     if let Err(error) = write_ready(py, runtime.guard()) {
-        return Err(shutdown_after_error(runtime, error));
+        return Err(abort_after_error(runtime, error));
     }
 
     let path = match loader.resolve_path(py, root) {
         Ok(path) => path,
-        Err(error) => return Err(shutdown_after_error(runtime, load_error(error))),
+        Err(error) => return Err(shutdown_after_load_error(runtime, error)),
     };
     let class = match loader.resolve_class(py, path) {
         Ok(class) => class,
-        Err(error) => return Err(shutdown_after_error(runtime, load_error(error))),
+        Err(error) => return Err(shutdown_after_load_error(runtime, error)),
     };
     let prepared = prepare_production_views(py, class, StartupLifecycle { runtime })
         .map_err(|error| ActivationError::diagnostic(error.code(), error))?;
@@ -621,15 +750,15 @@ pub(crate) fn activate(
     let construction = ActivationConstructionGuard::enter(runtime.run_id);
     let production = match loader.construct(py, class, production_args) {
         Ok(production) => production,
-        Err(error) => return Err(shutdown_after_error(runtime, load_error(error))),
+        Err(error) => return Err(shutdown_after_load_error(runtime, error)),
     };
     drop(construction);
     let pending_matches = match pending_production_matches(py, &production, runtime.run_id) {
         Ok(matches) => matches,
-        Err(error) => return Err(shutdown_after_error(runtime, error)),
+        Err(error) => return Err(abort_after_error(runtime, error)),
     };
     if !pending_matches {
-        return Err(shutdown_after_error(
+        return Err(abort_after_error(
             runtime,
             ActivationError::diagnostic(
                 "diagnostic_activation.production_context_missing",
@@ -958,7 +1087,7 @@ class Production(builtins.{BASE_NAME}):
             let archive_directory = runtime.run_directory();
             drop(production);
             runtime
-                .shutdown()
+                .abort()
                 .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             drop(streams);
             Ok::<_, PyErr>((ready, stdout, calls, run_id, archive_directory))

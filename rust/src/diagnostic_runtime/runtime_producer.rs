@@ -204,6 +204,23 @@ impl RuntimeLifecycleProducer {
         lock(&self.state).producer_failure.clone()
     }
 
+    pub(crate) fn terminal_outcome(&self) -> Result<SpanOutcome, RuntimeProducerError> {
+        let state = lock(&self.state);
+        if let Some(failure) = state.producer_failure.clone() {
+            return Err(failure);
+        }
+        if !state.run_closed {
+            return Err(RuntimeProducerError::state(
+                "runtime.terminal-outcome-before-run-finished",
+            ));
+        }
+        state
+            .lifecycle_terminal
+            .as_ref()
+            .map(|terminal| terminal.outcome)
+            .ok_or_else(|| RuntimeProducerError::state("runtime.terminal-outcome-missing"))
+    }
+
     pub(crate) fn latch_diagnostic_failure(&self, error: DiagnosticProducerError) {
         let mut state = lock(&self.state);
         latch_failure(&mut state, error.into());

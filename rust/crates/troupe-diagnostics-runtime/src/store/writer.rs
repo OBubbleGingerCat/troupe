@@ -25,6 +25,24 @@ pub enum WriteStatement {
     ClearMaterialized { table: MaterializedTable },
     InsertMaterialized { table: MaterializedTable },
     AdvanceWatermarks,
+    FinalizeRunMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinalProductionOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl FinalProductionOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 pub trait WriterTransactionHook {
@@ -141,6 +159,98 @@ where
             .expect("a committed watermark candidate must still match its writer");
         self.observer.committed(notification);
         Ok(notification)
+    }
+
+    pub fn finalize_run(
+        &mut self,
+        ended_at: &str,
+        outcome: FinalProductionOutcome,
+    ) -> Result<SortableU64Key, WriterError> {
+        self.finalize_run_with_hook(ended_at, outcome, &mut ())
+    }
+
+    pub fn finalize_run_with_hook(
+        &mut self,
+        ended_at: &str,
+        outcome: FinalProductionOutcome,
+        hook: &mut dyn WriterTransactionHook,
+    ) -> Result<SortableU64Key, WriterError> {
+        if ended_at.is_empty() {
+            return Err(WriterError::InvalidFinalMetadata);
+        }
+        if self.store.metadata().clean_shutdown() {
+            return Err(WriterError::FinalStateConflict);
+        }
+        let final_watermark = self.watermark.value();
+        let final_sequence = final_watermark.canonical_decimal();
+
+        let transaction = self
+            .store
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(WriterError::BeginTransaction)?;
+        let affected = transaction
+            .execute(
+                "UPDATE run_metadata SET ended_at = ?1, production_outcome = ?2, \
+                 committed_key = ?3, committed_sequence = ?4, read_model_key = ?3, \
+                 read_model_sequence = ?4, clean_shutdown = 1 WHERE singleton = 1 AND \
+                 ended_at IS NULL AND production_outcome IS NULL AND clean_shutdown = 0 AND \
+                 committed_key = ?3 AND committed_sequence = ?4 AND read_model_key = ?3 AND \
+                 read_model_sequence = ?4",
+                params![
+                    ended_at,
+                    outcome.as_str(),
+                    final_watermark.as_bytes().as_slice(),
+                    final_sequence,
+                ],
+            )
+            .map_err(|source| WriterError::Statement {
+                ordinal: 1,
+                statement: WriteStatement::FinalizeRunMetadata,
+                source,
+            })?;
+        hook.after_statement(1, WriteStatement::FinalizeRunMetadata, &transaction)
+            .map_err(|source| WriterError::Statement {
+                ordinal: 1,
+                statement: WriteStatement::FinalizeRunMetadata,
+                source,
+            })?;
+        if affected != 1 {
+            return Err(WriterError::FinalStateConflict);
+        }
+        hook.before_commit(&transaction)
+            .map_err(WriterError::BeforeCommit)?;
+        transaction.commit().map_err(WriterError::Commit)?;
+
+        self.store
+            .refresh_metadata_after_commit(final_watermark)
+            .map_err(WriterError::PostCommitValidation)?;
+        let persisted = self
+            .store
+            .connection()
+            .query_row(
+                "SELECT ended_at, production_outcome, clean_shutdown FROM run_metadata \
+                 WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(WriterError::FinalMetadataRead)?;
+        if persisted
+            != (
+                Some(ended_at.to_owned()),
+                Some(outcome.as_str().to_owned()),
+                1,
+            )
+        {
+            return Err(WriterError::FinalMetadataMismatch);
+        }
+        Ok(final_watermark)
     }
 }
 
@@ -533,6 +643,10 @@ pub enum WriterErrorCode {
     BeforeCommit,
     Commit,
     PostCommitValidation,
+    InvalidFinalMetadata,
+    FinalStateConflict,
+    FinalMetadataRead,
+    FinalMetadataMismatch,
 }
 
 impl WriterErrorCode {
@@ -547,6 +661,10 @@ impl WriterErrorCode {
             Self::BeforeCommit => "diagnostic_writer.before_commit",
             Self::Commit => "diagnostic_writer.commit",
             Self::PostCommitValidation => "diagnostic_writer.post_commit_validation",
+            Self::InvalidFinalMetadata => "diagnostic_writer.invalid_final_metadata",
+            Self::FinalStateConflict => "diagnostic_writer.final_state_conflict",
+            Self::FinalMetadataRead => "diagnostic_writer.final_metadata_read",
+            Self::FinalMetadataMismatch => "diagnostic_writer.final_metadata_mismatch",
         }
     }
 }
@@ -570,6 +688,10 @@ pub enum WriterError {
     BeforeCommit(rusqlite::Error),
     Commit(rusqlite::Error),
     PostCommitValidation(StoreOpenError),
+    InvalidFinalMetadata,
+    FinalStateConflict,
+    FinalMetadataRead(rusqlite::Error),
+    FinalMetadataMismatch,
 }
 
 impl WriterError {
@@ -584,6 +706,10 @@ impl WriterError {
             Self::BeforeCommit(_) => WriterErrorCode::BeforeCommit,
             Self::Commit(_) => WriterErrorCode::Commit,
             Self::PostCommitValidation(_) => WriterErrorCode::PostCommitValidation,
+            Self::InvalidFinalMetadata => WriterErrorCode::InvalidFinalMetadata,
+            Self::FinalStateConflict => WriterErrorCode::FinalStateConflict,
+            Self::FinalMetadataRead(_) => WriterErrorCode::FinalMetadataRead,
+            Self::FinalMetadataMismatch => WriterErrorCode::FinalMetadataMismatch,
         }
     }
 
@@ -632,6 +758,14 @@ impl fmt::Display for WriterError {
                 write!(formatter, ": {source}")
             }
             Self::PostCommitValidation(source) => write!(formatter, ": {source}"),
+            Self::InvalidFinalMetadata => formatter.write_str(": ended_at must not be empty"),
+            Self::FinalStateConflict => {
+                formatter.write_str(": Run metadata is already terminal or inconsistent")
+            }
+            Self::FinalMetadataRead(source) => write!(formatter, ": {source}"),
+            Self::FinalMetadataMismatch => {
+                formatter.write_str(": committed final metadata did not validate")
+            }
         }
     }
 }
@@ -648,6 +782,123 @@ impl std::error::Error for WriterError {
             }
             Self::Statement { source, .. } => Some(source),
             Self::PostCommitValidation(source) => Some(source),
+            Self::FinalMetadataRead(source) => Some(source),
+            Self::InvalidFinalMetadata | Self::FinalStateConflict | Self::FinalMetadataMismatch => {
+                None
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod final_metadata_tests {
+    use std::{fs, path::PathBuf};
+
+    use troupe_diagnostics_core::id::CanonicalUuid;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::store::connection::InitialStoreMetadata;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("troupe-x02-final-metadata-{}", Uuid::new_v4()));
+            fs::create_dir(&path).expect("create final metadata test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn writer(directory: &TestDirectory) -> TransactionalWriter<()> {
+        let run_id = CanonicalUuid::new(Uuid::new_v4());
+        let metadata =
+            InitialStoreMetadata::new(run_id, "2026-08-16T09:00:00Z", "x02-final-metadata-test");
+        let store = DiagnosticStore::create(&directory.0, &metadata).expect("create test store");
+        TransactionalWriter::new(store, ()).expect("create test writer")
+    }
+
+    fn persisted_terminal(
+        writer: &TransactionalWriter<()>,
+    ) -> (Option<String>, Option<String>, i64) {
+        writer
+            .store()
+            .connection()
+            .query_row(
+                "SELECT ended_at, production_outcome, clean_shutdown FROM run_metadata \
+                 WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read terminal metadata")
+    }
+
+    #[test]
+    fn final_metadata_is_atomic_and_cannot_be_rewritten() {
+        let directory = TestDirectory::new();
+        let mut writer = writer(&directory);
+
+        let watermark = writer
+            .finalize_run("2026-08-16T09:01:00Z", FinalProductionOutcome::Completed)
+            .expect("commit final metadata");
+        assert_eq!(watermark.get(), 0);
+        assert_eq!(
+            persisted_terminal(&writer),
+            (
+                Some("2026-08-16T09:01:00Z".to_owned()),
+                Some("completed".to_owned()),
+                1,
+            )
+        );
+        assert!(writer.store().metadata().clean_shutdown());
+        assert!(matches!(
+            writer.finalize_run("2026-08-16T09:02:00Z", FinalProductionOutcome::Failed,),
+            Err(WriterError::FinalStateConflict)
+        ));
+    }
+
+    struct FailFinalStatement;
+
+    impl WriterTransactionHook for FailFinalStatement {
+        fn after_statement(
+            &mut self,
+            _ordinal: usize,
+            statement: WriteStatement,
+            _transaction: &Transaction<'_>,
+        ) -> rusqlite::Result<()> {
+            if statement == WriteStatement::FinalizeRunMetadata {
+                Err(rusqlite::Error::InvalidQuery)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn final_statement_failure_rolls_back_and_leaves_archive_incomplete() {
+        let directory = TestDirectory::new();
+        let mut writer = writer(&directory);
+        let error = writer
+            .finalize_run_with_hook(
+                "2026-08-16T09:01:00Z",
+                FinalProductionOutcome::Failed,
+                &mut FailFinalStatement,
+            )
+            .expect_err("inject final statement failure");
+
+        assert_eq!(error.code(), WriterErrorCode::Statement);
+        assert_eq!(error.statement(), Some(WriteStatement::FinalizeRunMetadata));
+        assert_eq!(persisted_terminal(&writer), (None, None, 0));
+        assert!(!writer.store().metadata().clean_shutdown());
+        writer
+            .finalize_run("2026-08-16T09:01:01Z", FinalProductionOutcome::Failed)
+            .expect("retry final metadata after rollback");
     }
 }

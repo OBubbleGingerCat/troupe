@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "preconditions": [
+    "stop_new_work",
+    "settle_or_cancel_current_work",
+    "persist_runtime_sink_usage_and_lifecycle_terminal_facts"
+  ],
+  "owned_phases": [
+    "seal_canonical_ingress",
+    "bounded_writer_drain",
+    "final_metadata_transaction",
+    "best_effort_stream_closed",
+    "durable_registry_unpublish",
+    "close_listener_and_readers",
+    "close_writer_and_sqlite",
+    "release_active_lease_and_thread"
+  ],
+  "final_transaction": {
+    "fields": [
+      "ended_at",
+      "production_outcome",
+      "clean_shutdown"
+    ],
+    "clean_shutdown": true,
+    "preserve_equal_watermarks": true,
+    "outcomes": [
+      "completed",
+      "failed",
+      "cancelled"
+    ],
+    "single_transition": true
+  },
+  "failure_contract": {
+    "final_transaction_failure_keeps_incomplete": true,
+    "core_failure_uses_abort_path": true,
+    "later_close_failure_exits_nonzero": true,
+    "peer_disconnect_does_not_downgrade_archive": true,
+    "always_attempt_remaining_cleanup": true
+  },
+  "lifetime_contract": {
+    "server_daemonizes": false,
+    "delete_run_directory": false,
+    "registry_unpublished_before_listener_close": true,
+    "sqlite_closed_before_active_lease_release": true
+  }
+}

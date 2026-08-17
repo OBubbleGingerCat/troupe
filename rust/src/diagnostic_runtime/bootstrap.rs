@@ -18,6 +18,7 @@ use troupe_diagnostics_core::{
         ProductionDiagnosticHub,
     },
     id::CanonicalUuid,
+    scalar::SchemaU64,
 };
 use troupe_diagnostics_runtime::{
     archive::{
@@ -44,18 +45,22 @@ use troupe_diagnostics_runtime::{
         },
         batch::{BatchAccumulator, TriggeredBatch},
         connection::{DiagnosticStore, InitialStoreMetadata},
+        key::SortableU64Key,
         progress::{
             WriterCoreFailure, WriterDeadlines, WriterProgressSample, WriterProgressStatus,
             WriterProgressSupervisor,
         },
         quota::{QuotaError, QuotaFailure, QuotaFailureReceiver, QuotaStatus, RunQuota},
         watermark::{CommitNotification, CommitObserver},
-        writer::TransactionalWriter,
+        writer::{FinalProductionOutcome, TransactionalWriter},
     },
 };
 use uuid::Uuid;
 
 use crate::application::loader::PrevalidatedProductionRoot;
+
+pub(crate) use super::shutdown::{CleanupFailure, DiagnosticShutdownError};
+use super::shutdown::{OrderedShutdownResources, ShutdownMetadata, run_ordered_shutdown};
 
 const WRITER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -270,6 +275,17 @@ pub(crate) struct BootstrapComponents {
     live_notifier: Box<dyn LiveEventNotifier>,
     commit_observer: Box<dyn CommitObserver + Send>,
     route_factory: RouteFactory,
+    final_stream_closer: Box<dyn FinalStreamCloser>,
+}
+
+pub(crate) trait FinalStreamCloser: Send {
+    fn close_stream(&self, reason: &str, final_watermark: SchemaU64) -> Result<(), String>;
+}
+
+impl FinalStreamCloser for () {
+    fn close_stream(&self, _reason: &str, _final_watermark: SchemaU64) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl BootstrapComponents {
@@ -289,7 +305,16 @@ impl BootstrapComponents {
             live_notifier,
             commit_observer,
             route_factory: Box::new(route_factory),
+            final_stream_closer: Box::new(()),
         }
+    }
+
+    pub(crate) fn with_final_stream_closer(
+        mut self,
+        final_stream_closer: Box<dyn FinalStreamCloser>,
+    ) -> Self {
+        self.final_stream_closer = final_stream_closer;
+        self
     }
 }
 
@@ -360,35 +385,6 @@ impl BootstrapPhase {
             Self::RegistryPublished => "registry_published",
             Self::ReadyResult => "ready_result",
         }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CleanupFailure {
-    component: &'static str,
-    code: String,
-    message: String,
-}
-
-impl CleanupFailure {
-    fn new(component: &'static str, code: impl Into<String>, error: impl fmt::Display) -> Self {
-        Self {
-            component,
-            code: code.into(),
-            message: error.to_string(),
-        }
-    }
-
-    pub(crate) const fn component(&self) -> &'static str {
-        self.component
-    }
-
-    pub(crate) fn code(&self) -> &str {
-        &self.code
-    }
-
-    pub(crate) fn message(&self) -> &str {
-        &self.message
     }
 }
 
@@ -519,29 +515,6 @@ impl DiagnosticCoreFailure {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DiagnosticShutdownError {
-    failures: Vec<CleanupFailure>,
-}
-
-impl DiagnosticShutdownError {
-    pub(crate) fn failures(&self) -> &[CleanupFailure] {
-        &self.failures
-    }
-}
-
-impl fmt::Display for DiagnosticShutdownError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "diagnostic shutdown failed in {} operation(s)",
-            self.failures.len()
-        )
-    }
-}
-
-impl std::error::Error for DiagnosticShutdownError {}
-
 pub(crate) struct DiagnosticRuntimeGuard {
     layout: ArchiveLayout,
     active_lease: Option<Arc<ActiveArchiveLease>>,
@@ -551,6 +524,7 @@ pub(crate) struct DiagnosticRuntimeGuard {
     writer: Option<WriterSupervisor>,
     server: Option<DiagnosticServer>,
     publication: Option<RegistryPublication>,
+    final_stream_closer: Option<Box<dyn FinalStreamCloser>>,
     shutdown_attempted: bool,
 }
 
@@ -662,8 +636,16 @@ impl DiagnosticRuntimeGuard {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(DiagnosticShutdownError { failures })
+            Err(DiagnosticShutdownError::new(failures))
         }
+    }
+
+    pub(crate) fn shutdown_clean(
+        mut self,
+        metadata: ShutdownMetadata,
+    ) -> Result<(), DiagnosticShutdownError> {
+        self.shutdown_attempted = true;
+        run_ordered_shutdown(&mut self, &metadata)
     }
 }
 
@@ -696,6 +678,76 @@ impl Drop for DiagnosticRuntimeGuard {
             &mut self.active_lease,
         );
         report_drop_failures("diagnostic Runtime guard drop failed", &failures);
+    }
+}
+
+impl OrderedShutdownResources for DiagnosticRuntimeGuard {
+    fn seal_ingress(&mut self) -> Result<(), CleanupFailure> {
+        self.ingress
+            .as_ref()
+            .expect("a live diagnostic guard owns its ingress")
+            .seal_normal_ingress()
+            .map(|_| ())
+            .map_err(|error| CleanupFailure::new("writer", "writer_ingress_seal_failed", error))
+    }
+
+    fn finalize_writer(
+        &mut self,
+        metadata: &ShutdownMetadata,
+    ) -> Result<SchemaU64, CleanupFailure> {
+        self.writer
+            .as_mut()
+            .expect("a live diagnostic guard owns its writer")
+            .finalize(metadata.ended_at(), metadata.outcome())
+            .map(|watermark| SchemaU64::new(watermark.get()))
+    }
+
+    fn close_live_stream(
+        &mut self,
+        reason: &str,
+        final_watermark: SchemaU64,
+    ) -> Result<(), CleanupFailure> {
+        self.final_stream_closer
+            .as_ref()
+            .expect("a live diagnostic guard owns its stream closer")
+            .close_stream(reason, final_watermark)
+            .map_err(|error| CleanupFailure::new("stream", "stream_close_failed", error))
+    }
+
+    fn unpublish_registry(&mut self) -> Result<(), CleanupFailure> {
+        self.publication
+            .take()
+            .expect("a live diagnostic guard owns its registry publication")
+            .unpublish(ListenerState::Running)
+            .map_err(|error| CleanupFailure::new("registry", error.code().as_str(), error))
+    }
+
+    fn close_listener_and_readers(&mut self) -> Result<(), CleanupFailure> {
+        self.server
+            .take()
+            .expect("a live diagnostic guard owns its server")
+            .shutdown()
+            .map_err(|error| CleanupFailure::new("server", "server_shutdown_failed", error))
+    }
+
+    fn close_writer_and_store(&mut self) -> Vec<CleanupFailure> {
+        self.hub.take();
+        match self
+            .writer
+            .take()
+            .expect("a live diagnostic guard owns its writer")
+            .close()
+        {
+            Ok(()) => Vec::new(),
+            Err(failures) => failures,
+        }
+    }
+
+    fn release_runtime_resources(&mut self) {
+        self.final_stream_closer.take();
+        self.quota.take();
+        self.ingress.take();
+        self.active_lease.take();
     }
 }
 
@@ -764,6 +816,7 @@ struct StartupState {
     writer: Option<WriterSupervisor>,
     server: Option<DiagnosticServer>,
     publication: Option<RegistryPublication>,
+    final_stream_closer: Option<Box<dyn FinalStreamCloser>>,
 }
 
 impl StartupState {
@@ -918,7 +971,9 @@ fn bootstrap_root<C: BootstrapCheckpoint>(
         live_notifier,
         commit_observer,
         route_factory,
+        final_stream_closer,
     } = components;
+    state.final_stream_closer = Some(final_stream_closer);
     let writer = WriterSupervisor::start(
         state.store.take().expect("initial store was installed"),
         ingress.clone(),
@@ -1081,6 +1136,7 @@ fn bootstrap_root<C: BootstrapCheckpoint>(
         writer: state.writer.take(),
         server: state.server.take(),
         publication: state.publication.take(),
+        final_stream_closer: state.final_stream_closer.take(),
         shutdown_attempted: false,
     })
 }
@@ -1101,9 +1157,28 @@ struct WriterSupervisor {
     ingress: MandatoryIngress,
     progress: Arc<Mutex<WriterProgressStatus>>,
     failure_receiver: Receiver<DiagnosticCoreFailure>,
-    shutdown_sender: Option<SyncSender<()>>,
+    command_sender: Option<SyncSender<WriterCommand>>,
     thread: Option<JoinHandle<Result<(), DiagnosticCoreFailure>>>,
     thread_handle: Thread,
+}
+
+enum WriterCommand {
+    Finalize {
+        ended_at: String,
+        outcome: FinalProductionOutcome,
+        reply: SyncSender<Result<SortableU64Key, DiagnosticCoreFailure>>,
+    },
+    Abort,
+    Close,
+}
+
+enum WriterDrainIntent {
+    Finalize {
+        ended_at: String,
+        outcome: FinalProductionOutcome,
+        reply: SyncSender<Result<SortableU64Key, DiagnosticCoreFailure>>,
+    },
+    Abort,
 }
 
 impl WriterSupervisor {
@@ -1133,7 +1208,7 @@ impl WriterSupervisor {
         let thread_progress = Arc::clone(&progress);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let (failure_sender, failure_receiver) = mpsc::sync_channel(1);
-        let (shutdown_sender, shutdown_receiver) = mpsc::sync_channel(1);
+        let (command_sender, command_receiver) = mpsc::sync_channel(1);
         let thread_ingress = ingress.clone();
         let thread = thread::Builder::new()
             .name("troupe-diagnostic-writer".to_owned())
@@ -1149,7 +1224,7 @@ impl WriterSupervisor {
                         quota_failures,
                         initial_supervisor,
                         thread_progress,
-                        shutdown_receiver,
+                        command_receiver,
                         ready_sender,
                     )
                 }))
@@ -1192,7 +1267,7 @@ impl WriterSupervisor {
             ingress,
             progress,
             failure_receiver,
-            shutdown_sender: Some(shutdown_sender),
+            command_sender: Some(command_sender),
             thread: Some(thread),
             thread_handle,
         })
@@ -1213,6 +1288,40 @@ impl WriterSupervisor {
         self.failure_receiver.try_recv().ok()
     }
 
+    fn finalize(
+        &mut self,
+        ended_at: &str,
+        outcome: FinalProductionOutcome,
+    ) -> Result<SortableU64Key, CleanupFailure> {
+        let (reply, result) = mpsc::sync_channel(1);
+        let command = WriterCommand::Finalize {
+            ended_at: ended_at.to_owned(),
+            outcome,
+            reply,
+        };
+        self.command_sender
+            .as_ref()
+            .expect("a live writer supervisor owns its command sender")
+            .send(command)
+            .map_err(|_| {
+                CleanupFailure::new(
+                    "writer",
+                    "writer_finalize_command_failed",
+                    "diagnostic writer is not accepting finalization",
+                )
+            })?;
+        self.thread_handle.unpark();
+        match result.recv() {
+            Ok(Ok(watermark)) => Ok(watermark),
+            Ok(Err(error)) => Err(CleanupFailure::new("writer", error.code(), error.message())),
+            Err(_) => Err(CleanupFailure::new(
+                "writer",
+                "writer_finalize_result_unavailable",
+                "diagnostic writer exited without a finalization result",
+            )),
+        }
+    }
+
     fn shutdown(mut self) -> Result<(), Vec<CleanupFailure>> {
         let failures = self.shutdown_inner();
         if failures.is_empty() {
@@ -1222,20 +1331,33 @@ impl WriterSupervisor {
         }
     }
 
+    fn close(mut self) -> Result<(), Vec<CleanupFailure>> {
+        let failures = self.join_after(WriterCommand::Close, false);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
+    }
+
     fn shutdown_inner(&mut self) -> Vec<CleanupFailure> {
+        self.join_after(WriterCommand::Abort, true)
+    }
+
+    fn join_after(&mut self, command: WriterCommand, seal_ingress: bool) -> Vec<CleanupFailure> {
         let Some(thread) = self.thread.take() else {
             return Vec::new();
         };
         let mut failures = Vec::new();
-        if let Err(error) = self.ingress.seal_normal_ingress() {
+        if seal_ingress && let Err(error) = self.ingress.seal_normal_ingress() {
             failures.push(CleanupFailure::new(
                 "writer",
                 "writer_ingress_seal_failed",
                 error,
             ));
         }
-        if let Some(sender) = self.shutdown_sender.take() {
-            let _ = sender.try_send(());
+        if let Some(sender) = self.command_sender.take() {
+            let _ = sender.send(command);
         }
         self.thread_handle.unpark();
         match thread.join() {
@@ -1290,12 +1412,12 @@ fn run_writer(
     quota_failures: QuotaFailureReceiver,
     mut supervisor: WriterProgressSupervisor,
     progress: Arc<Mutex<WriterProgressStatus>>,
-    shutdown_receiver: Receiver<()>,
+    command_receiver: Receiver<WriterCommand>,
     ready_sender: SyncSender<()>,
 ) -> Result<(), DiagnosticCoreFailure> {
     let origin = Instant::now();
     let mut accumulator = BatchAccumulator::new();
-    let mut shutdown_started = false;
+    let mut drain_intent = None;
     observe_progress(&ingress, &mut supervisor, &progress, origin.elapsed())?;
     ready_sender.send(()).map_err(|_| {
         DiagnosticCoreFailure::new(
@@ -1318,10 +1440,35 @@ fn run_writer(
         if let Some(failure) = quota_failures.try_recv() {
             return Err(quota_core_failure(&failure));
         }
-        if !shutdown_started {
-            match shutdown_receiver.try_recv() {
-                Ok(()) | Err(TryRecvError::Disconnected) => {
-                    shutdown_started = true;
+        if drain_intent.is_none() {
+            match command_receiver.try_recv() {
+                Ok(command) => {
+                    drain_intent = Some(match command {
+                        WriterCommand::Finalize {
+                            ended_at,
+                            outcome,
+                            reply,
+                        } => WriterDrainIntent::Finalize {
+                            ended_at,
+                            outcome,
+                            reply,
+                        },
+                        WriterCommand::Abort | WriterCommand::Close => WriterDrainIntent::Abort,
+                    });
+                    let now = origin.elapsed();
+                    observe_progress(&ingress, &mut supervisor, &progress, now)?;
+                    supervisor.begin_shutdown(now).map_err(|error| {
+                        DiagnosticCoreFailure::new(
+                            "writer",
+                            "drain",
+                            "writer_shutdown_begin_failed",
+                            error.to_string(),
+                        )
+                    })?;
+                    record_progress(&progress, supervisor.status())?;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    drain_intent = Some(WriterDrainIntent::Abort);
                     let now = origin.elapsed();
                     observe_progress(&ingress, &mut supervisor, &progress, now)?;
                     supervisor.begin_shutdown(now).map_err(|error| {
@@ -1360,7 +1507,7 @@ fn run_writer(
             }
         }
 
-        let triggered = if shutdown_started {
+        let triggered = if drain_intent.is_some() {
             accumulator.flush()
         } else {
             accumulator.poll(origin.elapsed())
@@ -1379,28 +1526,95 @@ fn run_writer(
         }
 
         let status = observe_progress(&ingress, &mut supervisor, &progress, origin.elapsed())?;
-        if shutdown_started
+        if drain_intent.is_some()
             && status.accepted_uncommitted_events() == 0
             && accumulator.pending_event_count() == 0
         {
-            let store = writer.into_store();
-            store.checkpoint_and_validate_files().map_err(|error| {
-                DiagnosticCoreFailure::writer(error.to_string(), error.code().as_str())
-            })?;
-            quota.post_growth_measurement().map_err(|error| {
-                DiagnosticCoreFailure::new(
-                    "quota",
-                    "checkpoint",
-                    quota_error_code(&error),
-                    error.to_string(),
-                )
-            })?;
-            return Ok(());
+            match drain_intent
+                .take()
+                .expect("a completed drain has a shutdown intent")
+            {
+                WriterDrainIntent::Finalize {
+                    ended_at,
+                    outcome,
+                    reply,
+                } => {
+                    let final_watermark = match writer.finalize_run(&ended_at, outcome) {
+                        Ok(watermark) => watermark,
+                        Err(error) => {
+                            let failure = DiagnosticCoreFailure::writer(
+                                error.to_string(),
+                                error.code().as_str(),
+                            );
+                            let _ = reply.send(Err(failure.clone()));
+                            return Err(failure);
+                        }
+                    };
+                    if let Err(error) = quota.post_growth_measurement() {
+                        let failure = DiagnosticCoreFailure::new(
+                            "quota",
+                            "finalize",
+                            quota_error_code(&error),
+                            error.to_string(),
+                        );
+                        let _ = reply.send(Err(failure.clone()));
+                        return Err(failure);
+                    }
+                    reply.send(Ok(final_watermark)).map_err(|_| {
+                        DiagnosticCoreFailure::new(
+                            "writer",
+                            "finalize",
+                            "writer_finalize_reply_receiver_dropped",
+                            "diagnostic writer finalization receiver was dropped",
+                        )
+                    })?;
+                    wait_for_writer_close(&command_receiver)?;
+                }
+                WriterDrainIntent::Abort => {}
+            }
+            return checkpoint_and_close_writer(writer, &quota);
         }
         if !worked {
             thread::park_timeout(WRITER_POLL_INTERVAL);
         }
     }
+}
+
+fn wait_for_writer_close(
+    command_receiver: &Receiver<WriterCommand>,
+) -> Result<(), DiagnosticCoreFailure> {
+    match command_receiver.recv() {
+        Ok(WriterCommand::Close | WriterCommand::Abort) | Err(_) => Ok(()),
+        Ok(WriterCommand::Finalize { reply, .. }) => {
+            let failure = DiagnosticCoreFailure::new(
+                "writer",
+                "close",
+                "writer_finalized_twice",
+                "diagnostic writer received a second finalization command",
+            );
+            let _ = reply.send(Err(failure.clone()));
+            Err(failure)
+        }
+    }
+}
+
+fn checkpoint_and_close_writer(
+    writer: RuntimeWriter,
+    quota: &CoordinatedRunQuota,
+) -> Result<(), DiagnosticCoreFailure> {
+    let store = writer.into_store();
+    store
+        .checkpoint_and_validate_files()
+        .map_err(|error| DiagnosticCoreFailure::writer(error.to_string(), error.code().as_str()))?;
+    quota.post_growth_measurement().map_err(|error| {
+        DiagnosticCoreFailure::new(
+            "quota",
+            "checkpoint",
+            quota_error_code(&error),
+            error.to_string(),
+        )
+    })?;
+    Ok(())
 }
 
 fn observe_progress(
@@ -1540,7 +1754,9 @@ fn report_drop_failures(context: &str, failures: &[CleanupFailure]) {
         .map(|failure| {
             format!(
                 "{} [{}]: {}",
-                failure.component, failure.code, failure.message
+                failure.component(),
+                failure.code(),
+                failure.message()
             )
         })
         .collect::<Vec<_>>()
@@ -1849,6 +2065,56 @@ mod tests {
             .expect("shutdown retained a readable incomplete archive");
         assert!(!store.metadata().clean_shutdown());
         assert_eq!(store.metadata().committed_watermark().get(), 1);
+    }
+
+    #[test]
+    fn ordered_clean_shutdown_drains_and_reopens_terminal_archive() {
+        let _test_guard = test_lock();
+        let root = TestRoot::new();
+        let run_id = CanonicalUuid::new(Uuid::new_v4());
+        let run_directory = root
+            .path()
+            .join(".troupe/diagnostics/runs")
+            .join(run_id.to_string());
+        let mut checkpoint = NoopCheckpoint;
+        let guard = bootstrap_root(root.path(), run_id, config(), components(), &mut checkpoint)
+            .expect("bootstrap diagnostics");
+        let address = guard.connect_addr();
+        guard
+            .hub()
+            .admit(counter_candidate(1), None)
+            .expect("admit terminal test event");
+
+        guard
+            .shutdown_clean(ShutdownMetadata::new(
+                "2026-08-16T09:31:00Z",
+                FinalProductionOutcome::Completed,
+            ))
+            .expect("complete ordered shutdown");
+
+        assert_listener_stopped(Some(address));
+        assert_registry_empty(root.path());
+        assert_eq!(ACTIVE_WRITER_THREADS.load(Ordering::Acquire), 0);
+        let store = DiagnosticStore::open_validated(&run_directory, run_id)
+            .expect("reopen clean terminal archive");
+        assert!(store.metadata().clean_shutdown());
+        assert_eq!(store.metadata().committed_watermark().get(), 1);
+        let terminal = store
+            .connection()
+            .query_row(
+                "SELECT ended_at, production_outcome FROM run_metadata WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("read final metadata");
+        assert_eq!(
+            terminal,
+            ("2026-08-16T09:31:00Z".to_owned(), "completed".to_owned(),)
+        );
+        drop(
+            SharedArchiveLease::acquire(&run_directory)
+                .expect("ordered shutdown released the active archive lease"),
+        );
     }
 
     #[test]

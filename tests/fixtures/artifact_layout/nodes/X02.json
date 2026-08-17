@@ -1,7 +1,17 @@
 {
-  "state": "planned",
-  "introduced": [],
-  "modified": [],
+  "state": "realized",
+  "introduced": [
+    "tests/fixtures/diagnostics/shutdown-phase-matrix.json",
+    "tests/integration/test_diagnostic_shutdown.py"
+  ],
+  "modified": [
+    "rust/crates/troupe-diagnostics-runtime/src/store/writer.rs",
+    "rust/src/application/cli.rs",
+    "rust/src/diagnostic_runtime/activation.rs",
+    "rust/src/diagnostic_runtime/bootstrap.rs",
+    "rust/src/diagnostic_runtime/runtime_producer.rs",
+    "rust/src/diagnostic_runtime/shutdown.rs"
+  ],
   "removed": [],
   "generated": []
 }

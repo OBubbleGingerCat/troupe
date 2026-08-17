@@ -300,14 +300,14 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
         Ok(supervisor::supervise(probe, core, operation).await)
     });
     let restore_result = guard.restore(py);
-    let diagnostic_shutdown = diagnostic_runtime.shutdown();
+    let diagnostic_shutdown = diagnostic_runtime.shutdown_ordered();
 
     let supervised = run_result?;
     let (run_result, infrastructure_failure) = supervised.into_parts();
     if let Some(failure) = infrastructure_failure {
         write_stream(py, "stderr", &failure.line())?;
         if let Err(error) = diagnostic_shutdown {
-            write_stream(py, "stderr", &error.line())?;
+            write_stream(py, "stderr", &error.shutdown_line())?;
         }
         return Ok(1);
     }
@@ -318,14 +318,14 @@ pub fn main(py: Python<'_>) -> PyResult<i32> {
             let rendered = format_lifecycle_failure(py, value)?;
             write_stderr(py, &rendered)?;
             if let Err(error) = shutdown {
-                write_stream(py, "stderr", &error.line())?;
+                write_stream(py, "stderr", &error.shutdown_line())?;
             }
             Ok(1)
         }
         (Err(error), _, _) => Err(error),
         (Ok(()), Err(error), _) => Err(error),
         (Ok(()), Ok(()), Err(error)) => {
-            write_stream(py, "stderr", &error.line())?;
+            write_stream(py, "stderr", &error.shutdown_line())?;
             Ok(1)
         }
         (Ok(()), Ok(()), Ok(())) => Ok(0),
