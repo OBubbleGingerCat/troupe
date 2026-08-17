@@ -294,6 +294,34 @@ def test_verifier_uses_the_realized_repository_contract() -> None:
     verifier._validate_expected_contract(expected)
 
 
+def test_sdist_manifest_normalization_must_preserve_toml_semantics() -> None:
+    verifier = load_verifier()
+    source = b'[workspace]\nmembers = [\n    "core",\n    "runtime",\n]\n'
+    normalized = b'[workspace]\nmembers = ["core", "runtime"]\n'
+    changed = b'[workspace]\nmembers = ["core"]\n'
+
+    assert verifier._rust_input_matches_sdist(
+        "rust/Cargo.toml",
+        source,
+        normalized,
+    )
+    assert not verifier._rust_input_matches_sdist(
+        "rust/Cargo.toml",
+        source,
+        changed,
+    )
+    assert not verifier._rust_input_matches_sdist(
+        "rust/Cargo.toml",
+        source,
+        b"not valid TOML =",
+    )
+    assert not verifier._rust_input_matches_sdist(
+        "rust/src/lib.rs",
+        b"same semantics\n",
+        b"same  semantics\n",
+    )
+
+
 def test_success_dispatches_one_offline_build_and_preserves_only_the_report(
     tmp_path: Path,
 ) -> None:

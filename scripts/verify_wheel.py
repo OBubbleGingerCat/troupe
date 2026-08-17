@@ -515,6 +515,19 @@ def _source_rust_build_inputs(source_package: Path) -> dict[str, bytes]:
         raise VerificationError(f"could not inspect source Rust inputs: {error}") from error
 
 
+def _rust_input_matches_sdist(name: str, source: bytes, packaged: bytes) -> bool:
+    if source == packaged:
+        return True
+    if PurePosixPath(name).name != "Cargo.toml":
+        return False
+    try:
+        return tomllib.loads(source.decode("utf-8")) == tomllib.loads(
+            packaged.decode("utf-8")
+        )
+    except (UnicodeError, tomllib.TOMLDecodeError):
+        return False
+
+
 def _validate_sdist(
     source_package: Path,
     sdist: Path,
@@ -593,7 +606,11 @@ def _validate_sdist(
                     )
             for name, data in source_rust_inputs.items():
                 member = archive.extractfile(f"{distribution_prefix}{name}")
-                if member is None or member.read() != data:
+                if member is None or not _rust_input_matches_sdist(
+                    name,
+                    data,
+                    member.read(),
+                ):
                     raise VerificationError(f"sdist Rust input differs from source: {name}")
     except VerificationError:
         raise
