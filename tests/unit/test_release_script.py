@@ -733,6 +733,8 @@ def test_build_mode_executes_one_exact_fail_fast_manylinux_container(
         "-e",
         "all_proxy",
         "-e",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "-e",
         "UV_PYTHON=/opt/python/cp310-cp310/bin/python",
         "-e",
         "UV_PROJECT_ENVIRONMENT=/tmp/troupe-venv",

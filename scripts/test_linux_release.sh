@@ -177,6 +177,7 @@ build() {
     -e https_proxy \
     -e no_proxy \
     -e all_proxy \
+    -e PYTHONDONTWRITEBYTECODE=1 \
     -e UV_PYTHON=/opt/python/cp310-cp310/bin/python \
     -e UV_PROJECT_ENVIRONMENT=/tmp/troupe-venv \
     ghcr.io/pyo3/maturin:v1.14.1 \
