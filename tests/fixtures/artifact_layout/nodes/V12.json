@@ -1,6 +1,9 @@
 {
-  "state": "planned",
-  "introduced": [],
+  "state": "realized",
+  "introduced": [
+    "scripts/test_diagnostics_e2e.sh",
+    "tests/unit/test_diagnostics_e2e_assembly.py"
+  ],
   "modified": [],
   "removed": [],
   "generated": []
