@@ -1,51 +1,51 @@
 {
   "schema_version": 1,
-  "build_sha256": "f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938",
+  "build_sha256": "e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e",
   "html": {
     "url": "./",
     "mime": "text/html; charset=utf-8",
     "cache_control": "no-cache",
-    "sha256": "7735bf309f7288090100a53209a1acf68e2886751a1cc8b857572aaeb5eb6ada",
+    "sha256": "25f8239da8293020ede57ae6444689b3d74d2ae3ed8505a3d3445683cd959cd3",
     "bytes": 527,
-    "content": "<!DOCTYPE html><html lang=\"en\"><head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Troupe diagnostics</title>\n    <script type=\"module\" crossorigin=\"\" src=\"./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js\"></script>\n    <link rel=\"stylesheet\" crossorigin=\"\" href=\"./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css\">\n  </head>\n  <body>\n    <div id=\"app\"></div>\n  \n\n</body></html>\n"
+    "content": "<!DOCTYPE html><html lang=\"en\"><head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Troupe diagnostics</title>\n    <script type=\"module\" crossorigin=\"\" src=\"./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js\"></script>\n    <link rel=\"stylesheet\" crossorigin=\"\" href=\"./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css\">\n  </head>\n  <body>\n    <div id=\"app\"></div>\n  \n\n</body></html>\n"
   },
   "files": [
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js.raw",
-      "url": "./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js.raw",
+      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js",
       "kind": "js",
       "encoding": "raw",
       "content_encoding": null,
       "mime": "text/javascript; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "876ebd9e657fbba36e16a15937f64d83c3ace450e708c2ebd8529ae0bea7766a",
-      "bytes": 317810
+      "sha256": "e7e2b3c90b9922f27b26f33fc542de6e548d504bdfb4368fa4077f769da85127",
+      "bytes": 317826
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js.gz",
-      "url": "./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js.gz",
+      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js",
       "kind": "js",
       "encoding": "gzip",
       "content_encoding": "gzip",
       "mime": "text/javascript; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "3a6ea817bc11e794fcd4b715bd7a1c9e737bcaafc06c48bec795a42e6d2313b7",
-      "bytes": 92219
+      "sha256": "6ffe671f8025b7c992ff514af0aa51e77be7ebfce5e754834db15509a8723b42",
+      "bytes": 92227
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js.br",
-      "url": "./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.js",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js.br",
+      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js",
       "kind": "js",
       "encoding": "br",
       "content_encoding": "br",
       "mime": "text/javascript; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "cdd43508234f174fb1da3b758ec65e751f432ee37096ddb650b81babee7c9984",
-      "bytes": 78785
+      "sha256": "adbe1f7424d4c2140d0c26f6c932b9445c679d3adef1edb76ec0ea05b5b3f7ef",
+      "bytes": 78654
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css.raw",
-      "url": "./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css.raw",
+      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css",
       "kind": "css",
       "encoding": "raw",
       "content_encoding": null,
@@ -55,8 +55,8 @@
       "bytes": 29147
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css.gz",
-      "url": "./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css.gz",
+      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css",
       "kind": "css",
       "encoding": "gzip",
       "content_encoding": "gzip",
@@ -66,8 +66,8 @@
       "bytes": 5820
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css.br",
-      "url": "./assets/diagnostics-f65ccbbb9642ef0e0d9e95d750d24966253e6fb4e3258e83323478288cb4d938.css",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css.br",
+      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css",
       "kind": "css",
       "encoding": "br",
       "content_encoding": "br",
@@ -83,8 +83,8 @@
     "bytes": 9021
   },
   "budgets": {
-    "logical_uncompressed_bytes": 347484,
-    "first_load_brotli_bytes": 84480,
-    "all_embedded_bytes": 538497
+    "logical_uncompressed_bytes": 347500,
+    "first_load_brotli_bytes": 84349,
+    "all_embedded_bytes": 538390
   }
 }

@@ -90,6 +90,24 @@ function makeClient(fetch: DiagnosticFetch): ViewQueryClient {
 }
 
 describe("captured view pagination", () => {
+  it("invokes a native-style fetch with the global receiver", async () => {
+    let receiver: unknown = null;
+    const fetch = function nativeStyleFetch(
+      this: unknown,
+      input: RequestInfo | URL,
+    ): Promise<Response> {
+      receiver = this;
+      return Promise.resolve(jsonResponse(
+        new URL(input.toString()).search === "" ? catalog() : tableResponse("1", null),
+      ));
+    } as unknown as DiagnosticFetch;
+    const surface = makeClient(fetch);
+
+    await surface.loadCatalog();
+
+    expect(receiver).toBe(globalThis);
+  });
+
   it("passes an opaque cursor while retaining the exact first-page binding", async () => {
     const queryUrls: URL[] = [];
     let page = 0;

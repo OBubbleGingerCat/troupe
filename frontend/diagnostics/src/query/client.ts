@@ -589,7 +589,7 @@ export class ViewQueryClient {
     }, this.timeoutMs);
     let response: Response;
     try {
-      response = await this.fetchImpl(url, {
+      response = await this.fetchImpl.call(globalThis, url, {
         method: "GET",
         headers: { Accept: "application/json" },
         cache: "no-store",
