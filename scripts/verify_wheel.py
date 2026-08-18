@@ -40,6 +40,7 @@ sys.path.insert(0, str(SUPPORT))
 from artifact_layout import (  # noqa: E402
     POST_PLAN_EXAMPLE_CHANGES,
     expected_package_members,
+    is_generated_example_path,
     load_artifact_layout,
 )
 
@@ -469,12 +470,6 @@ def _sdist_package_prefix(names: Sequence[str]) -> str:
     return matches[0]
 
 
-def _source_example_is_generated(path: PurePosixPath) -> bool:
-    return any(part in {".troupe", "__pycache__"} for part in path.parts) or (
-        path.suffix in (".pyc", ".pyo")
-    )
-
-
 def _source_examples(source_package: Path) -> dict[str, bytes]:
     examples = source_package.parent.parent / "examples"
     try:
@@ -487,7 +482,7 @@ def _source_examples(source_package: Path) -> dict[str, bytes]:
             if not path.is_file():
                 continue
             name = path.relative_to(examples).as_posix()
-            if _source_example_is_generated(PurePosixPath(name)):
+            if is_generated_example_path(PurePosixPath(name)):
                 continue
             files[name] = path.read_bytes()
         if tuple(sorted(files)) != expected_names:

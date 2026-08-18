@@ -23,7 +23,7 @@ import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -45,6 +45,7 @@ from artifact_layout import (  # noqa: E402
     ArtifactLayoutError,
     expected_package_members,
     expected_rust_sources,
+    is_generated_example_path,
     load_artifact_layout,
     validate_repository_artifacts,
 )
@@ -643,6 +644,13 @@ def _synthetic_artifacts(
                 archive.writestr("troupe/__init__.py", wheel_wrapper)
 
     return source, sdist, wheel
+
+
+def test_generated_example_state_is_outside_the_artifact_inventory() -> None:
+    assert is_generated_example_path(
+        PurePosixPath("diagnostics/.troupe/diagnostics/runs/run/diagnostics.sqlite3")
+    )
+    assert not is_generated_example_path(PurePosixPath("diagnostics/production.py"))
 
 
 def test_runtime_package_has_exact_thin_sources() -> None:

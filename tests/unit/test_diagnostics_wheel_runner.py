@@ -319,13 +319,13 @@ def test_verifier_uses_the_realized_repository_contract() -> None:
 def test_source_example_inventory_ignores_generated_runtime_state() -> None:
     verifier = load_verifier()
 
-    assert verifier._source_example_is_generated(
+    assert verifier.is_generated_example_path(
         PurePosixPath("diagnostics/.troupe/diagnostics/runs/run/diagnostics.sqlite3")
     )
-    assert verifier._source_example_is_generated(
+    assert verifier.is_generated_example_path(
         PurePosixPath("diagnostics/__pycache__/production.cpython-313.pyc")
     )
-    assert not verifier._source_example_is_generated(
+    assert not verifier.is_generated_example_path(
         PurePosixPath("diagnostics/production.py")
     )
 

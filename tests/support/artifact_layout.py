@@ -80,6 +80,14 @@ POST_PLAN_EXAMPLE_CHANGES: Final = frozenset(
         "diagnostics/production.py",
     }
 )
+
+
+def is_generated_example_path(path: PurePosixPath) -> bool:
+    return any(part in {".troupe", "__pycache__"} for part in path.parts) or (
+        path.suffix in {".pyc", ".pyo"}
+    )
+
+
 PLAN_INDEX_ROW_RE: Final = re.compile(
     r"\| (?P<node>[A-Z][0-9]{2}) \| .*? \| .*? \| [^|]+ \|$"
 )
@@ -554,11 +562,14 @@ def validate_repository_artifacts(repository_root: Path, layout: ArtifactLayout)
         if actual != snapshot.data:
             raise ArtifactLayoutError(f"baseline package file was rewritten: {name}")
 
-    actual_examples = {
-        path.relative_to(root / "examples").as_posix(): path.read_bytes()
-        for path in (root / "examples").rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
-    }
+    actual_examples = {}
+    for path in (root / "examples").rglob("*"):
+        if not path.is_file():
+            continue
+        relative = PurePosixPath(path.relative_to(root / "examples").as_posix())
+        if is_generated_example_path(relative):
+            continue
+        actual_examples[relative.as_posix()] = path.read_bytes()
     expected_example_names = set(layout.base.examples)
     for node_id in layout.node_ids:
         fragment = layout.fragments[node_id]
