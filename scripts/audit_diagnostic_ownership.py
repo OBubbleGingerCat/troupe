@@ -79,6 +79,21 @@ ASSEMBLY_NODES: Final = frozenset({"P04", "T02", "H04", "D07", "W15", "V12", "O0
 SEAM_NODES: Final = frozenset({"F04", "F05", "F06"})
 REMOVED_PLAN_PATHS: Final = {"rust/src/application/loader.rs": "L00"}
 POST_PLAN_CHANGES: Final = {
+    "examples/README.md": (
+        "M",
+        "23e01dae100ea1960624d66daad719f7e6f21aea",
+        "99c765f96e128d3502c78d8ef0b95fee7c3b98b8abdef96b187493f47696a25e",
+    ),
+    "examples/diagnostics/__init__.py": (
+        "A",
+        "23e01dae100ea1960624d66daad719f7e6f21aea",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ),
+    "examples/diagnostics/production.py": (
+        "A",
+        "23e01dae100ea1960624d66daad719f7e6f21aea",
+        "f67b9d5f736cf9fec087dc1ab2214906343d53b9d5fe95568bbee7bde0891f4c",
+    ),
     "rust/crates/troupe-agent-runtime/src/launch/process.rs": (
         "M",
         "486243290beefc3eba16876de094dc04b85e4e01",
