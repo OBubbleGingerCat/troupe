@@ -12,8 +12,8 @@ use troupe_diagnostics_perfetto::{
         NodeKind, NodeObservation, PublicationCancellation, PublicationFailure, PublicationReport,
         PublicationState, TraceProducerFuture, TraceStreamProducer, publish_atomic_trace,
     },
-    collect::{PERFETTO_EXPORTER_SCHEMA_VERSION, TRACE_CONTENT_WARNING},
-    dump::{DumpError as PerfettoDumpError, dump_captured_prefix},
+    collect::{PERFETTO_EXPORTER_SCHEMA_VERSION, ProjectionMetadata, TRACE_CONTENT_WARNING},
+    dump::{DumpError as PerfettoDumpError, TraceBodyValidator, dump_captured_prefix_with_version},
 };
 use troupe_diagnostics_runtime::{
     query::reader::CapturedEventSource,
@@ -160,9 +160,14 @@ impl TraceStreamProducer for LocalDumpProducer<'_, '_> {
         writer: &'operation mut (dyn AsyncWrite + Unpin),
     ) -> TraceProducerFuture<'operation, Self::Summary, Self::Error> {
         Box::pin(async move {
-            let summary = dump_captured_prefix(self.source, writer, self.through)
-                .await
-                .map_err(local_dump_error)?;
+            let summary = dump_captured_prefix_with_version(
+                self.source,
+                writer,
+                self.through,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
+            .map_err(local_dump_error)?;
             Ok(DumpSuccess {
                 run_id: self.source.metadata().run_id(),
                 captured_watermark: summary.captured_watermark(),
@@ -217,6 +222,7 @@ impl RemoteDumpProducer {
         }
         let metadata =
             validate_remote_metadata(response.headers(), self.client.run_id(), self.through)?;
+        let mut trace_validator = TraceBodyValidator::new(metadata.trace_metadata());
         let mut received_body = false;
         loop {
             let chunk = response
@@ -238,6 +244,9 @@ impl RemoteDumpProducer {
                     ),
                 ));
             }
+            trace_validator
+                .push(&chunk)
+                .map_err(remote_trace_validation_error)?;
             writer
                 .write_all(&chunk)
                 .await
@@ -250,6 +259,9 @@ impl RemoteDumpProducer {
                 "dump endpoint returned an empty trace body",
             ));
         }
+        trace_validator
+            .finish()
+            .map_err(remote_trace_validation_error)?;
         self.client
             .revalidate_identity()
             .await
@@ -280,12 +292,33 @@ fn remote_error(code: &'static str, error: impl fmt::Display) -> TraceSourceErro
     TraceSourceError::new(code, error.to_string())
 }
 
+fn remote_trace_validation_error(
+    error: troupe_diagnostics_perfetto::dump::TraceBodyValidationError,
+) -> TraceSourceError {
+    TraceSourceError::new(error.code(), error.to_string())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteMetadata {
     pub(crate) run_id: CanonicalUuid,
     pub(crate) captured_watermark: SchemaU64,
     pub(crate) exported_through: SchemaU64,
+    troupe_version: String,
+    production_outcome: Option<String>,
+    clean_shutdown: Option<bool>,
     content_warning: String,
+}
+
+impl RemoteMetadata {
+    fn trace_metadata(&self) -> ProjectionMetadata {
+        ProjectionMetadata::new(
+            self.run_id,
+            self.captured_watermark,
+            self.exported_through,
+            self.troupe_version.clone(),
+        )
+        .with_completion(self.production_outcome.clone(), self.clean_shutdown)
+    }
 }
 
 pub(crate) fn validate_remote_metadata(
@@ -350,10 +383,17 @@ pub(crate) fn validate_remote_metadata(
     if content_warning != TRACE_CONTENT_WARNING {
         return metadata_error("content warning differs from the supported exporter contract");
     }
+    let (production_outcome, clean_shutdown) = match (production_outcome, clean_shutdown) {
+        ("unavailable", "unavailable") => (None, None),
+        (outcome, clean) => (Some(outcome.to_owned()), Some(clean == "true")),
+    };
     Ok(RemoteMetadata {
         run_id,
         captured_watermark,
         exported_through,
+        troupe_version: troupe_version.to_owned(),
+        production_outcome,
+        clean_shutdown,
         content_warning: content_warning.to_owned(),
     })
 }

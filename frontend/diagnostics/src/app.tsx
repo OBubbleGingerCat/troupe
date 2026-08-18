@@ -131,6 +131,7 @@ type QueryPresentation =
 
 const IDLE_QUERY: QueryPresentation = { status: "idle", view_id: null };
 const RUN_ORIGIN_NS = "0" as U64String;
+const MAX_U64 = (2n ** 64n) - 1n;
 
 function localError(error: unknown): { readonly code: string; readonly message: string } {
   if (error instanceof Error) {
@@ -268,15 +269,30 @@ function querySelectionScope(
   };
 }
 
+function capturedElapsedEndNs(
+  observedElapsedNs: U64String,
+  capturedWatermark: U64String,
+): U64String | null {
+  if (capturedWatermark === "0") {
+    return "0" as U64String;
+  }
+  const observed = BigInt(observedElapsedNs);
+  return observed === MAX_U64 ? null : ((observed + 1n).toString() as U64String);
+}
+
 function queryContext(state: DiagnosticState, events: readonly DiagnosticEvent[]): ViewQueryContext {
   const edge = presentedLiveEdge(state);
+  const capturedEnd = capturedElapsedEndNs(
+    edge.observed_elapsed_ns,
+    state.cursor.committed_watermark,
+  ) ?? edge.observed_elapsed_ns;
   const viewport = state.presentation.viewport ?? {
     start_ns: RUN_ORIGIN_NS,
-    end_ns: edge.observed_elapsed_ns,
+    end_ns: capturedEnd,
   };
   return {
     captured_watermark: state.cursor.committed_watermark,
-    captured_elapsed_end_ns: edge.observed_elapsed_ns,
+    captured_elapsed_end_ns: capturedEnd,
     selection: state.presentation.selection,
     selected_scope: querySelectionScope(state, events),
     viewport,
@@ -662,6 +678,7 @@ interface ViewsPanelProps {
   readonly catalog: CatalogPresentation;
   readonly context: ViewQueryContext;
   readonly contextKey: string;
+  readonly queryReady: boolean;
   readonly selection: TimeSeriesSelection | null;
   readonly onTimeSelectionChange: (selection: TimeSeriesSelection | null) => void;
 }
@@ -670,6 +687,7 @@ function ViewsPanel({
   catalog,
   context,
   contextKey,
+  queryReady,
   selection,
   onTimeSelectionChange,
 }: ViewsPanelProps): JSX.Element {
@@ -696,6 +714,12 @@ function ViewsPanel({
       setQuery(IDLE_QUERY);
       return;
     }
+    // A control frame can announce a newer committed head before its events
+    // reach the live projection. Keep the last coherent result until the
+    // delivered projection catches up (and while presentation is paused).
+    if (!queryReady) {
+      return;
+    }
     const viewId = activeEntry.id;
     let current = true;
     setQuery({ status: "loading", view_id: viewId });
@@ -711,7 +735,7 @@ function ViewsPanel({
     return () => {
       current = false;
     };
-  }, [activeEntry, catalog, contextKey, retryGeneration]);
+  }, [activeEntry, catalog, contextKey, queryReady, retryGeneration]);
 
   if (catalog.status === "idle" || catalog.status === "loading") {
     return <section aria-label="Compiled views"><p role="status">Loading compiled views.</p></section>;
@@ -873,6 +897,11 @@ export function App({
   const events = boundedEvents(state);
   const context = queryContext(state, events);
   const contextKey = contextIdentity(context);
+  const edge = presentedLiveEdge(state);
+  const queryReady = !state.pause.paused
+    && state.delivery_issue === null
+    && state.cursor.delivered_through === state.cursor.committed_watermark
+    && capturedElapsedEndNs(edge.observed_elapsed_ns, state.cursor.committed_watermark) !== null;
   const name = productionName ?? (live.connection === "archive" ? "Archived production" : "Production");
   let panel: JSX.Element;
   switch (section) {
@@ -902,6 +931,7 @@ export function App({
           catalog={catalog}
           context={context}
           contextKey={contextKey}
+          queryReady={queryReady}
           selection={state.presentation.viewport}
           onTimeSelectionChange={changeTimeSelection}
         />

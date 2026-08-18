@@ -169,6 +169,19 @@ where
         self.finalize_run_with_hook(ended_at, outcome, &mut ())
     }
 
+    pub fn finalize_run_with_cancellation<F>(
+        &mut self,
+        ended_at: &str,
+        outcome: FinalProductionOutcome,
+        should_cancel: F,
+    ) -> Result<SortableU64Key, WriterError>
+    where
+        F: Fn() -> bool,
+    {
+        let mut hook = CancellationHook { should_cancel };
+        self.finalize_run_with_hook(ended_at, outcome, &mut hook)
+    }
+
     pub fn finalize_run_with_hook(
         &mut self,
         ended_at: &str,
@@ -251,6 +264,23 @@ where
             return Err(WriterError::FinalMetadataMismatch);
         }
         Ok(final_watermark)
+    }
+}
+
+struct CancellationHook<F> {
+    should_cancel: F,
+}
+
+impl<F> WriterTransactionHook for CancellationHook<F>
+where
+    F: Fn() -> bool,
+{
+    fn before_commit(&mut self, _transaction: &Transaction<'_>) -> rusqlite::Result<()> {
+        if (self.should_cancel)() {
+            Err(rusqlite::Error::InvalidQuery)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -792,7 +822,14 @@ impl std::error::Error for WriterError {
 
 #[cfg(test)]
 mod final_metadata_tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use troupe_diagnostics_core::id::CanonicalUuid;
     use uuid::Uuid;
@@ -900,5 +937,23 @@ mod final_metadata_tests {
         writer
             .finalize_run("2026-08-16T09:01:01Z", FinalProductionOutcome::Failed)
             .expect("retry final metadata after rollback");
+    }
+
+    #[test]
+    fn cancellation_before_commit_rolls_back_terminal_metadata() {
+        let directory = TestDirectory::new();
+        let mut writer = writer(&directory);
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let error = writer
+            .finalize_run_with_cancellation(
+                "2026-08-16T09:01:00Z",
+                FinalProductionOutcome::Failed,
+                || cancelled.load(Ordering::Acquire),
+            )
+            .expect_err("cancelled finalization must not commit");
+
+        assert_eq!(error.code(), WriterErrorCode::BeforeCommit);
+        assert_eq!(persisted_terminal(&writer), (None, None, 0));
+        assert!(!writer.store().metadata().clean_shutdown());
     }
 }

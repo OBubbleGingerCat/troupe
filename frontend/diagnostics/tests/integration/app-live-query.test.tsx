@@ -147,8 +147,12 @@ function liveState(): LiveDiagnosticsState {
 }
 
 class FakeLiveController implements DiagnosticsLiveController {
-  state = liveState();
+  state: LiveDiagnosticsState;
   readonly listeners = new Set<(state: LiveDiagnosticsState) => void>();
+
+  constructor(initialState: LiveDiagnosticsState = liveState()) {
+    this.state = initialState;
+  }
 
   async start(): Promise<void> {}
   stop(): void {}
@@ -335,6 +339,143 @@ describe("application live and compiled-view assembly", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Queue depth" })).toBeInTheDocument());
     expect(document.querySelector(".timeseries-renderer")).toBeInTheDocument();
     expect(lastQuery(client)?.view_id).toBe("queue_depth");
+  });
+
+  it("waits for replayed events before issuing a view query for an announced head", async () => {
+    const controller = new FakeLiveController();
+    const client = new FakeViewClient();
+    render(
+      <App
+        liveController={controller}
+        viewClientFactory={() => client}
+        productionName="replay-bound-production"
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    await waitFor(() => expect(client.queryCalls).toHaveLength(1));
+
+    controller.dispatch({ type: "watermark_observed", through_sequence: decodeU64("7") });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.queryCalls).toHaveLength(1);
+
+    controller.dispatch({ type: "event_received", event: span(6, "cue.execution", scope("cue-a")) });
+    controller.dispatch({ type: "event_received", event: span(7, "cue.execution", scope("cue-a")) });
+    await waitFor(() => expect(client.queryCalls).toHaveLength(2));
+    expect(lastQuery(client)?.context).toMatchObject({
+      captured_watermark: "7",
+      captured_elapsed_end_ns: "71",
+      viewport: { start_ns: "0", end_ns: "71" },
+    });
+  });
+
+  it("defers a view query when the captured elapsed end would overflow u64", async () => {
+    const controller = new FakeLiveController();
+    const client = new FakeViewClient();
+    render(
+      <App
+        liveController={controller}
+        viewClientFactory={() => client}
+        productionName="elapsed-boundary-production"
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    await waitFor(() => expect(client.queryCalls).toHaveLength(1));
+
+    controller.dispatch({
+      type: "event_received",
+      event: {
+        ...span(6, "cue.execution", scope("cue-a")),
+        elapsed_ns: decodeU64("18446744073709551615"),
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.queryCalls).toHaveLength(1);
+  });
+
+  it("keeps an empty Run's right-open captured end at zero", async () => {
+    const controller = new FakeLiveController({
+      ...liveState(),
+      diagnostics: createDiagnosticState(RUN_ID, decodeU64("0")),
+    });
+    const client = new FakeViewClient();
+    render(
+      <App
+        liveController={controller}
+        viewClientFactory={() => client}
+        productionName="empty-production"
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    await waitFor(() => expect(client.queryCalls).toHaveLength(1));
+    expect(lastQuery(client)?.context).toMatchObject({
+      captured_watermark: "0",
+      captured_elapsed_end_ns: "0",
+      viewport: { start_ns: "0", end_ns: "0" },
+    });
+  });
+
+  it("advances a nonempty zero-timestamp Run to the first right-open nanosecond", async () => {
+    const controller = new FakeLiveController({
+      ...liveState(),
+      diagnostics: createDiagnosticState(RUN_ID, decodeU64("0")),
+    });
+    const client = new FakeViewClient();
+    render(
+      <App
+        liveController={controller}
+        viewClientFactory={() => client}
+        productionName="zero-timestamp-production"
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    await waitFor(() => expect(client.queryCalls).toHaveLength(1));
+
+    controller.dispatch({
+      type: "event_received",
+      event: {
+        ...span(1, "cue.execution", scope("cue-a")),
+        elapsed_ns: decodeU64("0"),
+      },
+    });
+    controller.dispatch({ type: "watermark_observed", through_sequence: decodeU64("1") });
+    await waitFor(() => expect(client.queryCalls).toHaveLength(2));
+    expect(lastQuery(client)?.context).toMatchObject({
+      captured_watermark: "1",
+      captured_elapsed_end_ns: "1",
+      viewport: { start_ns: "0", end_ns: "1" },
+    });
+  });
+
+  it("keeps the current view result frozen during pause and refreshes after resume", async () => {
+    const controller = new FakeLiveController();
+    const client = new FakeViewClient();
+    render(
+      <App
+        liveController={controller}
+        viewClientFactory={() => client}
+        productionName="paused-production"
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Views" }));
+    await waitFor(() => expect(client.queryCalls).toHaveLength(1));
+
+    controller.dispatch({ type: "pause" });
+    controller.dispatch({ type: "watermark_observed", through_sequence: decodeU64("9") });
+    for (let sequence = 6; sequence <= 9; sequence += 1) {
+      controller.dispatch({
+        type: "event_received",
+        event: span(sequence, "cue.execution", scope("cue-a")),
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.queryCalls).toHaveLength(1);
+
+    controller.dispatch({ type: "resume" });
+    await waitFor(() => expect(client.queryCalls).toHaveLength(2));
+    expect(lastQuery(client)?.context).toMatchObject({
+      captured_watermark: "9",
+      captured_elapsed_end_ns: "91",
+    });
   });
 
   it("keeps two cues of one Actor distinct across tree, timeline, transcript, and query binding", async () => {

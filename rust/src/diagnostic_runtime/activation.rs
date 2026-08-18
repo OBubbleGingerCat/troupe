@@ -20,7 +20,7 @@ use troupe_diagnostics_core::{
 };
 use troupe_diagnostics_perfetto::{
     collect::{PERFETTO_EXPORTER_SCHEMA_VERSION, TRACE_CONTENT_WARNING},
-    dump::dump_captured_prefix,
+    dump::dump_captured_prefix_with_version,
 };
 use troupe_diagnostics_runtime::{
     query::{reader::CapturedEventSource, views::ViewQueryEngine},
@@ -481,10 +481,15 @@ impl CapturedPrefixDumpProducer for RuntimePerfettoDumpProducer {
         through: Option<SchemaU64>,
     ) -> DumpProducerFuture<'operation> {
         Box::pin(async move {
-            dump_captured_prefix(source, writer, through)
-                .await
-                .map(|_summary| ())
-                .map_err(|error| DumpProducerError::new("perfetto_dump_failed", error.to_string()))
+            dump_captured_prefix_with_version(
+                source,
+                writer,
+                through,
+                self.metadata.troupe_version(),
+            )
+            .await
+            .map(|_summary| ())
+            .map_err(|error| DumpProducerError::new("perfetto_dump_failed", error.to_string()))
         })
     }
 }

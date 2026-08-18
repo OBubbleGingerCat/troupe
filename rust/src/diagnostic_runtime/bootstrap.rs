@@ -5,7 +5,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
     thread::{self, JoinHandle, Thread},
     time::{Duration, Instant},
@@ -63,6 +64,7 @@ pub(crate) use super::shutdown::{CleanupFailure, DiagnosticShutdownError};
 use super::shutdown::{OrderedShutdownResources, ShutdownMetadata, run_ordered_shutdown};
 
 const WRITER_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const WRITER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 pub(crate) type DurableDiagnosticHub = ProductionDiagnosticHub<DurableAdmission>;
 type RouteFactory = Box<
@@ -981,6 +983,12 @@ fn bootstrap_root<C: BootstrapCheckpoint>(
         coordinated_quota.clone(),
         quota_failures,
         config.writer_deadlines,
+        Arc::clone(
+            state
+                .active_lease
+                .as_ref()
+                .expect("active lease was installed"),
+        ),
         commit_observer,
     );
     let writer = match writer {
@@ -1160,6 +1168,9 @@ struct WriterSupervisor {
     command_sender: Option<SyncSender<WriterCommand>>,
     thread: Option<JoinHandle<Result<(), DiagnosticCoreFailure>>>,
     thread_handle: Thread,
+    shutdown_drain_timeout: Duration,
+    shutdown_deadline: Option<Instant>,
+    shutdown_abandoned: Arc<AtomicBool>,
 }
 
 enum WriterCommand {
@@ -1190,6 +1201,7 @@ impl WriterSupervisor {
         quota: CoordinatedRunQuota,
         quota_failures: QuotaFailureReceiver,
         deadlines: WriterDeadlines,
+        active_lease: Arc<ActiveArchiveLease>,
         downstream: Box<dyn CommitObserver + Send>,
     ) -> Result<Self, BootstrapError> {
         let writer_run_id = store.metadata().run_id();
@@ -1211,10 +1223,13 @@ impl WriterSupervisor {
         let (failure_sender, failure_receiver) = mpsc::sync_channel(1);
         let (command_sender, command_receiver) = mpsc::sync_channel(1);
         let thread_ingress = ingress.clone();
+        let shutdown_abandoned = Arc::new(AtomicBool::new(false));
+        let thread_shutdown_abandoned = Arc::clone(&shutdown_abandoned);
         let thread = thread::Builder::new()
             .name("troupe-diagnostic-writer".to_owned())
             .spawn(move || {
                 let _activity = WriterThreadActivity::started(writer_run_id);
+                let _active_lease = active_lease;
                 let failure_ingress = thread_ingress.clone();
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     run_writer(
@@ -1225,6 +1240,7 @@ impl WriterSupervisor {
                         quota_failures,
                         initial_supervisor,
                         thread_progress,
+                        thread_shutdown_abandoned,
                         command_receiver,
                         ready_sender,
                     )
@@ -1271,6 +1287,9 @@ impl WriterSupervisor {
             command_sender: Some(command_sender),
             thread: Some(thread),
             thread_handle,
+            shutdown_drain_timeout: deadlines.shutdown_drain_timeout(),
+            shutdown_deadline: None,
+            shutdown_abandoned,
         })
     }
 
@@ -1294,32 +1313,43 @@ impl WriterSupervisor {
         ended_at: &str,
         outcome: FinalProductionOutcome,
     ) -> Result<SortableU64Key, CleanupFailure> {
+        let deadline = self.ensure_shutdown_deadline();
         let (reply, result) = mpsc::sync_channel(1);
         let command = WriterCommand::Finalize {
             ended_at: ended_at.to_owned(),
             outcome,
             reply,
         };
-        self.command_sender
+        let command_result = self
+            .command_sender
             .as_ref()
-            .expect("a live writer supervisor owns its command sender")
-            .send(command)
-            .map_err(|_| {
-                CleanupFailure::new(
-                    "writer",
-                    "writer_finalize_command_failed",
-                    "diagnostic writer is not accepting finalization",
-                )
-            })?;
+            .expect("a live writer supervisor owns its command sender");
+        if let Err(error) = send_writer_command_until(command_result, command, deadline) {
+            self.abandon_thread();
+            return Err(error);
+        }
         self.thread_handle.unpark();
-        match result.recv() {
+        match result.recv_timeout(remaining_until(deadline)) {
             Ok(Ok(watermark)) => Ok(watermark),
             Ok(Err(error)) => Err(CleanupFailure::new("writer", error.code(), error.message())),
-            Err(_) => Err(CleanupFailure::new(
-                "writer",
-                "writer_finalize_result_unavailable",
-                "diagnostic writer exited without a finalization result",
-            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.abandon_thread();
+                Err(writer_shutdown_timeout_failure())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let failure = self.failure_receiver.try_recv().ok();
+                self.abandon_thread();
+                match failure {
+                    Some(error) => {
+                        Err(CleanupFailure::new("writer", error.code(), error.message()))
+                    }
+                    None => Err(CleanupFailure::new(
+                        "writer",
+                        "writer_finalize_result_unavailable",
+                        "diagnostic writer exited without a finalization result",
+                    )),
+                }
+            }
         }
     }
 
@@ -1346,6 +1376,7 @@ impl WriterSupervisor {
     }
 
     fn join_after(&mut self, command: WriterCommand, seal_ingress: bool) -> Vec<CleanupFailure> {
+        let deadline = self.ensure_shutdown_deadline();
         let Some(thread) = self.thread.take() else {
             return Vec::new();
         };
@@ -1357,23 +1388,122 @@ impl WriterSupervisor {
                 error,
             ));
         }
-        if let Some(sender) = self.command_sender.take() {
-            let _ = sender.send(command);
+        let command_result = self
+            .command_sender
+            .take()
+            .map(|sender| send_writer_command_until(&sender, command, deadline));
+        if let Some(Err(error)) = command_result {
+            failures.push(error);
+            self.shutdown_abandoned.store(true, Ordering::Release);
+            drop(thread);
+            return failures;
         }
         self.thread_handle.unpark();
-        match thread.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+        match join_writer_thread_until(thread, deadline) {
+            Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(error))) => {
                 failures.push(CleanupFailure::new("writer", error.code(), error.message()))
             }
-            Err(_) => failures.push(CleanupFailure::new(
+            Some(Err(_)) => failures.push(CleanupFailure::new(
                 "writer",
                 "writer_join_panicked",
                 "diagnostic writer thread panicked while joining",
             )),
+            None => {
+                self.shutdown_abandoned.store(true, Ordering::Release);
+                failures.push(writer_shutdown_timeout_failure());
+            }
         }
         failures
     }
+
+    fn ensure_shutdown_deadline(&mut self) -> Instant {
+        *self.shutdown_deadline.get_or_insert_with(|| {
+            Instant::now()
+                .checked_add(self.shutdown_drain_timeout)
+                .unwrap_or_else(Instant::now)
+        })
+    }
+
+    fn abandon_thread(&mut self) {
+        self.shutdown_abandoned.store(true, Ordering::Release);
+        self.command_sender.take();
+        self.thread_handle.unpark();
+        drop(self.thread.take());
+    }
+}
+
+fn remaining_until(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+fn writer_shutdown_timeout_failure() -> CleanupFailure {
+    CleanupFailure::new(
+        "writer",
+        "writer_shutdown_drain_timed_out",
+        "diagnostic writer did not finish within the configured shutdown drain timeout",
+    )
+}
+
+fn writer_shutdown_core_failure() -> DiagnosticCoreFailure {
+    DiagnosticCoreFailure::new(
+        "writer",
+        "drain",
+        "writer_shutdown_drain_timed_out",
+        "diagnostic writer shutdown drain exceeded its configured deadline",
+    )
+}
+
+fn send_writer_command_until(
+    sender: &SyncSender<WriterCommand>,
+    mut command: WriterCommand,
+    deadline: Instant,
+) -> Result<(), CleanupFailure> {
+    loop {
+        match sender.try_send(command) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(CleanupFailure::new(
+                    "writer",
+                    "writer_shutdown_command_failed",
+                    "diagnostic writer is not accepting shutdown commands",
+                ));
+            }
+            Err(TrySendError::Full(returned)) => {
+                command = returned;
+                let remaining = remaining_until(deadline);
+                if remaining.is_zero() {
+                    return Err(writer_shutdown_timeout_failure());
+                }
+                thread::sleep(WRITER_SHUTDOWN_POLL_INTERVAL.min(remaining));
+            }
+        }
+    }
+}
+
+fn join_writer_thread_until<T: Send + 'static>(
+    thread: JoinHandle<T>,
+    deadline: Instant,
+) -> Option<thread::Result<T>> {
+    let mut thread = Some(thread);
+    while !thread
+        .as_ref()
+        .expect("writer thread handle is retained while waiting")
+        .is_finished()
+    {
+        let remaining = remaining_until(deadline);
+        if remaining.is_zero() {
+            drop(thread.take());
+            return None;
+        }
+        thread::sleep(WRITER_SHUTDOWN_POLL_INTERVAL.min(remaining));
+    }
+    Some(
+        thread
+            .take()
+            .expect("finished writer thread handle is retained")
+            .join(),
+    )
 }
 
 impl Drop for WriterSupervisor {
@@ -1440,6 +1570,7 @@ fn run_writer(
     quota_failures: QuotaFailureReceiver,
     mut supervisor: WriterProgressSupervisor,
     progress: Arc<Mutex<WriterProgressStatus>>,
+    shutdown_abandoned: Arc<AtomicBool>,
     command_receiver: Receiver<WriterCommand>,
     ready_sender: SyncSender<()>,
 ) -> Result<(), DiagnosticCoreFailure> {
@@ -1567,17 +1698,30 @@ fn run_writer(
                     outcome,
                     reply,
                 } => {
-                    let final_watermark = match writer.finalize_run(&ended_at, outcome) {
-                        Ok(watermark) => watermark,
-                        Err(error) => {
-                            let failure = DiagnosticCoreFailure::writer(
-                                error.to_string(),
-                                error.code().as_str(),
-                            );
-                            let _ = reply.send(Err(failure.clone()));
-                            return Err(failure);
-                        }
-                    };
+                    if shutdown_abandoned.load(Ordering::Acquire) {
+                        let failure = writer_shutdown_core_failure();
+                        let _ = reply.send(Err(failure.clone()));
+                        return Err(failure);
+                    }
+                    let final_watermark =
+                        match writer.finalize_run_with_cancellation(&ended_at, outcome, || {
+                            shutdown_abandoned.load(Ordering::Acquire)
+                        }) {
+                            Ok(watermark) => watermark,
+                            Err(error) => {
+                                if shutdown_abandoned.load(Ordering::Acquire) {
+                                    let failure = writer_shutdown_core_failure();
+                                    let _ = reply.send(Err(failure.clone()));
+                                    return Err(failure);
+                                }
+                                let failure = DiagnosticCoreFailure::writer(
+                                    error.to_string(),
+                                    error.code().as_str(),
+                                );
+                                let _ = reply.send(Err(failure.clone()));
+                                return Err(failure);
+                            }
+                        };
                     if let Err(error) = quota.post_growth_measurement() {
                         let failure = DiagnosticCoreFailure::new(
                             "quota",
@@ -1900,6 +2044,22 @@ mod tests {
         }
     }
 
+    struct BlockingCommitObserver {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl CommitObserver for BlockingCommitObserver {
+        fn committed(&mut self, _notification: CommitNotification) {
+            self.entered
+                .send(())
+                .expect("shutdown test is still listening");
+            self.release
+                .recv()
+                .expect("shutdown test releases the commit observer");
+        }
+    }
+
     fn components() -> BootstrapComponents {
         BootstrapComponents::new(Box::new(IgnoreLive), Box::new(()), |_| Ok(Vec::new()))
     }
@@ -1924,6 +2084,96 @@ mod tests {
 
     fn config() -> BootstrapConfig {
         BootstrapConfig::new(STARTED_AT, "test-bootstrap-config").with_bind("127.0.0.1", 0)
+    }
+
+    #[test]
+    fn writer_shutdown_wait_and_command_delivery_are_wall_clock_bounded() {
+        let worker = thread::spawn(|| thread::sleep(Duration::from_millis(100)));
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(5);
+        assert!(join_writer_thread_until(worker, deadline).is_none());
+        assert!(started.elapsed() < Duration::from_millis(250));
+
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(WriterCommand::Abort)
+            .expect("fill the shutdown command slot");
+        let error = send_writer_command_until(
+            &sender,
+            WriterCommand::Close,
+            Instant::now() + Duration::from_millis(5),
+        )
+        .expect_err("a full shutdown channel must time out");
+        assert_eq!(error.code(), "writer_shutdown_drain_timed_out");
+    }
+
+    #[test]
+    fn shutdown_timeout_detaches_only_after_preserving_writer_lease_and_cancelling_finalize() {
+        let _test_guard = test_lock();
+        let root = TestRoot::new();
+        let run_id = CanonicalUuid::new(Uuid::new_v4());
+        let run_directory = root
+            .path()
+            .join(".troupe/diagnostics/runs")
+            .join(run_id.to_string());
+        let (entered_sender, entered_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let components = BootstrapComponents::new(
+            Box::new(IgnoreLive),
+            Box::new(BlockingCommitObserver {
+                entered: entered_sender,
+                release: release_receiver,
+            }),
+            |_| Ok(Vec::new()),
+        );
+        let deadlines = WriterDeadlines::new(Duration::from_secs(1), Duration::from_millis(20))
+            .expect("valid test deadlines");
+        let mut checkpoint = NoopCheckpoint;
+        let guard = bootstrap_root(
+            root.path(),
+            run_id,
+            config().with_writer_deadlines(deadlines),
+            components,
+            &mut checkpoint,
+        )
+        .expect("bootstrap diagnostics");
+        guard
+            .hub()
+            .admit(counter_candidate(1), None)
+            .expect("admit blocking observer event");
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer reached the blocking observer");
+
+        let error = guard
+            .shutdown_clean(ShutdownMetadata::new(
+                "2026-08-16T09:31:00Z",
+                FinalProductionOutcome::Completed,
+            ))
+            .expect_err("blocked writer must hit the shutdown deadline");
+        assert!(
+            error
+                .failures()
+                .iter()
+                .any(|failure| failure.code() == "writer_shutdown_drain_timed_out")
+        );
+        let contention = SharedArchiveLease::acquire(&run_directory)
+            .expect_err("detached writer must retain the active lease");
+        assert_eq!(contention.code(), ArchiveLeaseErrorCode::Contended);
+
+        release_sender
+            .send(())
+            .expect("release the detached writer observer");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while writer_thread_active(run_id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!writer_thread_active(run_id));
+        let _lease = SharedArchiveLease::acquire(&run_directory)
+            .expect("writer released the active lease after exiting");
+        let store = DiagnosticStore::open_validated(&run_directory, run_id)
+            .expect("timed-out archive remains readable");
+        assert!(!store.metadata().clean_shutdown());
     }
 
     struct TestRoot(PathBuf);

@@ -22,6 +22,7 @@ use crate::{
 pub const PERFETTO_EXPORTER_SCHEMA_VERSION: u8 = 1;
 pub const TRACE_CONTENT_WARNING: &str =
     "trace may contain sensitive diagnostic metadata and user-provided attributes";
+pub(crate) const TRACE_METADATA_PREFIX: &str = "Troupe metadata | ";
 pub const STRUCTURAL_INDEX_ENTRY_LIMIT: u64 = 1_000_000;
 pub const STRUCTURAL_INDEX_OWNED_PAYLOAD_LIMIT: u64 = 64 * 1024 * 1024;
 
@@ -246,14 +247,14 @@ impl ProjectionMetadata {
         format!("Troupe Production {}", self.run_id)
     }
 
-    fn metadata_track_name(&self) -> String {
+    pub(crate) fn metadata_track_name(&self) -> String {
         let outcome = self.production_outcome.as_deref().unwrap_or("unavailable");
         let clean_shutdown = self
             .clean_shutdown
             .map(|value| if value { "true" } else { "false" })
             .unwrap_or("unavailable");
         format!(
-            "Troupe metadata | exporter_schema={} | event_schema={} | run_id={} | captured_watermark={} | exported_through={} | troupe_version={} | outcome={} | clean_shutdown={} | content_warning={}",
+            "{TRACE_METADATA_PREFIX}exporter_schema={} | event_schema={} | run_id={} | captured_watermark={} | exported_through={} | troupe_version={} | outcome={} | clean_shutdown={} | content_warning={}",
             PERFETTO_EXPORTER_SCHEMA_VERSION,
             troupe_diagnostics_core::event::EVENT_SCHEMA_VERSION,
             self.run_id,

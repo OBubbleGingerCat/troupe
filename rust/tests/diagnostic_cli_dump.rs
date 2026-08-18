@@ -30,6 +30,7 @@ use troupe_diagnostics_core::{
 use troupe_diagnostics_perfetto::collect::{
     PERFETTO_EXPORTER_SCHEMA_VERSION, TRACE_CONTENT_WARNING,
 };
+use troupe_diagnostics_perfetto::dump::dump_captured_prefix_with_version;
 use troupe_diagnostics_runtime::{
     archive::lease::{ActiveArchiveLease, ArchiveLeaseErrorCode, CleanupArchiveLease},
     query::reader::CapturedEventSource,
@@ -463,12 +464,31 @@ async fn sigint_before_publication_reports_130_and_leaves_no_partial_target() {
 #[derive(Clone)]
 struct FixedProducer {
     metadata: DumpProducerMetadata,
+    mode: FixedProducerMode,
     first_write_completed: Arc<AtomicBool>,
-    pause_after_first_write: bool,
+}
+
+#[derive(Clone)]
+enum FixedProducerMode {
+    Real,
+    Bytes(Vec<u8>),
+    PauseAfterMatchingMetadata,
 }
 
 impl FixedProducer {
     fn new(pause_after_first_write: bool) -> Self {
+        Self::with_mode(if pause_after_first_write {
+            FixedProducerMode::PauseAfterMatchingMetadata
+        } else {
+            FixedProducerMode::Real
+        })
+    }
+
+    fn with_body(body: Vec<u8>) -> Self {
+        Self::with_mode(FixedProducerMode::Bytes(body))
+    }
+
+    fn with_mode(mode: FixedProducerMode) -> Self {
         Self {
             metadata: DumpProducerMetadata::new(
                 PERFETTO_EXPORTER_SCHEMA_VERSION,
@@ -476,8 +496,8 @@ impl FixedProducer {
                 TRACE_CONTENT_WARNING,
             )
             .expect("valid producer metadata"),
+            mode,
             first_write_completed: Arc::new(AtomicBool::new(false)),
-            pause_after_first_write,
         }
     }
 }
@@ -489,25 +509,149 @@ impl CapturedPrefixDumpProducer for FixedProducer {
 
     fn dump<'operation>(
         &'operation self,
-        _source: &'operation CapturedEventSource<'_>,
+        source: &'operation CapturedEventSource<'_>,
         writer: &'operation mut (dyn AsyncWrite + Unpin),
-        _through: Option<SchemaU64>,
+        through: Option<SchemaU64>,
     ) -> DumpProducerFuture<'operation> {
         Box::pin(async move {
-            writer
-                .write_all(b"\x0a\x02d6")
-                .await
-                .map_err(|error| DumpProducerError::new("test_write", error.to_string()))?;
-            self.first_write_completed.store(true, Ordering::Release);
-            if self.pause_after_first_write {
-                std::thread::sleep(Duration::from_millis(300));
-                writer
-                    .write_all(b"tail")
+            match &self.mode {
+                FixedProducerMode::Real => {
+                    dump_captured_prefix_with_version(
+                        source,
+                        writer,
+                        through,
+                        self.metadata.troupe_version(),
+                    )
                     .await
                     .map_err(|error| DumpProducerError::new("test_write", error.to_string()))?;
+                }
+                FixedProducerMode::Bytes(body) => {
+                    writer
+                        .write_all(body)
+                        .await
+                        .map_err(|error| DumpProducerError::new("test_write", error.to_string()))?;
+                }
+                FixedProducerMode::PauseAfterMatchingMetadata => {
+                    let body = matching_metadata_trace(source, through);
+                    writer
+                        .write_all(&body)
+                        .await
+                        .map_err(|error| DumpProducerError::new("test_write", error.to_string()))?;
+                    self.first_write_completed.store(true, Ordering::Release);
+                    std::thread::sleep(Duration::from_millis(300));
+                    writer
+                        .write_all(b"\x0a\x00")
+                        .await
+                        .map_err(|error| DumpProducerError::new("test_write", error.to_string()))?;
+                }
+            }
+            if !matches!(&self.mode, FixedProducerMode::PauseAfterMatchingMetadata) {
+                self.first_write_completed.store(true, Ordering::Release);
             }
             Ok(())
         })
+    }
+}
+
+fn matching_metadata_trace(
+    source: &CapturedEventSource<'_>,
+    through: Option<SchemaU64>,
+) -> Vec<u8> {
+    let metadata = source.metadata();
+    let captured = source.captured_watermark();
+    let exported = through.unwrap_or(captured);
+    let outcome = metadata.production_outcome().unwrap_or("unavailable");
+    let clean_shutdown = metadata.production_outcome().map_or("unavailable", |_| {
+        if metadata.clean_shutdown() {
+            "true"
+        } else {
+            "false"
+        }
+    });
+    let name = trace_metadata_name(
+        metadata.run_id(),
+        captured.get(),
+        exported.get(),
+        outcome,
+        clean_shutdown,
+    );
+    trace_with_metadata_name(metadata.run_id(), &name)
+}
+
+fn trace_metadata_name(
+    run_id: CanonicalUuid,
+    captured: u64,
+    exported: u64,
+    outcome: &str,
+    clean_shutdown: &str,
+) -> String {
+    format!(
+        "Troupe metadata | exporter_schema={} | event_schema={} | run_id={} | \
+         captured_watermark={} | exported_through={} | troupe_version={} | outcome={} | \
+         clean_shutdown={} | content_warning={}",
+        PERFETTO_EXPORTER_SCHEMA_VERSION,
+        troupe_diagnostics_core::event::EVENT_SCHEMA_VERSION,
+        run_id,
+        captured,
+        exported,
+        env!("CARGO_PKG_VERSION"),
+        outcome,
+        clean_shutdown,
+        TRACE_CONTENT_WARNING,
+    )
+}
+
+fn trace_with_metadata_name(run_id: CanonicalUuid, metadata_name: &str) -> Vec<u8> {
+    let mut trace = Vec::new();
+    push_trace_packet(
+        &mut trace,
+        &track_descriptor_packet(1, &format!("Troupe Production {run_id}"), None),
+    );
+    push_trace_packet(
+        &mut trace,
+        &track_descriptor_packet(2, metadata_name, Some(1)),
+    );
+    trace
+}
+
+fn track_descriptor_packet(uuid: u64, name: &str, parent_uuid: Option<u64>) -> Vec<u8> {
+    let mut descriptor = Vec::new();
+    push_varint_field(&mut descriptor, 1, uuid);
+    push_length_delimited(&mut descriptor, 2, name.as_bytes());
+    if let Some(parent_uuid) = parent_uuid {
+        push_varint_field(&mut descriptor, 5, parent_uuid);
+    }
+
+    let mut packet = Vec::new();
+    push_varint_field(&mut packet, 10, 1);
+    push_length_delimited(&mut packet, 60, &descriptor);
+    packet
+}
+
+fn push_trace_packet(trace: &mut Vec<u8>, packet: &[u8]) {
+    push_length_delimited(trace, 1, packet);
+}
+
+fn push_varint_field(output: &mut Vec<u8>, field_number: u64, value: u64) {
+    push_varint(output, field_number << 3);
+    push_varint(output, value);
+}
+
+fn push_length_delimited(output: &mut Vec<u8>, field_number: u64, value: &[u8]) {
+    push_varint(output, (field_number << 3) | 2);
+    push_varint(output, value.len() as u64);
+    output.extend_from_slice(value);
+}
+
+fn push_varint(output: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            output.push(byte);
+            return;
+        }
+        output.push(byte | 0x80);
     }
 }
 
@@ -541,13 +685,91 @@ async fn active_url_uses_h05_stream_and_publishes_on_the_callers_filesystem() {
     .await
     .expect("publish remote H05 stream");
     assert_eq!(termination, DumpTermination::Published);
-    assert_eq!(fs::read(&output_path).unwrap(), b"\x0a\x02d6");
+    let trace = fs::read(&output_path).unwrap();
+    assert!(String::from_utf8_lossy(&trace).contains("captured_watermark=2 | exported_through=2"));
     assert_success_record(&output, &output_path, "2", "2");
     assert_no_publication_residue(output_directory.path());
 
     let contended = CleanupArchiveLease::acquire(run.directory.path()).unwrap_err();
     assert_eq!(contended.code(), ArchiveLeaseErrorCode::Contended);
     assert!(server.try_core_failure().is_none());
+    server.shutdown().expect("clean server shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_remote_body_is_not_published() {
+    let run = ActiveRun::new("malformed-body", 1);
+    let server = start_active_server(&run, FixedProducer::with_body(b"garbage".to_vec()));
+    let output_directory = TestDirectory::new("malformed-output");
+    let output_path = output_directory.path().join("malformed.pftrace");
+    let mut output = CapturedOutput::default();
+
+    let error = execute(
+        parse_url_dump(server.identity().local_endpoint().as_str(), &output_path),
+        &mut output,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("malformed remote trace must fail publication");
+    assert_eq!(error.code(), DumpErrorCode::PublicationFailed);
+    assert_eq!(output.record()["publication"], "not_published");
+    assert!(!output_path.exists());
+    assert_no_publication_residue(output_directory.path());
+    server.shutdown().expect("clean server shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_remote_trace_packet_is_not_published() {
+    let run = ActiveRun::new("empty-packet", 1);
+    let metadata = trace_metadata_name(run_id(), 1, 1, "unavailable", "unavailable");
+    let mut body = trace_with_metadata_name(run_id(), &metadata);
+    body.extend_from_slice(&[0x0a, 0x00]);
+    let server = start_active_server(&run, FixedProducer::with_body(body));
+    let output_directory = TestDirectory::new("empty-packet-output");
+    let output_path = output_directory.path().join("empty-packet.pftrace");
+    let mut output = CapturedOutput::default();
+
+    let error = execute(
+        parse_url_dump(server.identity().local_endpoint().as_str(), &output_path),
+        &mut output,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("empty remote TracePacket must fail publication");
+    assert_eq!(error.code(), DumpErrorCode::PublicationFailed);
+    let record = output.record();
+    assert_eq!(record["publication"], "not_published");
+    assert_eq!(record["failure_code"], "body_invalid");
+    assert!(!output_path.exists());
+    assert_no_publication_residue(output_directory.path());
+    server.shutdown().expect("clean server shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_trace_metadata_mismatch_is_not_published() {
+    let run = ActiveRun::new("metadata-mismatch", 1);
+    let mismatched = trace_with_metadata_name(
+        run_id(),
+        &trace_metadata_name(run_id(), 0, 0, "unavailable", "unavailable"),
+    );
+    let server = start_active_server(&run, FixedProducer::with_body(mismatched));
+    let output_directory = TestDirectory::new("metadata-mismatch-output");
+    let output_path = output_directory.path().join("mismatched.pftrace");
+    let mut output = CapturedOutput::default();
+
+    let error = execute(
+        parse_url_dump(server.identity().local_endpoint().as_str(), &output_path),
+        &mut output,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("trace metadata that differs from HTTP headers must fail publication");
+    assert_eq!(error.code(), DumpErrorCode::PublicationFailed);
+    let record = output.record();
+    assert_eq!(record["publication"], "not_published");
+    assert_eq!(record["failure_code"], "body_metadata_mismatch");
+    assert!(!output_path.exists());
+    assert_no_publication_residue(output_directory.path());
     server.shutdown().expect("clean server shutdown");
 }
 

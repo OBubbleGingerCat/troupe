@@ -6,6 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "rust" / "src" / "application" / "diagnostic_cli" / "dump.rs"
+PERFETTO_SOURCE = (
+    ROOT / "rust" / "crates" / "troupe-diagnostics-perfetto" / "src" / "dump.rs"
+)
 RUST_TEST = ROOT / "rust" / "tests" / "diagnostic_cli_dump.rs"
 ARTIFACT = ROOT / "tests" / "fixtures" / "artifact_layout" / "nodes" / "D06.json"
 GATE = ROOT / "tests" / "fixtures" / "diagnostic_node_gates" / "D06.json"
@@ -46,6 +49,7 @@ def test_dump_reuses_only_the_owned_target_stream_and_publication_boundaries() -
 
 def test_archive_and_live_paths_capture_once_then_publish_on_the_cli_machine() -> None:
     source = _read(SOURCE)
+    perfetto_source = _read(PERFETTO_SOURCE)
 
     assert "let source = archive" in source
     assert ".capture()" in source
@@ -55,6 +59,10 @@ def test_archive_and_live_paths_capture_once_then_publish_on_the_cli_machine() -
     assert source.count(".revalidate_identity()") == 2
     assert ".write_all(&chunk)" in source
     assert "const MAX_REMOTE_CHUNK_BYTES: usize = 64 * 1024" in source
+    assert "TraceBodyValidator" in source
+    assert "metadata.trace_metadata()" in source
+    assert '"body_invalid"' in perfetto_source
+    assert '"body_metadata_mismatch"' in perfetto_source
     assert "publish(output, force, cancellation" in source
 
     for forbidden in (
@@ -136,6 +144,9 @@ def test_rust_contract_covers_real_local_remote_policy_metadata_and_cancellation
         "existing_file_force_directory_and_symlink_follow_atomic_publisher_policy",
         "sigint_before_publication_reports_130_and_leaves_no_partial_target",
         "active_url_uses_h05_stream_and_publishes_on_the_callers_filesystem",
+        "malformed_remote_body_is_not_published",
+        "empty_remote_trace_packet_is_not_published",
+        "remote_trace_metadata_mismatch_is_not_published",
         "sigint_during_remote_body_waits_for_atomic_cleanup_and_keeps_server_alive",
         "remote_metadata_rejects_identity_schema_watermark_and_transport_mismatch",
     ):

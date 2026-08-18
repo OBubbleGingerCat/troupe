@@ -36,7 +36,7 @@ use troupe_diagnostics_core::{
 };
 use troupe_diagnostics_perfetto::{
     collect::{ProjectionError, ProjectionMetadata},
-    dump::dump_captured_prefix,
+    dump::{TraceBodyValidator, dump_captured_prefix},
     project::project_prefix,
 };
 use troupe_diagnostics_runtime::{
@@ -224,6 +224,69 @@ fn dump_bytes(source: &CapturedEventSource<'_>, through: Option<u64>) -> (Vec<u8
     .expect("dump captured prefix");
     assert_eq!(summary.bytes_written(), writer.0.len() as u64);
     (writer.0, summary.packet_count())
+}
+
+#[test]
+fn streamed_body_validator_accepts_the_t03_dump_contract() {
+    with_active_capture("body-validator-valid", vec![counter(1, 1)], |captured| {
+        let (bytes, _) = dump_bytes(captured, None);
+        let metadata = ProjectionMetadata::new(
+            run_id(),
+            captured.captured_watermark(),
+            captured.captured_watermark(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        let mut validator = TraceBodyValidator::new(metadata);
+        for chunk in bytes.chunks(3) {
+            validator.push(chunk).expect("valid T03 trace chunk");
+        }
+        validator.finish().expect("complete T03 trace");
+    });
+}
+
+#[test]
+fn streamed_body_validator_rejects_header_body_metadata_mismatch() {
+    with_active_capture("body-validator-mismatch", vec![counter(1, 1)], |captured| {
+        let (bytes, _) = dump_bytes(captured, None);
+        let metadata = ProjectionMetadata::new(
+            run_id(),
+            captured.captured_watermark(),
+            SchemaU64::new(captured.captured_watermark().get() - 1),
+            env!("CARGO_PKG_VERSION"),
+        );
+        let mut validator = TraceBodyValidator::new(metadata);
+        let error = validator
+            .push(&bytes)
+            .expect_err("metadata must match headers");
+        assert_eq!(error.code(), "body_metadata_mismatch");
+    });
+}
+
+#[test]
+fn streamed_body_validator_rejects_incomplete_or_malformed_trace_body() {
+    let metadata = ProjectionMetadata::new(
+        run_id(),
+        SchemaU64::new(0),
+        SchemaU64::new(0),
+        env!("CARGO_PKG_VERSION"),
+    );
+    let mut validator = TraceBodyValidator::new(metadata);
+    let error = validator
+        .push(&[0x0a, 0x01, 0xff])
+        .expect_err("malformed packet must be rejected");
+    assert_eq!(error.code(), "body_invalid");
+
+    let metadata = ProjectionMetadata::new(
+        run_id(),
+        SchemaU64::new(0),
+        SchemaU64::new(0),
+        env!("CARGO_PKG_VERSION"),
+    );
+    let mut validator = TraceBodyValidator::new(metadata);
+    let error = validator
+        .push(&[0x0a, 0x00])
+        .expect_err("empty TracePacket must be rejected");
+    assert_eq!(error.code(), "body_invalid");
 }
 
 fn local(value: &str) -> RunLocalId {

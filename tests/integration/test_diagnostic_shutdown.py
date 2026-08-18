@@ -82,6 +82,9 @@ def test_writer_final_transaction_is_atomic_single_transition() -> None:
     )
     assert "FinalStateConflict" in finalization
     assert "final_statement_failure_rolls_back_and_leaves_archive_incomplete" in writer
+    assert "finalize_run_with_cancellation" in writer
+    assert "CancellationHook" in writer
+    assert "cancellation_before_commit_rolls_back_terminal_metadata" in writer
 
 
 def test_runtime_uses_two_phase_writer_and_closed_resource_order() -> None:
@@ -94,6 +97,14 @@ def test_runtime_uses_two_phase_writer_and_closed_resource_order() -> None:
     assert "supervisor.begin_shutdown" in bootstrap
     assert "wait_for_writer_close" in bootstrap
     assert "checkpoint_and_close_writer" in bootstrap
+    assert "result.recv_timeout(remaining_until(deadline))" in bootstrap
+    assert "join_writer_thread_until(thread, deadline)" in bootstrap
+    assert '"writer_shutdown_drain_timed_out"' in bootstrap
+    assert "writer_shutdown_wait_and_command_delivery_are_wall_clock_bounded" in bootstrap
+    assert (
+        "shutdown_timeout_detaches_only_after_preserving_writer_lease_and_cancelling_finalize"
+        in bootstrap
+    )
     assert coordinator.index("resources.seal_ingress()") < coordinator.index(
         "resources.finalize_writer"
     )

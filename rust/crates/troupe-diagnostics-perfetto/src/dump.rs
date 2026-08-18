@@ -1,5 +1,6 @@
 use std::{fmt, future::poll_fn, io, pin::Pin};
 
+use prost::Message;
 use tokio::io::AsyncWrite;
 use troupe_diagnostics_core::event::DiagnosticEvent;
 use troupe_diagnostics_core::scalar::SchemaU64;
@@ -10,10 +11,14 @@ use troupe_diagnostics_runtime::query::reader::{
 use crate::{
     collect::{
         ProjectionCollector, ProjectionError, ProjectionLimits, ProjectionMetadata,
-        StructuralIndexLimits,
+        StructuralIndexLimits, TRACE_METADATA_PREFIX,
     },
-    schema::{TracePacket, encode_trace_packet_fragment},
+    schema::{
+        BuiltinClock, TracePacket, encode_trace_packet_fragment, trace_packet, track_descriptor,
+    },
 };
+
+const MAX_TRACE_PACKET_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum DumpError {
@@ -327,6 +332,18 @@ pub async fn dump_captured_prefix<W>(
 where
     W: AsyncWrite + Unpin + ?Sized,
 {
+    dump_captured_prefix_with_version(source, writer, through, env!("CARGO_PKG_VERSION")).await
+}
+
+pub async fn dump_captured_prefix_with_version<W>(
+    source: &CapturedEventSource<'_>,
+    writer: &mut W,
+    through: Option<SchemaU64>,
+    troupe_version: &str,
+) -> Result<DumpSummary, DumpError>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
     let captured_watermark = source.captured_watermark();
     let exported_through = through.unwrap_or(captured_watermark);
     let store_metadata = source.metadata();
@@ -334,7 +351,7 @@ where
         store_metadata.run_id(),
         captured_watermark,
         exported_through,
-        env!("CARGO_PKG_VERSION"),
+        troupe_version,
     )
     .with_completion(
         store_metadata.production_outcome().map(str::to_owned),
@@ -356,6 +373,232 @@ where
         &mut encoder,
     )
     .await
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraceBodyValidationError {
+    code: &'static str,
+    detail: String,
+}
+
+impl TraceBodyValidationError {
+    fn new(code: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for TraceBodyValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.detail)
+    }
+}
+
+impl std::error::Error for TraceBodyValidationError {}
+
+#[derive(Default)]
+enum TraceBodyState {
+    #[default]
+    TopLevelKey,
+    PacketLength,
+    PacketPayload,
+}
+
+#[derive(Default)]
+struct StreamingVarint {
+    value: u64,
+    shift: u32,
+}
+
+impl StreamingVarint {
+    fn push(&mut self, byte: u8) -> Result<Option<u64>, TraceBodyValidationError> {
+        if self.shift >= 64 || (self.shift == 63 && byte > 1) {
+            return Err(invalid_trace_body("protobuf varint overflows u64"));
+        }
+        self.value |= u64::from(byte & 0x7f) << self.shift;
+        if byte & 0x80 == 0 {
+            let value = self.value;
+            *self = Self::default();
+            return Ok(Some(value));
+        }
+        self.shift += 7;
+        if self.shift >= 64 {
+            return Err(invalid_trace_body("protobuf varint is too long"));
+        }
+        Ok(None)
+    }
+}
+
+/// Validates a streamed T03 trace without retaining the complete trace body.
+/// The expected metadata is built from the response headers by the caller.
+pub struct TraceBodyValidator {
+    state: TraceBodyState,
+    varint: StreamingVarint,
+    packet_remaining: usize,
+    packet: Vec<u8>,
+    packet_count: u64,
+    expected_metadata_track_name: String,
+    metadata_descriptor_count: u8,
+}
+
+impl TraceBodyValidator {
+    pub fn new(metadata: ProjectionMetadata) -> Self {
+        Self {
+            state: TraceBodyState::default(),
+            varint: StreamingVarint::default(),
+            packet_remaining: 0,
+            packet: Vec::new(),
+            packet_count: 0,
+            expected_metadata_track_name: metadata.metadata_track_name(),
+            metadata_descriptor_count: 0,
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), TraceBodyValidationError> {
+        for &byte in bytes {
+            match self.state {
+                TraceBodyState::TopLevelKey => {
+                    let Some(key) = self.varint.push(byte)? else {
+                        continue;
+                    };
+                    if key >> 3 != 1 || key & 0x07 != 2 {
+                        return Err(invalid_trace_body(
+                            "trace body contains a field other than repeated Trace.packet",
+                        ));
+                    }
+                    self.state = TraceBodyState::PacketLength;
+                }
+                TraceBodyState::PacketLength => {
+                    let Some(length) = self.varint.push(byte)? else {
+                        continue;
+                    };
+                    if length > MAX_TRACE_PACKET_BYTES {
+                        return Err(TraceBodyValidationError::new(
+                            "body_packet_too_large",
+                            format!(
+                                "trace packet has {length} bytes, limit is {MAX_TRACE_PACKET_BYTES}"
+                            ),
+                        ));
+                    }
+                    self.packet_remaining = usize::try_from(length).map_err(|_| {
+                        invalid_trace_body("trace packet length does not fit in the client")
+                    })?;
+                    self.packet.clear();
+                    self.packet
+                        .try_reserve(self.packet_remaining)
+                        .map_err(|_| {
+                            TraceBodyValidationError::new(
+                                "body_packet_allocation_failed",
+                                "trace packet could not be buffered for validation",
+                            )
+                        })?;
+                    if self.packet_remaining == 0 {
+                        self.finish_packet()?;
+                    } else {
+                        self.state = TraceBodyState::PacketPayload;
+                    }
+                }
+                TraceBodyState::PacketPayload => {
+                    self.packet.push(byte);
+                    self.packet_remaining -= 1;
+                    if self.packet_remaining == 0 {
+                        self.finish_packet()?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(&self) -> Result<(), TraceBodyValidationError> {
+        if self.packet_count == 0 {
+            return Err(invalid_trace_body("trace body contains no Trace.packet"));
+        }
+        if !matches!(self.state, TraceBodyState::TopLevelKey) || self.varint.shift != 0 {
+            return Err(invalid_trace_body(
+                "trace body ends in an incomplete protobuf field",
+            ));
+        }
+        if self.metadata_descriptor_count != 1 {
+            return Err(TraceBodyValidationError::new(
+                "body_metadata_missing",
+                "trace body does not contain its Troupe metadata descriptor",
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish_packet(&mut self) -> Result<(), TraceBodyValidationError> {
+        let packet = TracePacket::decode(self.packet.as_slice()).map_err(|error| {
+            invalid_trace_body(format!("trace packet protobuf is invalid: {error}"))
+        })?;
+        if !matches!(
+            packet.optional_trusted_packet_sequence_id,
+            Some(trace_packet::OptionalTrustedPacketSequenceId::TrustedPacketSequenceId(1))
+        ) {
+            return Err(invalid_trace_body(
+                "trace packet must use trusted_packet_sequence_id=1",
+            ));
+        }
+        let data = packet
+            .data
+            .ok_or_else(|| invalid_trace_body("trace packet contains no descriptor or event"))?;
+        match data {
+            trace_packet::Data::TrackDescriptor(descriptor) => {
+                if packet.timestamp.is_some() || packet.timestamp_clock_id.is_some() {
+                    return Err(invalid_trace_body(
+                        "trace descriptor packet must not carry a timestamp",
+                    ));
+                }
+                if let Some(track_descriptor::StaticOrDynamicName::Name(name)) =
+                    descriptor.static_or_dynamic_name
+                    && name.starts_with(TRACE_METADATA_PREFIX)
+                {
+                    if name != self.expected_metadata_track_name {
+                        return Err(TraceBodyValidationError::new(
+                            "body_metadata_mismatch",
+                            "trace Troupe metadata differs from the response headers",
+                        ));
+                    }
+                    self.metadata_descriptor_count = self
+                        .metadata_descriptor_count
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_trace_body("trace metadata count overflows"))?;
+                    if self.metadata_descriptor_count > 1 {
+                        return Err(TraceBodyValidationError::new(
+                            "body_metadata_duplicate",
+                            "trace body contains more than one Troupe metadata descriptor",
+                        ));
+                    }
+                }
+            }
+            trace_packet::Data::TrackEvent(_) => {
+                if packet.timestamp.is_none()
+                    || packet.timestamp_clock_id != Some(BuiltinClock::TraceFile as u32)
+                {
+                    return Err(invalid_trace_body(
+                        "trace event packet must carry a timestamp with trace-file clock 11",
+                    ));
+                }
+            }
+        }
+        self.packet_count = self
+            .packet_count
+            .checked_add(1)
+            .ok_or_else(|| invalid_trace_body("trace packet count overflows u64"))?;
+        self.state = TraceBodyState::TopLevelKey;
+        Ok(())
+    }
+}
+
+fn invalid_trace_body(detail: impl Into<String>) -> TraceBodyValidationError {
+    TraceBodyValidationError::new("body_invalid", detail)
 }
 
 async fn dump_captured_prefix_core<S, W, E>(
