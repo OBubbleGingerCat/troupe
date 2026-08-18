@@ -498,6 +498,7 @@ function decodeProjectedContextUsage(value: unknown, path: string): ContextUsage
   expectExactFields(
     projected,
     [
+      "schema_version",
       "run_id",
       "scope",
       "sequence",
@@ -514,7 +515,6 @@ function decodeProjectedContextUsage(value: unknown, path: string): ContextUsage
   );
   const event = decodeDiagnosticEvent({
     kind: "context_usage_sampled",
-    schema_version: 1,
     ...projected,
   }, path);
   if (event.kind !== "context_usage_sampled") {

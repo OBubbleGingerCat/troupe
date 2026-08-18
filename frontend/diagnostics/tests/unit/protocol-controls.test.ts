@@ -50,6 +50,7 @@ function loadMaterializedSnapshotFixture(): unknown {
   const terminalUsage = (usage.usages as Record<string, unknown>[])[0]!;
   const scope = terminalUsage.scope as Record<string, unknown>;
   usage.contexts = [{
+    schema_version: 1,
     run_id: runId,
     scope,
     sequence: "2",

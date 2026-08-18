@@ -1136,7 +1136,6 @@ function validateHydrationSuffix(
   }
 
   let expectedSequence = afterValue + 1n;
-  let previousElapsed: U64String | null = null;
   for (const event of suffix.events) {
     if (event.run_id !== snapshot.run_id) {
       throw new RangeError("event suffix contains an event from another Run");
@@ -1144,13 +1143,9 @@ function validateHydrationSuffix(
     if (BigInt(event.sequence) !== expectedSequence) {
       throw new RangeError("event suffix is not a dense sequence range");
     }
-    if (previousElapsed !== null && compareU64(event.elapsed_ns, previousElapsed) < 0) {
-      throw new RangeError("event suffix elapsed time is not monotonic");
-    }
     if (compareU64(event.elapsed_ns, snapshot.state.through_elapsed_ns) > 0) {
       throw new RangeError("event suffix is newer than the snapshot state");
     }
-    previousElapsed = event.elapsed_ns;
     expectedSequence += 1n;
   }
 }
@@ -1173,12 +1168,21 @@ export function hydrateDiagnosticStateFromSnapshot({
   }
 
   const first = suffix.events[0];
-  const last = suffix.events[suffix.events.length - 1];
+  let startNs = first?.elapsed_ns ?? snapshot.state.through_elapsed_ns;
+  let endNs = startNs;
+  for (const event of suffix.events.slice(1)) {
+    if (compareU64(event.elapsed_ns, startNs) < 0) {
+      startNs = event.elapsed_ns;
+    }
+    if (compareU64(event.elapsed_ns, endNs) > 0) {
+      endNs = event.elapsed_ns;
+    }
+  }
   const window: EventWindow = {
     id: `bootstrap:${snapshot.run_id}:${after}:${snapshot.watermark_sequence}`,
     run_id: snapshot.run_id,
-    start_ns: first?.elapsed_ns ?? snapshot.state.through_elapsed_ns,
-    end_ns: last?.elapsed_ns ?? snapshot.state.through_elapsed_ns,
+    start_ns: startNs,
+    end_ns: endNs,
     captured_through: snapshot.watermark_sequence,
     events: suffix.events,
   };

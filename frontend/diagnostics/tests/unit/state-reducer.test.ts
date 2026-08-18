@@ -82,6 +82,7 @@ function loadMaterializedSnapshotFixture(): unknown {
   const terminalUsage = (usage.usages as Record<string, unknown>[])[0]!;
   const scope = terminalUsage.scope as Record<string, unknown>;
   usage.contexts = [{
+    schema_version: 1,
     run_id: RUN_ID,
     scope,
     sequence: "2",
@@ -502,6 +503,28 @@ describe("diagnostic state reducer", () => {
       dropped_through: "5",
       needs_server_refresh: true,
     });
+  });
+
+  it("accepts dense suffixes whose elapsed observations interleave", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+    const rawEvents = Array.from({ length: 9 }, (_, index) => {
+      const sequence = index + 1;
+      return event(sequence, {
+        kind: "counter_sampled",
+        elapsed_ns: sequence === 2 ? "5" : String(sequence * 10),
+        counter_kind: "cue.active",
+        value: String(sequence),
+      });
+    });
+
+    const state = hydrateDiagnosticStateFromSnapshot({
+      snapshot,
+      suffix: finiteSuffix(snapshot, 0, rawEvents),
+      after: decodeU64("0"),
+    });
+
+    expect(state.windows.visible?.events).toEqual(rawEvents);
+    expect(state.windows.visible?.events[1]?.elapsed_ns).toBe("5");
   });
 
   it("rejects malformed bootstrap suffixes before changing prior state", () => {
