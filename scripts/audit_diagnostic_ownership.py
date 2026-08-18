@@ -81,8 +81,8 @@ REMOVED_PLAN_PATHS: Final = {"rust/src/application/loader.rs": "L00"}
 POST_PLAN_CHANGES: Final = {
     "examples/README.md": (
         "M",
-        "23e01dae100ea1960624d66daad719f7e6f21aea",
-        "99c765f96e128d3502c78d8ef0b95fee7c3b98b8abdef96b187493f47696a25e",
+        "af623b1af7c7627bfd1e14b49eb3f9d82c132c3e",
+        "83a7b8d83cdcfcbf4b27aa707173cc6f82c369253e742874d96f360bb1e1c741",
     ),
     "examples/diagnostics/__init__.py": (
         "A",
@@ -91,8 +91,8 @@ POST_PLAN_CHANGES: Final = {
     ),
     "examples/diagnostics/production.py": (
         "A",
-        "23e01dae100ea1960624d66daad719f7e6f21aea",
-        "f67b9d5f736cf9fec087dc1ab2214906343d53b9d5fe95568bbee7bde0891f4c",
+        "af623b1af7c7627bfd1e14b49eb3f9d82c132c3e",
+        "55c15e89e84ba01596aad7d93d3a2715502fee42e335bc05e81bbbeb33c38393",
     ),
     "rust/crates/troupe-agent-runtime/src/launch/process.rs": (
         "M",
