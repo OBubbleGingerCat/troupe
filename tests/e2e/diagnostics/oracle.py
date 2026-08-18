@@ -222,47 +222,6 @@ def assert_full_chain(
             )
 
 
-def assert_view_catalog(catalog: dict[str, Any], run_id: str) -> None:
-    require(catalog.get("run_id") == run_id, "view catalog Run mismatch")
-    views = catalog.get("views")
-    require(isinstance(views, list), "view catalog has no view list")
-    require(
-        {view["renderer"] for view in views}
-        == {"timeline", "metric", "table", "time_series"},
-        "view catalog does not contain all four closed renderers",
-    )
-    capabilities = catalog.get("capabilities", {})
-    require(capabilities.get("bucket_origin") == "run", "TimeSeries origin drifted")
-    require(
-        capabilities.get("interval_semantics") == "left_closed_right_open",
-        "TimeSeries interval semantics drifted",
-    )
-    require(
-        capabilities.get("max_time_series_points") == 1024,
-        "TimeSeries point limit drifted",
-    )
-
-
-def assert_view_response(response: dict[str, Any], renderer: str, run_id: str) -> None:
-    require(response.get("run_id") == run_id, "view response Run mismatch")
-    require(response.get("renderer") == renderer, f"expected {renderer} response")
-    require(response.get("incompatible") is None, f"{renderer} view is incompatible")
-    require(response.get("truncated") is False, f"{renderer} view was truncated")
-    binding = response.get("binding", {})
-    require(int(binding.get("captured_watermark", "0")) > 0, "empty view binding")
-    if renderer == "time_series":
-        points = sum(len(series["points"]) for series in response.get("series", []))
-        require(points <= 1024, "TimeSeries exceeded its point limit")
-        require(
-            all(
-                int(point["bucket_start_ns"]) < int(point["bucket_end_ns"])
-                for series in response.get("series", [])
-                for point in series["points"]
-            ),
-            "TimeSeries emitted an invalid bucket interval",
-        )
-
-
 def assert_perfetto_summary(
     summary: dict[str, Any], run_id: str, expected_through: int
 ) -> None:

@@ -39,6 +39,7 @@ sys.path.insert(0, str(SUPPORT))
 
 from artifact_layout import (  # noqa: E402
     POST_PLAN_EXAMPLE_CHANGES,
+    POST_PLAN_EXAMPLE_REMOVALS,
     expected_package_members,
     is_generated_example_path,
     load_artifact_layout,
@@ -74,6 +75,7 @@ for _fragment in ARTIFACT_LAYOUT.fragments.values():
         if removed.path.startswith("examples/")
     )
 _realized_examples.update(POST_PLAN_EXAMPLE_CHANGES)
+_realized_examples.difference_update(POST_PLAN_EXAMPLE_REMOVALS)
 REALIZED_EXAMPLE_FILES = tuple(sorted(_realized_examples))
 EXPECTED_WRAPPER = BASE_ARTIFACTS.package_files["__init__.py"].data
 EXPECTED_STUB = BASE_ARTIFACTS.package_files["__init__.pyi"].data

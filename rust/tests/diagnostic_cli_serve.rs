@@ -29,7 +29,6 @@ use troupe_diagnostics_runtime::{
     server::runtime::{DiagnosticServer, ServerConfig},
     store::{
         connection::{DiagnosticStore, InitialStoreMetadata},
-        view_records::{CompiledViewSet, persist_view_set},
     },
 };
 
@@ -98,8 +97,6 @@ fn create_archive(label: &str, clean_shutdown: bool) -> TestDirectory {
         &InitialStoreMetadata::new(run_id(), STARTED_AT, CONFIGURATION_IDENTITY),
     )
     .unwrap();
-    let empty = CompiledViewSet::from_json_records(std::iter::empty::<&[u8]>()).unwrap();
-    persist_view_set(directory.path(), run_id(), &empty).unwrap();
     if clean_shutdown {
         store
             .connection()
@@ -388,14 +385,6 @@ fn archive_server_reuses_full_read_only_routes_and_reports_incomplete_locator() 
         &[("Accept", "text/event-stream")],
     );
     assert_eq!(rejected_sse.status, 406);
-
-    let views = request(
-        locator.local_url(),
-        "/api/v1/views",
-        &[("Accept", "application/json")],
-    );
-    assert_eq!(views.status, 200);
-    assert_eq!(views.json()["views"], serde_json::json!([]));
 
     let html = request(locator.local_url(), "/", &[]);
     assert_eq!(html.status, 200);

@@ -1138,7 +1138,7 @@ mod tests {
         let _python_test_guard = crate::initialize_python_for_test();
         let package = TestPackage::new(
             "diagnostic_load_success",
-            "import builtins\nclass Production(builtins._troupe_b09_base):\n    diagnostic_views = ('timeline',)\n    def __init__(self, args):\n        builtins._troupe_b09_calls.append(list(args))\n",
+            "import builtins\nclass Production(builtins._troupe_b09_base):\n    ignored_extension = ('timeline',)\n    def __init__(self, args):\n        builtins._troupe_b09_calls.append(list(args))\n",
         );
         let (producer, log) = make_producer(package.root(), None);
 
@@ -1154,7 +1154,7 @@ mod tests {
             assert!(calls.bind(py).is_empty());
             assert!(
                 class
-                    .inspect_static_attribute(py, "diagnostic_views")?
+                    .inspect_static_attribute(py, "ignored_extension")?
                     .is_some()
             );
             let args = PyList::new(py, ["first", "second"])?;

@@ -144,6 +144,7 @@ describe("checked-in generated diagnostics assets", () => {
     expect(manifest.html.content).toContain(
       `href="./assets/diagnostics-${manifest.build_sha256}.css"`,
     );
+    expect(manifest.html.content).toContain('rel="icon" href="data:,"');
     expect(manifest.html.content).not.toMatch(/<(?:style|base)(?:\s|>)/i);
     expect(Buffer.byteLength(manifest.html.content)).toBe(manifest.html.bytes);
     expect(manifest.budgets.logical_uncompressed_bytes).toBeLessThanOrEqual(512 * 1024);

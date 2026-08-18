@@ -9,9 +9,9 @@ use troupe_diagnostics_runtime::{
         probe as archive_probe,
     },
     query::{
-        aggregate as query_aggregate, archive_views as query_archive_views, events as query_events,
-        filter as query_filter, pagination as query_pagination, reader as query_reader,
-        snapshot as query_snapshot, status as query_status, views as query_views,
+        aggregate as query_aggregate, events as query_events, filter as query_filter,
+        pagination as query_pagination, reader as query_reader, snapshot as query_snapshot,
+        status as query_status,
     },
     registry::{
         codec as registry_codec, discover as registry_discover, model as registry_model,
@@ -26,7 +26,6 @@ use troupe_diagnostics_runtime::{
             cursor as server_sse_cursor, frame as server_sse_frame, replay as server_sse_replay,
             subscriber as server_sse_subscriber,
         },
-        views as server_views,
     },
     store::{
         admission as store_admission, batch as store_batch, connection as store_connection,
@@ -36,8 +35,8 @@ use troupe_diagnostics_runtime::{
             plans as store_projector_plans, snapshot as store_projector_snapshot,
             spans as store_projector_spans, usage as store_projector_usage,
         },
-        quota as store_quota, schema as store_schema, view_records as store_view_records,
-        watermark as store_watermark, writer as store_writer,
+        quota as store_quota, schema as store_schema, watermark as store_watermark,
+        writer as store_writer,
     },
 };
 
@@ -47,14 +46,12 @@ const LEAF_SLOTS: &[&str] = &[
     "archive/lease.rs",
     "archive/probe.rs",
     "query/aggregate.rs",
-    "query/archive_views.rs",
     "query/events.rs",
     "query/filter.rs",
     "query/pagination.rs",
     "query/reader.rs",
     "query/snapshot.rs",
     "query/status.rs",
-    "query/views.rs",
     "registry/codec.rs",
     "registry/discover.rs",
     "registry/model.rs",
@@ -74,7 +71,6 @@ const LEAF_SLOTS: &[&str] = &[
     "server/sse/frame.rs",
     "server/sse/replay.rs",
     "server/sse/subscriber.rs",
-    "server/views.rs",
     "store/admission.rs",
     "store/batch.rs",
     "store/connection.rs",
@@ -88,7 +84,6 @@ const LEAF_SLOTS: &[&str] = &[
     "store/projector/usage.rs",
     "store/quota.rs",
     "store/schema.rs",
-    "store/view_records.rs",
     "store/watermark.rs",
     "store/writer.rs",
 ];
@@ -104,7 +99,7 @@ const DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "query/mod.rs",
-        "pub mod aggregate;\npub mod archive_views;\npub mod events;\npub mod filter;\npub mod pagination;\npub mod reader;\npub mod snapshot;\npub mod status;\npub mod views;\n",
+        "pub mod aggregate;\npub mod events;\npub mod filter;\npub mod pagination;\npub mod reader;\npub mod snapshot;\npub mod status;\n",
     ),
     (
         "registry/mod.rs",
@@ -112,7 +107,7 @@ const DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "server/mod.rs",
-        "pub mod assembly;\npub mod assets;\npub mod dump;\npub mod error;\npub mod identity;\npub mod query;\npub mod routes;\npub mod runtime;\npub mod service;\npub mod sse;\npub mod views;\n",
+        "pub mod assembly;\npub mod assets;\npub mod dump;\npub mod error;\npub mod identity;\npub mod query;\npub mod routes;\npub mod runtime;\npub mod service;\npub mod sse;\n",
     ),
     (
         "server/sse/mod.rs",
@@ -120,7 +115,7 @@ const DECLARATIONS: &[(&str, &str)] = &[
     ),
     (
         "store/mod.rs",
-        "pub mod admission;\npub mod batch;\npub mod connection;\npub mod key;\npub mod progress;\npub mod projector;\npub mod quota;\npub mod schema;\npub mod view_records;\npub mod watermark;\npub mod writer;\n",
+        "pub mod admission;\npub mod batch;\npub mod connection;\npub mod key;\npub mod progress;\npub mod projector;\npub mod quota;\npub mod schema;\npub mod watermark;\npub mod writer;\n",
     ),
     (
         "store/projector/mod.rs",

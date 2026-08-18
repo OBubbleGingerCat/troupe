@@ -4,6 +4,5 @@ mod events;
 mod fragment_test_support;
 mod install;
 mod sink;
-mod views;
 
 pub(crate) use install::install;

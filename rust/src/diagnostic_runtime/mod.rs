@@ -1,7 +1,6 @@
 pub(crate) mod act_producer;
 pub(crate) mod activation;
 pub(crate) mod actor_producer;
-pub(crate) mod archive_views;
 pub(crate) mod bootstrap;
 pub(crate) mod cue_producer;
 pub(crate) mod custom_act_binding;
@@ -19,4 +18,3 @@ pub(crate) mod sink_projection;
 pub(crate) mod sink_settlement;
 pub(crate) mod supervisor;
 pub(crate) mod usage_finalization;
-pub(crate) mod view_compile;

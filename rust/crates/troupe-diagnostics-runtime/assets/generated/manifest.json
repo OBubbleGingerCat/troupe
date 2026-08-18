@@ -1,80 +1,80 @@
 {
   "schema_version": 1,
-  "build_sha256": "e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e",
+  "build_sha256": "aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef",
   "html": {
     "url": "./",
     "mime": "text/html; charset=utf-8",
     "cache_control": "no-cache",
-    "sha256": "25f8239da8293020ede57ae6444689b3d74d2ae3ed8505a3d3445683cd959cd3",
-    "bytes": 527,
-    "content": "<!DOCTYPE html><html lang=\"en\"><head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Troupe diagnostics</title>\n    <script type=\"module\" crossorigin=\"\" src=\"./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js\"></script>\n    <link rel=\"stylesheet\" crossorigin=\"\" href=\"./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css\">\n  </head>\n  <body>\n    <div id=\"app\"></div>\n  \n\n</body></html>\n"
+    "sha256": "fa905ecf30af7bd53520cdf7e70c81f7e47a1a1635916d74d1ad04e62c6288e6",
+    "bytes": 563,
+    "content": "<!DOCTYPE html><html lang=\"en\"><head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <link rel=\"icon\" href=\"data:,\">\n    <title>Troupe diagnostics</title>\n    <script type=\"module\" crossorigin=\"\" src=\"./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js\"></script>\n    <link rel=\"stylesheet\" crossorigin=\"\" href=\"./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css\">\n  </head>\n  <body>\n    <div id=\"app\"></div>\n  \n\n</body></html>\n"
   },
   "files": [
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js.raw",
-      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js.raw",
+      "url": "./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js",
       "kind": "js",
       "encoding": "raw",
       "content_encoding": null,
       "mime": "text/javascript; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "e7e2b3c90b9922f27b26f33fc542de6e548d504bdfb4368fa4077f769da85127",
-      "bytes": 317826
+      "sha256": "99cd0f8f3c765a04c67a080ff7e8f4074661ea5636bea52a646d62b3db1d5986",
+      "bytes": 143462
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js.gz",
-      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js.gz",
+      "url": "./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js",
       "kind": "js",
       "encoding": "gzip",
       "content_encoding": "gzip",
       "mime": "text/javascript; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "6ffe671f8025b7c992ff514af0aa51e77be7ebfce5e754834db15509a8723b42",
-      "bytes": 92227
+      "sha256": "881ebaecf0dab7fdc36efa11fa6da015416fa5e694715779670d1c96adce8f34",
+      "bytes": 41434
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js.br",
-      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js.br",
+      "url": "./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.js",
       "kind": "js",
       "encoding": "br",
       "content_encoding": "br",
       "mime": "text/javascript; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "adbe1f7424d4c2140d0c26f6c932b9445c679d3adef1edb76ec0ea05b5b3f7ef",
-      "bytes": 78654
+      "sha256": "9ac5b26aea244b9faa4e6193bfc692ff811138400e443f1a4a4c51f19bcec758",
+      "bytes": 36371
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css.raw",
-      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css.raw",
+      "url": "./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css",
       "kind": "css",
       "encoding": "raw",
       "content_encoding": null,
       "mime": "text/css; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "3e70725fdec44993ba8a75fef0023e6cc7d5c35728ae758633eff1a1fc13814c",
-      "bytes": 29147
+      "sha256": "c42aef5b7f3dcfce64996ec31b6f51c0a94ba0e70f9f1eb85bc35938acb9ceaf",
+      "bytes": 16712
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css.gz",
-      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css.gz",
+      "url": "./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css",
       "kind": "css",
       "encoding": "gzip",
       "content_encoding": "gzip",
       "mime": "text/css; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "bd5f1fb85ba2918f5f10362ba37c4c795e384482a04bf71ab27676a093d43b14",
-      "bytes": 5820
+      "sha256": "e62ff76f5f0c37690c8da2e35c1551d8ebe882539795268006ec230da97ce249",
+      "bytes": 4237
     },
     {
-      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css.br",
-      "url": "./assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css",
+      "path": "rust/crates/troupe-diagnostics-runtime/assets/generated/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css.br",
+      "url": "./assets/diagnostics-aff63aef21a5859e69ccc38bd78065c9207f1b9f1039980dfe24bea720beabef.css",
       "kind": "css",
       "encoding": "br",
       "content_encoding": "br",
       "mime": "text/css; charset=utf-8",
       "cache_control": "public, max-age=31536000, immutable",
-      "sha256": "898eccd62e2bd3c11da9641b38181f623f00bf2788fa9eb2c4173efc4d401fd1",
-      "bytes": 5168
+      "sha256": "be87d1cf5762610ab4e358880e4e8f9d3a56a26577373c0ca2e386ee5b1d3673",
+      "bytes": 3741
     }
   ],
   "notices": {
@@ -83,8 +83,8 @@
     "bytes": 9021
   },
   "budgets": {
-    "logical_uncompressed_bytes": 347500,
-    "first_load_brotli_bytes": 84349,
-    "all_embedded_bytes": 538390
+    "logical_uncompressed_bytes": 160737,
+    "first_load_brotli_bytes": 40675,
+    "all_embedded_bytes": 255541
   }
 }

@@ -394,6 +394,14 @@ impl ActCall {
             SchemaValidationMode::NativeOnly => None,
             SchemaValidationMode::Hybrid => Some(PythonSchemaValidationBridge::new(py)?),
         };
+        // Mark the driver boundary before scheduling the turn future.  A ready
+        // provider can submit its prompt as soon as `future_into_py` schedules
+        // the task; emitting this hook afterwards races with that observation
+        // and makes the diagnostic lifecycle look like prompt-before-driver.
+        self.phase = ActCallPhase::Running;
+        if let Some(control) = &self.control {
+            act_producer::observe(control, ActHook::DriverStarted);
+        }
         let future = pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let outcome = session
                 .run_turn(prompt, schema, validation_bridge, control)
@@ -404,10 +412,6 @@ impl ActCall {
         let signal = future.unbind();
         self.driver = Some(Self::fresh_waiter(py, &signal)?);
         self.signal = Some(signal);
-        self.phase = ActCallPhase::Running;
-        if let Some(control) = &self.control {
-            act_producer::observe(control, ActHook::DriverStarted);
-        }
         Ok(())
     }
 

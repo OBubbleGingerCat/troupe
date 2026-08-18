@@ -11,7 +11,6 @@ from troupe import diagnostics
 
 from .custom import record_batch
 from .sink import EvaluationSink, JsonValue
-from .views import DIAGNOSTIC_VIEWS
 
 
 DEFAULT_INTERVAL_SECONDS = 30.0
@@ -152,8 +151,6 @@ class DiagnosticActor(troupe.Actor):
 
 
 class Production(troupe.Production):
-    diagnostic_views = DIAGNOSTIC_VIEWS
-
     def __init__(self, args: list[str]) -> None:
         self.interval_seconds = parse_interval_seconds(args)
         self.scene_number = 0

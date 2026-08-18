@@ -444,7 +444,7 @@ mod tests {
             let globals = PyDict::new(py);
             globals.set_item("BaseProduction", py.get_type::<Production>())?;
             py.run(
-                c"state = {'descriptor_calls': 0, 'constructor_calls': 0}\n\nclass Probe:\n    def __get__(self, instance, owner):\n        state['descriptor_calls'] += 1\n        return ('dynamic',)\n\nprobe = Probe()\n\nclass Candidate(BaseProduction):\n    diagnostic_views = probe\n\n    def __init__(self, args):\n        state['constructor_calls'] += 1\n",
+                c"state = {'descriptor_calls': 0, 'constructor_calls': 0}\n\nclass Probe:\n    def __get__(self, instance, owner):\n        state['descriptor_calls'] += 1\n        return ('dynamic',)\n\nprobe = Probe()\n\nclass Candidate(BaseProduction):\n    ignored_extension = probe\n\n    def __init__(self, args):\n        state['constructor_calls'] += 1\n",
                 Some(&globals),
                 None,
             )?;
@@ -458,8 +458,8 @@ mod tests {
                 .expect("state must exist")
                 .cast_into::<PyDict>()?;
 
-            let inspected = inspect_static_class_attribute(py, &candidate, "diagnostic_views")?
-                .expect("diagnostic_views must exist");
+            let inspected = inspect_static_class_attribute(py, &candidate, "ignored_extension")?
+                .expect("ignored_extension must exist");
             assert!(inspected.bind(py).is(&probe));
             assert_eq!(
                 state

@@ -11,9 +11,8 @@
         {"path": "/api/v1/identity", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/snapshot", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/status", "methods": ["GET", "HEAD"]},
-        {"path": "/api/v1/views", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js", "methods": ["GET", "HEAD"]}
+        {"path": "/assets/diagnostics-ea40082b39528ffd4661c370a29ad923bccf042b6a12b38b8fcc8997f1c019eb.css", "methods": ["GET", "HEAD"]},
+        {"path": "/assets/diagnostics-ea40082b39528ffd4661c370a29ad923bccf042b6a12b38b8fcc8997f1c019eb.js", "methods": ["GET", "HEAD"]}
       ]
     },
     {
@@ -26,9 +25,8 @@
         {"path": "/api/v1/identity", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/snapshot", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/status", "methods": ["GET", "HEAD"]},
-        {"path": "/api/v1/views", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.css", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-e45f82cbc60093eedbc5a040a112830d38ecede0547164fb317fcad0d03fa77e.js", "methods": ["GET", "HEAD"]}
+        {"path": "/assets/diagnostics-ea40082b39528ffd4661c370a29ad923bccf042b6a12b38b8fcc8997f1c019eb.css", "methods": ["GET", "HEAD"]},
+        {"path": "/assets/diagnostics-ea40082b39528ffd4661c370a29ad923bccf042b6a12b38b8fcc8997f1c019eb.js", "methods": ["GET", "HEAD"]}
       ]
     }
   ],
@@ -87,13 +85,6 @@
       "profile": "active",
       "status": 200,
       "headers": {"cache-control": "no-store", "content-type": "application/x-protobuf", "content-encoding": null, "vary": null, "x-accel-buffering": null, "content-security-policy": null},
-      "cors": false
-    },
-    {
-      "name": "active_views",
-      "profile": "active",
-      "status": 200,
-      "headers": {"cache-control": "no-store", "content-type": "application/json; charset=utf-8", "content-encoding": null, "vary": null, "x-accel-buffering": null, "content-security-policy": null},
       "cors": false
     },
     {

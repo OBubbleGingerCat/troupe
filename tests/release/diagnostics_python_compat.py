@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import hashlib
 import importlib
 import importlib.machinery
@@ -43,9 +42,7 @@ PUBLIC_EXPORTS = [
     "diagnostics",
 ]
 DIAGNOSTIC_EXPORTS = [
-    "ActTokenMetric",
     "ActTokenUsageFinalized",
-    "ActTokenUsageRows",
     "ActorDetail",
     "AffectedElapsedInterval",
     "AgentMessageCompleted",
@@ -54,15 +51,9 @@ DIAGNOSTIC_EXPORTS = [
     "AgentSessionBrokenDetail",
     "AgentSessionDetail",
     "AgentTurnTerminalDetail",
-    "AttributeEqualsFilter",
-    "AttributeExistsFilter",
     "CausalLink",
-    "CompletedSpanDuration",
     "ContextUsageSampled",
-    "CounterRows",
     "CounterSampled",
-    "CounterSource",
-    "CounterValue",
     "CustomCounterSampled",
     "CustomInstantOccurred",
     "CustomSpanFinished",
@@ -87,46 +78,22 @@ DIAGNOSTIC_EXPORTS = [
     "DiagnosticToolOutput",
     "EffectDetail",
     "EmptyDetail",
-    "EventRows",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",
-    "GroupBy",
-    "InstantCount",
     "InstantDetail",
     "InstantOccurred",
-    "InstantRows",
-    "InstantSource",
-    "MetricQuery",
-    "MetricSource",
-    "MetricView",
     "ObservationGap",
-    "OutcomeFilter",
     "PlanEntry",
     "ProductionConstructDetail",
     "ProductionLoadDetail",
     "ProductionPathResolutionDetail",
     "ResultIssue",
     "ResultTransitionDetail",
-    "SeverityFilter",
     "SpanFinished",
-    "SpanRows",
-    "SpanSource",
     "SpanStartDetail",
     "SpanStarted",
-    "TableColumn",
-    "TableQuery",
-    "TableSource",
-    "TableView",
-    "TimeSeriesQuery",
-    "TimeSeriesView",
-    "TimelineQuery",
-    "TimelineSource",
-    "TimelineView",
     "ToolCallDetail",
-    "ViewFilter",
-    "ViewScalar",
-    "ViewSpec",
     "counter",
     "event",
     "span",
@@ -261,7 +228,8 @@ def validate_public_api() -> tuple[Path, str, int]:
     )
     require(
         "class DiagnosticSink(_ABC):" in diagnostics_stub
-        and "ViewSpec: _TypeAlias" in diagnostics_stub,
+        and "ViewSpec" not in diagnostics_stub
+        and "diagnostic_views" not in diagnostics_stub,
         "diagnostics stub surface drifted",
     )
     require((package / "py.typed").read_bytes() == b"", "py.typed marker drifted")
@@ -310,65 +278,10 @@ def validate_python_extensions() -> dict[str, object]:
             continue
         raise CompatibilityError("custom diagnostics escaped the Runtime context gate")
 
-    views = (
-        diagnostics.TimelineView(
-            id="compat_timeline",
-            title="Compatibility timeline",
-            query=diagnostics.TimelineQuery(
-                source=diagnostics.SpanSource(kind="act.lifecycle")
-            ),
-            time_range="run",
-            scope="run",
-        ),
-        diagnostics.MetricView(
-            id="compat_metric",
-            title="Compatibility metric",
-            query=diagnostics.MetricQuery(
-                source=diagnostics.ActTokenMetric(metric="input_tokens"),
-                reducer="sum",
-            ),
-            time_range="run",
-            scope="selection",
-        ),
-        diagnostics.TableView(
-            id="compat_table",
-            title="Compatibility table",
-            query=diagnostics.TableQuery(
-                source=diagnostics.ActTokenUsageRows(),
-                columns=(diagnostics.TableColumn(column="sequence"),),
-                page_size=10,
-            ),
-            time_range="viewport",
-            scope="run",
-        ),
-        diagnostics.TimeSeriesView(
-            id="compat_series",
-            title="Compatibility series",
-            query=diagnostics.TimeSeriesQuery(
-                source=diagnostics.CounterValue(
-                    selector=diagnostics.CounterSource(name="compat.counter")
-                ),
-                reducer="max",
-            ),
-            time_range="viewport",
-            scope="selection",
-        ),
-    )
-    require(
-        tuple(view.renderer for view in views)
-        == ("timeline", "metric", "table", "time_series"),
-        "ViewSpec renderer surface drifted",
-    )
-    try:
-        views[0].title = "changed"
-    except (AttributeError, dataclasses.FrozenInstanceError):
-        pass
-    else:
-        raise CompatibilityError("ViewSpec is mutable")
     return {
         "sink": True,
         "custom": True,
-        "view_renderers": [view.renderer for view in views],
+        "view_renderers": [],
     }
 
 

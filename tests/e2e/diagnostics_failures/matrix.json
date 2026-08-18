@@ -41,20 +41,6 @@
       ]
     },
     {
-      "id": "startup-bootstrap-views",
-      "phase": "startup",
-      "adapter": "startup_bootstrap_views",
-      "checks": [
-        {"id": "startup.view_invalid", "outcome": "user_startup_failure"},
-        {"id": "startup.view_duplicate", "outcome": "user_startup_failure"},
-        {"id": "startup.view_incompatible", "outcome": "user_startup_failure"},
-        {"id": "startup.view_constructor_not_run", "outcome": "user_startup_failure"},
-        {"id": "startup.view_user_failure_clean", "outcome": "clean_terminal"},
-        {"id": "startup.view_commit_incomplete", "outcome": "startup_fatal"},
-        {"id": "startup.view_finalization_incomplete", "outcome": "startup_fatal"}
-      ]
-    },
-    {
       "id": "runtime-admission-writer",
       "phase": "runtime",
       "adapter": "runtime_admission_writer",
@@ -99,11 +85,10 @@
       ]
     },
     {
-      "id": "runtime-views-sse",
+      "id": "runtime-sse",
       "phase": "runtime",
-      "adapter": "runtime_views_sse",
+      "adapter": "runtime_sse",
       "checks": [
-        {"id": "runtime.view_worker", "outcome": "runtime_fatal"},
         {"id": "runtime.sse_reader", "outcome": "runtime_fatal"},
         {"id": "local.sse_slow_client", "outcome": "operation_local"},
         {"id": "local.sse_overflow", "outcome": "operation_local"}

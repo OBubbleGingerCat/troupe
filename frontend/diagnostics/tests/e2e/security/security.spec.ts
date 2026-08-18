@@ -48,7 +48,7 @@ const events = cases.map((item, index) => decodeDiagnosticEvent({
   schema_version: 1,
   run_id: RUN_ID,
   sequence: String(index + 1),
-  elapsed_ns: String((index + 1) * 10),
+  elapsed_ns: String((index + 1) * 10000000000),
   scope: scope(index),
   caused_by: [],
   message_id: "message-" + item.id,
@@ -98,14 +98,8 @@ class Controller {
     this.listeners.forEach((listener) => listener(this.state));
   }
 }
-const emptyViews = () => ({
-  loadCatalog: async () => ({ api_schema_version: 1, run_id: RUN_ID, capabilities: {}, views: [] }),
-  query: async () => { throw new Error("empty fixture has no views"); },
-  reportRendererFailure: (_id, error) => error,
-  invalidateView() {}, dispose() {},
-});
 render(h(App, {
-  liveController: new Controller(), viewClientFactory: emptyViews,
+  liveController: new Controller(),
   productionName: "Security production",
 }), document.querySelector("#app"));
 `;
@@ -139,7 +133,7 @@ function fixturePlugin(): Plugin {
         try {
           const html = await server.transformIndexHtml(pathname, String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Troupe security acceptance</title></head><body><main id="app"></main>
+<link rel="icon" href="data:,"><title>Troupe security acceptance</title></head><body><main id="app"></main>
 <script type="module" src="/__v13-entry.js"></script></body></html>`);
           response.statusCode = 200;
           response.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -231,17 +225,21 @@ test("active and archive content remains text under the exact response policy", 
       waitUntil: "networkidle",
     });
     expect(documentResponse).not.toBeNull();
-    await page.getByRole("tab", { name: "Agent" }).click();
-    await expect(page.getByLabel("Agent transcript")).toBeVisible();
-    for (const item of CONTENT.cases) {
-      await expect(page.getByText(item.text, { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Troupe Timeline" })).toBeVisible();
+    const markers = page.locator(".event-marker[data-kind='message']");
+    await expect(markers).toHaveCount(CONTENT.cases.length);
+    for (let index = 0; index < CONTENT.cases.length; index += 1) {
+      const item = CONTENT.cases[index]!;
+      await markers.nth(index).hover();
+      const expectedLabel = item.text.trim().replace(/\s+/g, " ").slice(0, 42);
+      await expect(page.getByRole("tooltip").locator("strong")).toHaveText(expectedLabel);
     }
     expect(await page.evaluate(() => (globalThis as { __v13Executed?: boolean }).__v13Executed))
       .toBe(false);
-    await expect(page.locator(".diagnostic-transcript img, .diagnostic-transcript script"))
+    await expect(page.locator(".timeline-app img, .timeline-app script, .timeline-app a"))
       .toHaveCount(0);
-    await expect(page.locator(".diagnostic-transcript a, iframe, object, embed")).toHaveCount(0);
-    expect(page.url()).toBe(`${origin}/__v13?mode=${mode}#/agent`);
+    await expect(page.locator("iframe, object, embed")).toHaveCount(0);
+    expect(page.url()).toBe(`${origin}/__v13?mode=${mode}`);
     expect(observed.downloads).toEqual([]);
     expect(observed.errors).toEqual([]);
 

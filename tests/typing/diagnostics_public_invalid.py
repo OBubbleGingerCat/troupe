@@ -11,10 +11,6 @@ class InvalidFrozenJsonSubclass(diagnostics.FrozenJsonArray):  # E: misc
     pass
 
 
-class InvalidViewSubclass(diagnostics.TimelineView):  # E: misc
-    pass
-
-
 class WrongSinkCallback(diagnostics.DiagnosticSink):
     def on_event(self, event: diagnostics.DiagnosticEvent, /) -> int:  # E: override
         _ = event
@@ -64,53 +60,8 @@ async def invalid_sink_commands(sink: diagnostics.DiagnosticSink) -> None:
     sink.close()  # E: attr-defined
 
 
-def mutable_or_open_query_values() -> diagnostics.TimelineQuery:
-    source = diagnostics.SpanSource(kind="cue.execution")
-    outcome = diagnostics.OutcomeFilter(value="completed")
-    return diagnostics.TimelineQuery(
-        source=source,
-        filters=[outcome],  # E: arg-type
-    )
-
-
-def custom_renderer_is_closed() -> diagnostics.TimelineView:
-    query = diagnostics.TimelineQuery(
-        source=diagnostics.SpanSource(kind="cue.execution")
-    )
-    return diagnostics.TimelineView(  # E: call-arg
-        id="timeline",
-        title="Timeline",
-        query=query,
-        time_range="run",
-        scope="run",
-        renderer="custom",
-    )
-
-
-def wrong_renderer_query() -> diagnostics.TimelineView:
-    query = diagnostics.MetricQuery(
-        source=diagnostics.ActTokenMetric(metric="input_tokens"),
-        reducer="sum",
-    )
-    return diagnostics.TimelineView(
-        id="timeline",
-        title="Timeline",
-        query=query,  # E: arg-type
-        time_range="run",
-        scope="run",
-    )
-
-
 def invalid_closed_literals() -> None:
-    diagnostics.SpanSource(kind="future.span")  # E: arg-type
-    diagnostics.EventRows(kind="future_event")  # E: arg-type
-    diagnostics.GroupBy(dimension="future")  # E: arg-type
-    diagnostics.TableColumn(column="future")  # E: arg-type
-    diagnostics.ActTokenMetric(metric="future")  # E: arg-type
-    diagnostics.MetricQuery(
-        source=diagnostics.ActTokenMetric(metric="input_tokens"),
-        reducer="future",  # E: arg-type
-    )
+    diagnostics.DiagnosticCapture(tool_inputs="yes")  # E: arg-type
 
 
 def invalid_alias_values() -> None:

@@ -7,54 +7,24 @@ origin. `troupe diagnostic serve` supplies that same embedded interface for an
 inactive archive on loopback. The archive contains canonical diagnostics, not a
 copy of the frontend.
 
-## Execution hierarchy
+## Timeline and selection
 
-The execution tree and timeline preserve Production, Scene, Actor, Cue, Act,
-and tool identity. An Actor row is a logical group and status summary. Each Cue
-under that Actor keeps its own mailbox wait, execution, Acts, tools, result, and
-outcome:
+The primary workspace is one system-owned Actor timeline. It contains Scene bands,
+Actor lifelines, Cue send/wait/execute phases, Act bars, tool/message markers, and
+Python custom spans/events. Hovering or selecting an item opens its typed details;
+the browser never executes Production Python or accepts renderer registrations.
 
-```text
-Production
-`-- Scene 0042
-    `-- Actor investigator        1 done / 1 running / 1 queued
-        |-- Cue c-102             completed
-        |   |-- mailbox wait
-        |   |-- Actor.cued()
-        |   `-- Act #1 / tools / result
-        |-- Cue c-103             running
-        |   `-- Act #2 / tools / result
-        `-- Cue c-104             queued
-            `-- mailbox wait ... now
-```
+Every Actor lifetime uses one elapsed-time rail labeled `<name> Actor lifetime`.
+The rail, creation boundary, and terminal/open boundary each expose their own hover
+and keyboard-focus details. Multiple Cues keep their identities on the Actor lane;
+their wait and execution bars explain serialization while different Actors may run
+concurrently.
 
-Multiple Cues for one Actor are never merged onto an identity-free Actor track.
-The Actor summary locates work; the Cue rows explain serialization and overlap.
-Collapsing a Cue hides its children but retains the Cue's wait, execution, and
-outcome. Different Actors can execute concurrently.
-
-## Panels and selection
-
-The primary workspace has Timeline, Agent, Events, Usage, and Views panels that
-share one scope and time selection.
-
-- Timeline is the hierarchical trace. It supports pan, zoom, live follow,
-  open/completed spans, causal flows, gaps, counters, and selection.
-- Agent is the transcript for the selected Actor, Cue, and Act. Stable message
-  IDs assemble live message deltas; tool activity and result submission,
-  rejection, repair, acceptance, or absence appear inline in sequence order.
-  Thinking exposes activity and duration, never private thought content.
-- Events is the bounded canonical event table plus typed inspector and filters.
-- Usage separates Live context occupancy from Final Act accounting. Unknown,
-  partial, and unavailable provider usage stay explicit, and aggregates show
-  reported/finalized coverage instead of substituting zero.
-- Views renders the Production's static Timeline, Metric, Table, and TimeSeries
-  declarations. Queries execute on the server at a captured watermark; the
-  browser does not execute Production Python or arbitrary renderer code.
-
-Selecting a tree row, timeline item, transcript message, tool, result, or event
-updates the common selection. Concurrent agent text remains grouped by
-Actor/Cue/Act rather than being concatenated into one transcript.
+Live removes completed Actors after their lifetimes leave the rolling window. History
+freezes the current committed watermark and validates the exact event prefix through
+that watermark before enabling range selection or playback. Its Timeline projection
+is not subject to the 256-span Live capacity, so completed temporary Actors and their
+Python spans/events remain inspectable.
 
 ## Live replay, reconnect, and pause
 
@@ -75,14 +45,19 @@ watermark with a bounded live edge. Resume uses a server range query for data
 that left the hot window, hydrates one consistent snapshot, and catches up. It
 does not accumulate the whole paused raw stream in browser memory.
 
-## Bounded browser state
+## Browser state
 
-The page does not mirror a whole long Run. The V1 release constants retain at
-most 4,096 events in the visible window, four adjacent windows, and 256 live-edge
-events. Derived collections are independently bounded, including 256 spans, 128
-messages, 256 tool facts, 256 result facts, 128 context samples, 256 final Act
-usage facts, 128 gaps, and 64 query results. Eviction marks projections for a
-server refresh; it never silently claims the local projection is complete.
+Live does not mirror a whole long Run. The V1 release constants retain at most
+4,096 events in the visible window, four adjacent windows, and 256 live-edge events.
+Derived Live collections are independently bounded, including 256 spans, 128 messages,
+256 tool facts, 256 result facts, 128 context samples, 256 final Act usage facts,
+128 gaps, and 64 query results. Eviction marks projections for a server refresh; it
+never silently claims the local projection is complete.
+
+Entering History is an explicit exception: V1 transfers the frozen canonical event
+prefix and holds its Timeline projection for that History session. This provides exact
+temporary-Actor replay today. A server-side elapsed-range slice with lifecycle carry-in
+and carry-out is the planned scaling replacement for very large Runs.
 
 Canonical IDs, watermarks, cursors, token integers, and elapsed nanoseconds stay
 as decimal strings or `bigint`. Only a viewport-relative, range-checked delta is
@@ -94,7 +69,7 @@ server; diagnostic content exists only in the current page memory.
 Interactive V1 supports Chromium and Edge 111 or newer, Firefox 115 or newer,
 and Safari 16.4 or newer, including their corresponding mobile engines. It
 requires native `fetch`, `EventSource`, and `BigInt`. Missing browser capability
-or a major event, API, stream-control, View, or UI schema mismatch produces an
+or a major event, API, stream-control, or UI schema mismatch produces an
 explicit static compatibility surface before queries or live ingestion begin.
 
 The server declares `security_scope="trusted_network"`. Pages use same-origin

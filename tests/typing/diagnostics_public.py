@@ -13,9 +13,7 @@ from typing_extensions import assert_type
 assert imported_diagnostics is diagnostics
 
 PUBLIC_CLASSES: tuple[type[object], ...] = (
-    diagnostics.ActTokenMetric,
     diagnostics.ActTokenUsageFinalized,
-    diagnostics.ActTokenUsageRows,
     diagnostics.ActorDetail,
     diagnostics.AffectedElapsedInterval,
     diagnostics.AgentMessageCompleted,
@@ -24,15 +22,9 @@ PUBLIC_CLASSES: tuple[type[object], ...] = (
     diagnostics.AgentSessionBrokenDetail,
     diagnostics.AgentSessionDetail,
     diagnostics.AgentTurnTerminalDetail,
-    diagnostics.AttributeEqualsFilter,
-    diagnostics.AttributeExistsFilter,
     diagnostics.CausalLink,
-    diagnostics.CompletedSpanDuration,
     diagnostics.ContextUsageSampled,
-    diagnostics.CounterRows,
     diagnostics.CounterSampled,
-    diagnostics.CounterSource,
-    diagnostics.CounterValue,
     diagnostics.CustomCounterSampled,
     diagnostics.CustomInstantOccurred,
     diagnostics.CustomSpanFinished,
@@ -51,36 +43,18 @@ PUBLIC_CLASSES: tuple[type[object], ...] = (
     diagnostics.DiagnosticToolOutput,
     diagnostics.EffectDetail,
     diagnostics.EmptyDetail,
-    diagnostics.EventRows,
     diagnostics.FrozenJsonArray,
     diagnostics.FrozenJsonObject,
-    diagnostics.GroupBy,
-    diagnostics.InstantCount,
     diagnostics.InstantOccurred,
-    diagnostics.InstantRows,
-    diagnostics.InstantSource,
-    diagnostics.MetricQuery,
-    diagnostics.MetricView,
     diagnostics.ObservationGap,
-    diagnostics.OutcomeFilter,
     diagnostics.PlanEntry,
     diagnostics.ProductionConstructDetail,
     diagnostics.ProductionLoadDetail,
     diagnostics.ProductionPathResolutionDetail,
     diagnostics.ResultIssue,
     diagnostics.ResultTransitionDetail,
-    diagnostics.SeverityFilter,
     diagnostics.SpanFinished,
-    diagnostics.SpanRows,
-    diagnostics.SpanSource,
     diagnostics.SpanStarted,
-    diagnostics.TableColumn,
-    diagnostics.TableQuery,
-    diagnostics.TableView,
-    diagnostics.TimeSeriesQuery,
-    diagnostics.TimeSeriesView,
-    diagnostics.TimelineQuery,
-    diagnostics.TimelineView,
     diagnostics.ToolCallDetail,
 )
 
@@ -190,69 +164,3 @@ def publish_custom_events() -> None:
     )
     with diagnostics.span("example.operation", attributes={"region": "east"}):
         pass
-
-
-timeline_source: diagnostics.TimelineSource = diagnostics.SpanSource(kind="cue.execution")
-view_filter: diagnostics.ViewFilter = diagnostics.OutcomeFilter(value="completed")
-timeline = diagnostics.TimelineView(
-    id="cue_timeline",
-    title="Cue timeline",
-    query=diagnostics.TimelineQuery(
-        source=timeline_source,
-        filters=(view_filter,),
-        group_by=diagnostics.GroupBy(dimension="actor"),
-    ),
-    time_range="run",
-    scope="run",
-)
-
-metric_source: diagnostics.MetricSource = diagnostics.ActTokenMetric(metric="input_tokens")
-metric = diagnostics.MetricView(
-    id="act_input_mean",
-    title="Act input mean",
-    query=diagnostics.MetricQuery(
-        source=metric_source,
-        reducer="mean",
-        group_by=diagnostics.GroupBy(dimension="act"),
-    ),
-    time_range="run",
-    scope="selection",
-)
-
-table_source: diagnostics.TableSource = diagnostics.EventRows(
-    kind="agent_message_completed"
-)
-table = diagnostics.TableView(
-    id="message_table",
-    title="Completed messages",
-    query=diagnostics.TableQuery(
-        source=table_source,
-        columns=(
-            diagnostics.TableColumn(column="sequence"),
-            diagnostics.TableColumn(column="elapsed_ns"),
-        ),
-        page_size=500,
-    ),
-    time_range="viewport",
-    scope="run",
-)
-
-series_source = diagnostics.CounterValue(
-    selector=diagnostics.CounterSource(name="example.queue_depth")
-)
-series = diagnostics.TimeSeriesView(
-    id="queue_depth",
-    title="Queue depth",
-    query=diagnostics.TimeSeriesQuery(
-        source=series_source,
-        reducer="max",
-        filters=(diagnostics.AttributeExistsFilter(key="queue"),),
-        group_by=diagnostics.GroupBy(dimension="custom_dimension", key="queue"),
-    ),
-    time_range="viewport",
-    scope="selection",
-)
-
-view_scalar: diagnostics.ViewScalar = Decimal("1.5")
-views: tuple[diagnostics.ViewSpec, ...] = (timeline, metric, table, series)
-_view_values = (view_scalar, views)

@@ -8,7 +8,6 @@ use super::{
     query::{EVENTS_PATH, QueryEndpoints, SNAPSHOT_PATH, STATUS_PATH},
     routes::{RouteDefinition, validate_route_definitions},
     sse::replay::{SseEndpoint, requests_event_stream},
-    views::ViewEndpoints,
 };
 
 const RUN_ID_MISMATCH: &str = "assembled diagnostic endpoints belong to different Runs";
@@ -18,7 +17,6 @@ pub struct ActiveRouteAssembly {
     run_id: CanonicalUuid,
     queries: QueryEndpoints,
     sse: SseEndpoint,
-    views: ViewEndpoints,
     dump: DumpEndpoints,
 }
 
@@ -26,16 +24,14 @@ impl ActiveRouteAssembly {
     pub fn new(
         queries: QueryEndpoints,
         sse: SseEndpoint,
-        views: ViewEndpoints,
         dump: DumpEndpoints,
     ) -> Result<Self, RouteConfigurationError> {
         let run_id = queries.run_id();
-        validate_run_ids(run_id, [sse.run_id(), views.run_id(), dump.run_id()])?;
+        validate_run_ids(run_id, [sse.run_id(), dump.run_id()])?;
         Ok(Self {
             run_id,
             queries,
             sse,
-            views,
             dump,
         })
     }
@@ -60,7 +56,7 @@ impl ActiveRouteAssembly {
                 Ok(response)
             }
         })?;
-        assemble_routes(&self.queries, events, &self.views, &self.dump)
+        assemble_routes(&self.queries, events, &self.dump)
     }
 }
 
@@ -68,22 +64,19 @@ impl ActiveRouteAssembly {
 pub struct ArchiveRouteAssembly {
     run_id: CanonicalUuid,
     queries: QueryEndpoints,
-    views: ViewEndpoints,
     dump: DumpEndpoints,
 }
 
 impl ArchiveRouteAssembly {
     pub fn new(
         queries: QueryEndpoints,
-        views: ViewEndpoints,
         dump: DumpEndpoints,
     ) -> Result<Self, RouteConfigurationError> {
         let run_id = queries.run_id();
-        validate_run_ids(run_id, [views.run_id(), dump.run_id()])?;
+        validate_run_ids(run_id, [dump.run_id()])?;
         Ok(Self {
             run_id,
             queries,
-            views,
             dump,
         })
     }
@@ -98,7 +91,7 @@ impl ArchiveRouteAssembly {
             let queries = queries.clone();
             async move { Ok(queries.handle_finite_events(request)) }
         })?;
-        assemble_routes(&self.queries, events, &self.views, &self.dump)
+        assemble_routes(&self.queries, events, &self.dump)
     }
 }
 
@@ -116,7 +109,6 @@ fn validate_run_ids<const N: usize>(
 fn assemble_routes(
     queries: &QueryEndpoints,
     events: RouteDefinition,
-    views: &ViewEndpoints,
     dump: &DumpEndpoints,
 ) -> Result<Vec<RouteDefinition>, RouteConfigurationError> {
     let status = queries.clone();
@@ -132,7 +124,6 @@ fn assemble_routes(
         })?,
         events,
     ];
-    routes.extend(views.route_definitions()?);
     routes.extend(dump.route_definitions()?);
     routes.extend(assets::route_definitions()?);
     validate_route_definitions(&routes)?;

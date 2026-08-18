@@ -52,16 +52,8 @@ export function loadEventManifest(): FixtureManifest {
   return loadManifest("events");
 }
 
-export function loadViewManifest(): FixtureManifest {
-  return loadManifest("views");
-}
-
 export function loadEventFixture(file: string): unknown {
   return readJson(resolve(diagnosticFixtureRoot, "events", file));
-}
-
-export function loadViewFixture(file: string): unknown {
-  return readJson(resolve(diagnosticFixtureRoot, "views", file));
 }
 
 export function loadHttpFixture(file: string): unknown {

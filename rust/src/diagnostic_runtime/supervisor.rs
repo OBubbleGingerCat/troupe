@@ -11,7 +11,6 @@ use troupe_diagnostics_runtime::{
     server::{
         query::QueryCoreFailureSignal,
         sse::replay::{ReplayErrorKind, SseCoreFailureCode, SseCoreFailureSignal},
-        views::ViewCoreFailureSignal,
     },
 };
 
@@ -93,14 +92,6 @@ impl RuntimeInfrastructureFailure {
         )
     }
 
-    fn view(failure: ViewCoreFailureSignal) -> Self {
-        let message = match failure.store_code() {
-            Some(code) => format!("active View query failed [{}]", code.as_str()),
-            None => "active View query execution failed".to_owned(),
-        };
-        Self::new("active_view", "query", failure.code().as_str(), message)
-    }
-
     fn sse(failure: SseCoreFailureSignal) -> Option<Self> {
         Self::sse_parts(failure.code(), failure.reader_code())
     }
@@ -175,10 +166,6 @@ impl FirstCoreFailure {
 
     pub(crate) fn report_query(&self, failure: QueryCoreFailureSignal) {
         self.latch(RuntimeInfrastructureFailure::query(failure));
-    }
-
-    pub(crate) fn report_view(&self, failure: ViewCoreFailureSignal) {
-        self.latch(RuntimeInfrastructureFailure::view(failure));
     }
 
     pub(crate) fn report_sse(&self, failure: SseCoreFailureSignal) {

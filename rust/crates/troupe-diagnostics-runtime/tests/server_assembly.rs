@@ -18,7 +18,6 @@ use troupe_diagnostics_runtime::{
     archive::lease::ActiveArchiveLease,
     query::{
         reader::CapturedEventSource,
-        views::{CursorKey, ViewQueryEngine},
     },
     registry::{model::WebBaseUrl, process_identity::ProcessIdentity},
     server::{
@@ -35,12 +34,8 @@ use troupe_diagnostics_runtime::{
             replay::{ActiveReplaySource, ReplayDriverConfig, SseEndpoint},
             subscriber::{CommitSignal, SubscriberLimits},
         },
-        views::ViewEndpoints,
     },
-    store::{
-        connection::{DiagnosticStore, InitialStoreMetadata},
-        view_records::{CompiledViewSet, persist_view_set},
-    },
+    store::connection::{DiagnosticStore, InitialStoreMetadata},
 };
 
 const RUN_ID: &str = "12345678-1234-4234-9234-123456789abc";
@@ -189,10 +184,6 @@ fn other_run_id() -> CanonicalUuid {
     CanonicalUuid::parse(OTHER_RUN_ID).unwrap()
 }
 
-fn engine() -> ViewQueryEngine {
-    ViewQueryEngine::new(CursorKey::new([0x44; 32]))
-}
-
 fn initialize(directory: &Path) {
     let store = DiagnosticStore::create(
         directory,
@@ -200,8 +191,6 @@ fn initialize(directory: &Path) {
     )
     .unwrap();
     drop(store);
-    let empty = CompiledViewSet::from_json_records(std::iter::empty::<&[u8]>()).unwrap();
-    persist_view_set(directory, run_id(), &empty).unwrap();
 }
 
 fn active_run(label: &str) -> (TestRunDirectory, Arc<ActiveArchiveLease>) {
@@ -231,15 +220,13 @@ fn active_assembly(lease: Arc<ActiveArchiveLease>) -> ActiveRouteAssembly {
         |_| {},
     )
     .unwrap();
-    let views = ViewEndpoints::active(run_id(), Arc::clone(&lease), engine(), |_| {});
     let dump = DumpEndpoints::active(run_id(), lease, TinyDump::new());
-    ActiveRouteAssembly::new(queries, sse, views, dump).unwrap()
+    ActiveRouteAssembly::new(queries, sse, dump).unwrap()
 }
 
 fn archive_assembly(directory: &Path) -> ArchiveRouteAssembly {
     ArchiveRouteAssembly::new(
         QueryEndpoints::archive(run_id(), directory),
-        ViewEndpoints::archive(run_id(), directory, engine()),
         DumpEndpoints::archive(run_id(), directory, TinyDump::new()),
     )
     .unwrap()
@@ -420,7 +407,6 @@ fn route_inventory_matches_the_closed_active_archive_matrix() {
 
     let mismatch = ArchiveRouteAssembly::new(
         QueryEndpoints::archive(other_run_id(), "/unused"),
-        ViewEndpoints::archive(run_id(), "/unused", engine()),
         DumpEndpoints::archive(run_id(), "/unused", TinyDump::new()),
     )
     .err()
@@ -488,13 +474,6 @@ fn response_headers_and_profile_dispatch_match_the_closed_matrix() {
         ),
         ("active_dump", "active", "GET", "/api/v1/dump", vec![]),
         (
-            "active_views",
-            "active",
-            "GET",
-            "/api/v1/views",
-            vec![("Accept", "application/json")],
-        ),
-        (
             "active_unknown_api",
             "active",
             "GET",
@@ -540,7 +519,6 @@ fn response_headers_and_profile_dispatch_match_the_closed_matrix() {
                 assert_eq!(response.header("etag"), active.header("etag"));
             }
             "active_dump" => assert_eq!(response.body, b"trace"),
-            "active_views" => assert_eq!(response.json()["views"], json!([])),
             "active_unknown_api" => {
                 assert_eq!(response.json()["error"]["code"], "not_found");
                 assert!(
@@ -619,7 +597,6 @@ fn method_matrix_is_read_only_and_assembly_contains_no_handler_copy() {
         "handle_snapshot",
         "handle_finite_events",
         "handle_follow",
-        "views.route_definitions",
         "dump.route_definitions",
         "assets::route_definitions",
     ] {

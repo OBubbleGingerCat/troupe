@@ -621,229 +621,8 @@ def span(
     attributes: _Mapping[str, DiagnosticAttributeValue] | None = None,
 ) -> _AbstractContextManager[None]: ...
 
-ViewScalar: _TypeAlias = None | bool | int | float | _Decimal | str
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class SpanSource:
-    kind: _SpanKind | None = None
-    name: str | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class InstantSource:
-    kind: _InstantKind | None = None
-    name: str | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class CounterSource:
-    kind: _CounterKind | None = None
-    name: str | None = None
-    def __post_init__(self) -> None: ...
-
-TimelineSource: _TypeAlias = SpanSource | InstantSource
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class SeverityFilter:
-    filter: _ClassVar[_Literal["severity"]]
-    value: _CustomSeverity
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class OutcomeFilter:
-    filter: _ClassVar[_Literal["outcome"]]
-    value: _SpanOutcome
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class AttributeEqualsFilter:
-    filter: _ClassVar[_Literal["attribute_equals"]]
-    key: str
-    value: ViewScalar
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class AttributeExistsFilter:
-    filter: _ClassVar[_Literal["attribute_exists"]]
-    key: str
-    def __post_init__(self) -> None: ...
-
-ViewFilter: _TypeAlias = (
-    SeverityFilter | OutcomeFilter | AttributeEqualsFilter | AttributeExistsFilter
-)
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class GroupBy:
-    dimension: _GroupDimension
-    key: str | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class CounterValue:
-    source: _ClassVar[_Literal["counter_value"]]
-    selector: CounterSource
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class InstantCount:
-    source: _ClassVar[_Literal["instant_count"]]
-    selector: InstantSource
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class CompletedSpanDuration:
-    source: _ClassVar[_Literal["completed_span_duration"]]
-    selector: SpanSource
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class ActTokenMetric:
-    source: _ClassVar[_Literal["act_token"]]
-    metric: _TokenMetric
-    def __post_init__(self) -> None: ...
-
-MetricSource: _TypeAlias = CounterValue | InstantCount | CompletedSpanDuration | ActTokenMetric
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class EventRows:
-    source: _ClassVar[_Literal["event"]]
-    kind: _EventKind
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class SpanRows:
-    source: _ClassVar[_Literal["span"]]
-    selector: SpanSource
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class InstantRows:
-    source: _ClassVar[_Literal["instant"]]
-    selector: InstantSource
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class CounterRows:
-    source: _ClassVar[_Literal["counter"]]
-    selector: CounterSource
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class ActTokenUsageRows:
-    source: _ClassVar[_Literal["act_token_usage"]]
-
-TableSource: _TypeAlias = EventRows | SpanRows | InstantRows | CounterRows | ActTokenUsageRows
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TableColumn:
-    column: _TableColumnName
-    key: str | None = None
-    metric: _TokenMetric | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TimelineQuery:
-    source: TimelineSource
-    filters: tuple[ViewFilter, ...] = ()
-    group_by: GroupBy | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class MetricQuery:
-    source: MetricSource
-    reducer: _Reducer
-    filters: tuple[ViewFilter, ...] = ()
-    group_by: GroupBy | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TableQuery:
-    source: TableSource
-    columns: tuple[TableColumn, ...]
-    page_size: int
-    filters: tuple[ViewFilter, ...] = ()
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TimeSeriesQuery:
-    source: MetricSource
-    reducer: _Reducer
-    filters: tuple[ViewFilter, ...] = ()
-    group_by: GroupBy | None = None
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TimelineView:
-    renderer: _ClassVar[_Literal["timeline"]]
-    id: str
-    title: str
-    query: TimelineQuery
-    time_range: _ViewTimeRange
-    scope: _ViewScope
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class MetricView:
-    renderer: _ClassVar[_Literal["metric"]]
-    id: str
-    title: str
-    query: MetricQuery
-    time_range: _ViewTimeRange
-    scope: _ViewScope
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TableView:
-    renderer: _ClassVar[_Literal["table"]]
-    id: str
-    title: str
-    query: TableQuery
-    time_range: _ViewTimeRange
-    scope: _ViewScope
-    def __post_init__(self) -> None: ...
-
-@_final
-@_dataclass(frozen=True, slots=True, kw_only=True)
-class TimeSeriesView:
-    renderer: _ClassVar[_Literal["time_series"]]
-    id: str
-    title: str
-    query: TimeSeriesQuery
-    time_range: _ViewTimeRange
-    scope: _ViewScope
-    def __post_init__(self) -> None: ...
-
-ViewSpec: _TypeAlias = TimelineView | MetricView | TableView | TimeSeriesView
-
 __all__ = [
-    "ActTokenMetric",
     "ActTokenUsageFinalized",
-    "ActTokenUsageRows",
     "ActorDetail",
     "AffectedElapsedInterval",
     "AgentMessageCompleted",
@@ -852,15 +631,9 @@ __all__ = [
     "AgentSessionBrokenDetail",
     "AgentSessionDetail",
     "AgentTurnTerminalDetail",
-    "AttributeEqualsFilter",
-    "AttributeExistsFilter",
     "CausalLink",
-    "CompletedSpanDuration",
     "ContextUsageSampled",
-    "CounterRows",
     "CounterSampled",
-    "CounterSource",
-    "CounterValue",
     "CustomCounterSampled",
     "CustomInstantOccurred",
     "CustomSpanFinished",
@@ -885,46 +658,22 @@ __all__ = [
     "DiagnosticToolOutput",
     "EffectDetail",
     "EmptyDetail",
-    "EventRows",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",
-    "GroupBy",
-    "InstantCount",
     "InstantDetail",
     "InstantOccurred",
-    "InstantRows",
-    "InstantSource",
-    "MetricQuery",
-    "MetricSource",
-    "MetricView",
     "ObservationGap",
-    "OutcomeFilter",
     "PlanEntry",
     "ProductionConstructDetail",
     "ProductionLoadDetail",
     "ProductionPathResolutionDetail",
     "ResultIssue",
     "ResultTransitionDetail",
-    "SeverityFilter",
     "SpanFinished",
-    "SpanRows",
-    "SpanSource",
     "SpanStartDetail",
     "SpanStarted",
-    "TableColumn",
-    "TableQuery",
-    "TableSource",
-    "TableView",
-    "TimeSeriesQuery",
-    "TimeSeriesView",
-    "TimelineQuery",
-    "TimelineSource",
-    "TimelineView",
     "ToolCallDetail",
-    "ViewFilter",
-    "ViewScalar",
-    "ViewSpec",
     "counter",
     "event",
     "span",

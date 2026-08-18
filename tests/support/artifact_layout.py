@@ -80,6 +80,11 @@ POST_PLAN_EXAMPLE_CHANGES: Final = frozenset(
         "diagnostics/production.py",
     }
 )
+POST_PLAN_EXAMPLE_REMOVALS: Final = frozenset(
+    {
+        "diagnostics/views.py",
+    }
+)
 
 
 def is_generated_example_path(path: PurePosixPath) -> bool:
@@ -582,6 +587,7 @@ def validate_repository_artifacts(repository_root: Path, layout: ArtifactLayout)
             if removed.path.startswith("examples/"):
                 expected_example_names.discard(removed.path.removeprefix("examples/"))
     expected_example_names.update(POST_PLAN_EXAMPLE_CHANGES)
+    expected_example_names.difference_update(POST_PLAN_EXAMPLE_REMOVALS)
     if set(actual_examples) != expected_example_names:
         raise ArtifactLayoutError("example inventory differs from the artifact contract")
     for name, snapshot in layout.base.examples.items():

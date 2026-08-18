@@ -20,7 +20,6 @@ STUB = ROOT / "src/troupe/diagnostics.pyi"
 EXAMPLES = (
     ROOT / "examples/diagnostics/sink.py",
     ROOT / "examples/diagnostics/custom.py",
-    ROOT / "examples/diagnostics/views.py",
 )
 SHOWCASE = ROOT / "examples/diagnostics/production.py"
 ARTIFACT = ROOT / "tests/fixtures/artifact_layout/nodes/O01.json"
@@ -179,18 +178,13 @@ def test_tool_payload_and_custom_limits_do_not_promise_content_processing() -> N
         assert f"`{name}`" in document
 
 
-def test_four_static_view_types_and_pre_constructor_contract_are_documented() -> None:
+def test_python_cannot_register_visualization_panels() -> None:
     document = _read(DOCUMENT)
-    views = _read(EXAMPLES[2])
-
-    for name in ("TimelineView", "MetricView", "TableView", "TimeSeriesView"):
-        assert f"`{name}`" in document
-        assert f"diagnostics.{name}(" in views
-    for forbidden in ("SQL", "regex", "joins", "Python callables", "custom renderers"):
-        assert forbidden in document
-    assert "before calling the Production constructor" in document
-    assert "do not import or execute Production Python" in document
-    assert "diagnostic_views = DIAGNOSTIC_VIEWS" in views
+    stub = _read(STUB)
+    showcase = _read(SHOWCASE)
+    assert "Built-in Timeline" in document
+    assert "ViewSpec" not in stub
+    assert "diagnostic_views" not in showcase
 
 
 def test_examples_are_parseable_bounded_and_callbacks_are_observational() -> None:
@@ -245,7 +239,6 @@ def test_end_to_end_showcase_composes_real_finite_scenes_without_running_provide
     ):
         assert command in examples_document
     for marker in (
-        "diagnostic_views = DIAGNOSTIC_VIEWS",
         "diagnostic_sink=sink",
         "await sink.wait_closed()",
         "record_batch(queue_depth=planned_depth, region=operation)",

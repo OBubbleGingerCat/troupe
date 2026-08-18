@@ -160,63 +160,7 @@ class ObservedActor(troupe.Actor):
         )
 
 
-DIAGNOSTIC_VIEWS: tuple[diagnostics.ViewSpec, ...] = (
-    diagnostics.TimelineView(
-        id="cue_timeline",
-        title="Cue execution",
-        query=diagnostics.TimelineQuery(
-            source=diagnostics.SpanSource(kind="cue.execution"),
-            filters=(diagnostics.OutcomeFilter(value="completed"),),
-            group_by=diagnostics.GroupBy(dimension="actor"),
-        ),
-        time_range="run",
-        scope="run",
-    ),
-    diagnostics.MetricView(
-        id="act_input_tokens",
-        title="Act input tokens",
-        query=diagnostics.MetricQuery(
-            source=diagnostics.ActTokenMetric(metric="input_tokens"),
-            reducer="sum",
-            group_by=diagnostics.GroupBy(dimension="act"),
-        ),
-        time_range="run",
-        scope="selection",
-    ),
-    diagnostics.TableView(
-        id="act_usage",
-        title="Act usage",
-        query=diagnostics.TableQuery(
-            source=diagnostics.ActTokenUsageRows(),
-            columns=(
-                diagnostics.TableColumn(column="sequence"),
-                diagnostics.TableColumn(column="act_id"),
-                diagnostics.TableColumn(column="token", metric="input_tokens"),
-            ),
-            page_size=100,
-        ),
-        time_range="viewport",
-        scope="run",
-    ),
-    diagnostics.TimeSeriesView(
-        id="queue_depth",
-        title="Queue depth",
-        query=diagnostics.TimeSeriesQuery(
-            source=diagnostics.CounterValue(
-                selector=diagnostics.CounterSource(name="e2e.queue_depth")
-            ),
-            reducer="max",
-            group_by=diagnostics.GroupBy(dimension="custom_dimension", key="provider"),
-        ),
-        time_range="viewport",
-        scope="selection",
-    ),
-)
-
-
 class Production(troupe.Production):
-    diagnostic_views = DIAGNOSTIC_VIEWS
-
     def __init__(self, args: list[str]) -> None:
         if len(args) != 1:
             raise ValueError("expected one JSON configuration path")

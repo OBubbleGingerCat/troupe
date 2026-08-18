@@ -4,9 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule};
 
 const PUBLIC_NAMES: &[&str] = &[
-    "ActTokenMetric",
     "ActTokenUsageFinalized",
-    "ActTokenUsageRows",
     "ActorDetail",
     "AffectedElapsedInterval",
     "AgentMessageCompleted",
@@ -15,15 +13,9 @@ const PUBLIC_NAMES: &[&str] = &[
     "AgentSessionBrokenDetail",
     "AgentSessionDetail",
     "AgentTurnTerminalDetail",
-    "AttributeEqualsFilter",
-    "AttributeExistsFilter",
     "CausalLink",
-    "CompletedSpanDuration",
     "ContextUsageSampled",
-    "CounterRows",
     "CounterSampled",
-    "CounterSource",
-    "CounterValue",
     "CustomCounterSampled",
     "CustomInstantOccurred",
     "CustomSpanFinished",
@@ -48,46 +40,22 @@ const PUBLIC_NAMES: &[&str] = &[
     "DiagnosticToolOutput",
     "EffectDetail",
     "EmptyDetail",
-    "EventRows",
     "FrozenJsonArray",
     "FrozenJsonObject",
     "FrozenJsonValue",
-    "GroupBy",
-    "InstantCount",
     "InstantDetail",
     "InstantOccurred",
-    "InstantRows",
-    "InstantSource",
-    "MetricQuery",
-    "MetricSource",
-    "MetricView",
     "ObservationGap",
-    "OutcomeFilter",
     "PlanEntry",
     "ProductionConstructDetail",
     "ProductionLoadDetail",
     "ProductionPathResolutionDetail",
     "ResultIssue",
     "ResultTransitionDetail",
-    "SeverityFilter",
     "SpanFinished",
-    "SpanRows",
-    "SpanSource",
     "SpanStartDetail",
     "SpanStarted",
-    "TableColumn",
-    "TableQuery",
-    "TableSource",
-    "TableView",
-    "TimeSeriesQuery",
-    "TimeSeriesView",
-    "TimelineQuery",
-    "TimelineSource",
-    "TimelineView",
     "ToolCallDetail",
-    "ViewFilter",
-    "ViewScalar",
-    "ViewSpec",
     "counter",
     "event",
     "span",
@@ -98,7 +66,6 @@ fn combined_source() -> CString {
         super::events::source(),
         super::sink::source(),
         super::custom::source(),
-        super::views::source(),
     ];
     let mut source = Vec::with_capacity(
         fragments
@@ -167,7 +134,7 @@ import inspect as _inspect
 
 assert __all__ == sorted(__all__)
 assert set(__all__) == {name for name in globals() if not name.startswith("_")}
-assert len(__all__) == 87
+assert len(__all__) == 55
 for name in __all__:
     value = globals()[name]
     if type(value) is type or type(value).__name__ == "function":

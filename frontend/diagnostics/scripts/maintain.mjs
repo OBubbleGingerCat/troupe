@@ -811,7 +811,10 @@ async function validateBuildOutput(output) {
   }
   const html = await readFile(join(output, "index.html"), "utf8");
   for (const match of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
-    if (match[1].startsWith("/") || /^[a-z]+:/i.test(match[1])) {
+    if (
+      match[1] !== "data:,"
+      && (match[1].startsWith("/") || /^[a-z]+:/i.test(match[1]))
+    ) {
       fail("build smoke produced a non-relative asset URL");
     }
   }

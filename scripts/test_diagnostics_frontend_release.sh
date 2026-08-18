@@ -120,7 +120,7 @@ export all_proxy=http://127.0.0.1:9/
 export NO_PROXY=localhost,127.0.0.1,::1
 export no_proxy=localhost,127.0.0.1,::1
 
-unit_tests="tests/unit/browser-provisioning.test.ts,tests/unit/bundle-contract.test.ts,tests/unit/generated-assets.test.ts,tests/unit/protocol-controls.test.ts,tests/unit/protocol-events.test.ts,tests/unit/protocol-views.test.ts,tests/unit/state-property.test.ts,tests/unit/state-reducer.test.ts,tests/unit/state-windows.test.ts,tests/unit/timeline-hit-test.test.ts,tests/unit/timeline-layout.test.ts,tests/unit/toolchain.test.ts"
+unit_tests="tests/unit/browser-provisioning.test.ts,tests/unit/bundle-contract.test.ts,tests/unit/generated-assets.test.ts,tests/unit/history-capture.test.ts,tests/unit/production-timeline.test.ts,tests/unit/protocol-controls.test.ts,tests/unit/protocol-events.test.ts,tests/unit/state-property.test.ts,tests/unit/state-reducer.test.ts,tests/unit/state-windows.test.ts,tests/unit/timeline-hit-test.test.ts,tests/unit/timeline-layout.test.ts,tests/unit/toolchain.test.ts"
 
 declare -a stage_names=()
 declare -a stage_statuses=()

@@ -6,6 +6,5 @@ pub mod progress;
 pub mod projector;
 pub mod quota;
 pub mod schema;
-pub mod view_records;
 pub mod watermark;
 pub mod writer;

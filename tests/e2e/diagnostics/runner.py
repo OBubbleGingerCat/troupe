@@ -474,56 +474,6 @@ def _active_cli_checks(
     return http_status, latest_snapshot, latest_events
 
 
-def _view_checks(
-    base_url: str,
-    run_id: str,
-    stage_binding: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    catalog = _http_json(base_url, "/api/v1/views")
-    oracle.assert_view_catalog(catalog, run_id)
-    snapshot = _http_json(base_url, "/api/v1/snapshot")
-    captured_end = int(snapshot["state"]["through_elapsed_ns"]) + 1
-    responses: dict[str, dict[str, Any]] = {}
-    for view in catalog["views"]:
-        query = {"view_id": view["id"]}
-        if view["time_range"] == "viewport":
-            query.update(
-                viewport_start_ns="0",
-                viewport_end_ns=str(captured_end),
-            )
-        response = _http_json(base_url, "/api/v1/views?" + urlencode(query))
-        oracle.assert_view_response(response, view["renderer"], run_id)
-        responses[view["renderer"]] = response
-    series = responses["time_series"]
-    binding = series["binding"]
-    oracle.require(
-        int(binding["captured_watermark"]) > int(stage_binding["captured_watermark"]),
-        "view watermark did not advance after live commit",
-    )
-    end = int(binding["captured_elapsed_end_ns"])
-    exact = {
-        "view_id": "queue_depth",
-        "captured_watermark": binding["captured_watermark"],
-        "captured_elapsed_end_ns": binding["captured_elapsed_end_ns"],
-        "viewport_start_ns": "0",
-        "viewport_end_ns": str(end),
-    }
-    full = _http_json(base_url, "/api/v1/views?" + urlencode(exact))
-    half_query = dict(exact)
-    half_query["viewport_end_ns"] = str(max(1, end // 2))
-    half = _http_json(base_url, "/api/v1/views?" + urlencode(half_query))
-    oracle.require(full["binding"] != half["binding"], "viewport bindings were mixed")
-    oracle.require(
-        full["bucket_width_ns"] != half["bucket_width_ns"],
-        "derived TimeSeries width did not change with range",
-    )
-    points = [point for item in full.get("series", []) for point in item["points"]]
-    oracle.require(any(point["value"] is None for point in points), "no explicit empty bucket")
-    oracle.require(any(point["partial"] for point in points), "no partial terminal bucket")
-    oracle.require("coverage" in full, "TimeSeries omitted coverage")
-    return responses
-
-
 def _asset_checks(base_url: str) -> None:
     status, headers, body = _http_bytes(base_url, "/", accept="text/html")
     oracle.require(status == 200, f"diagnostic root returned {status}")
@@ -634,7 +584,6 @@ def _archive_checks(
         _http_json(archive_url, "/api/v1/events?after=0")["events"] == events,
         "archive serve event drift",
     )
-    oracle.assert_view_catalog(_http_json(archive_url, "/api/v1/views"), base_run_id)
     status_code, _, payload = _http_bytes(
         archive_url, "/api/v1/dump", accept="application/x-protobuf"
     )
@@ -799,19 +748,6 @@ def _run_case(
         )
         oracle.assert_dense_events(stage_events, run_id, prefix=True)
         stage_watermark = len(stage_events)
-        stage_end = int(stage_snapshot["state"]["through_elapsed_ns"]) + 1
-        stage_series = _http_json(
-            base_url,
-            "/api/v1/views?"
-            + urlencode(
-                {
-                    "view_id": "queue_depth",
-                    "viewport_start_ns": "0",
-                    "viewport_end_ns": str(stage_end),
-                }
-            ),
-        )
-        stage_binding = stage_series["binding"]
         _asset_checks(base_url)
 
         live_sse = SseCapture(base_url, stage_watermark, stop_after_events=12)
@@ -874,7 +810,6 @@ def _run_case(
             "SSE reconnect did not preserve its resume cursor",
         )
 
-        _view_checks(base_url, run_id, stage_binding)
         active_trace = case_root / "active.pftrace"
         dump_report = _dump(
             console, ("--url", base_url), active_trace, environment

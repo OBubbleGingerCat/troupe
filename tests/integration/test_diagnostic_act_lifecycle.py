@@ -88,6 +88,9 @@ def test_real_boundaries_drive_the_closed_act_taxonomy() -> None:
     assert driver.index("self.phase = ActCallPhase::Running") < driver.index(
         "ActHook::DriverStarted"
     )
+    assert driver.index("ActHook::DriverStarted") < driver.index(
+        "let future = pyo3_async_runtimes::tokio::future_into_py"
+    )
     request_cancel = _between(call, "fn request_cancel(&self)", "fn cancel_signal(")
     assert request_cancel.index("ActHook::CancelRequested") < request_cancel.index(
         "control.request_cancel()"

@@ -11,7 +11,7 @@ use troupe_diagnostics_perfetto::{
     dump::dump_captured_prefix_with_version,
 };
 use troupe_diagnostics_runtime::{
-    query::{reader::CapturedEventSource, views::ViewQueryEngine},
+    query::reader::CapturedEventSource,
     registry::process_identity::current_process_identity,
     server::{
         assembly::ArchiveRouteAssembly,
@@ -21,7 +21,6 @@ use troupe_diagnostics_runtime::{
         },
         query::QueryEndpoints,
         runtime::{DiagnosticServer, ServerConfig},
-        views::ViewEndpoints,
     },
 };
 
@@ -432,7 +431,6 @@ pub(crate) fn start_archive(
 
     let assembly = ArchiveRouteAssembly::new(
         QueryEndpoints::archive(run_id, &run_directory),
-        ViewEndpoints::archive(run_id, &run_directory, ViewQueryEngine::default()),
         DumpEndpoints::archive(run_id, &run_directory, PerfettoDumpProducer::new()),
     )
     .map_err(|error| ServeError::new(ServeErrorCode::RouteAssembly, error.to_string()))?;

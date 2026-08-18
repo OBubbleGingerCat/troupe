@@ -8,9 +8,9 @@ one Troupe Run. Start with the page matching the task at hand:
 - [Canonical events](events.md): event envelopes, ordering, spans, scopes,
   observation gaps, and completeness.
 - [Python API](python.md): per-Act `DiagnosticSink`, capture policy, custom
-  instrumentation, token usage, and static `ViewSpec` declarations.
-- [Live Web interface](web.md): the Actor/Cue execution hierarchy, timeline,
-  transcript, usage, declared Views, replay, reconnect, and bounded browser state.
+  instrumentation, and token usage.
+- [Live Web interface](web.md): the built-in Actor/Cue timeline, replay,
+  reconnect, and bounded browser state.
 - [Diagnostic CLI](cli.md): exact commands, targets, formats, exit status,
   archive serving, and cleanup.
 - [Perfetto export](perfetto.md): stable-prefix `.pftrace` capture, local atomic

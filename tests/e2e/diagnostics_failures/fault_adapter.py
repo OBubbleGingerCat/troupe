@@ -109,15 +109,6 @@ ADAPTERS: Mapping[str, AdapterSpec] = {
             _runtime_test("server_shell"),
         )
     ),
-    "startup_bootstrap_views": AdapterSpec(
-        (
-            _troupe_lib(
-                "diagnostic_runtime::bootstrap::tests::"
-                "bootstrap_failure_matrix_cleans_real_resources"
-            ),
-            _troupe_lib("diagnostic_runtime::view_compile::tests"),
-        )
-    ),
     "runtime_admission_writer": AdapterSpec(
         (_runtime_test("store_admission"), _runtime_test("store_writer"))
     ),
@@ -127,12 +118,7 @@ ADAPTERS: Mapping[str, AdapterSpec] = {
     "runtime_active_queries": AdapterSpec(
         (_runtime_test("query_reader"), _runtime_test("server_query"))
     ),
-    "runtime_views_sse": AdapterSpec(
-        (
-            _runtime_test("server_views"),
-            _runtime_test("server_sse"),
-        )
-    ),
+    "runtime_sse": AdapterSpec((_runtime_test("server_sse"),)),
     "local_exporter": AdapterSpec((_runtime_test("server_dump"),)),
     "usage_terminal_matrix": AdapterSpec(
         (
@@ -190,17 +176,6 @@ EXPECTED_ADAPTER_CHECKS: Mapping[str, frozenset[str]] = {
             "shutdown.registry_unpublish",
         }
     ),
-    "startup_bootstrap_views": frozenset(
-        {
-            "startup.view_invalid",
-            "startup.view_duplicate",
-            "startup.view_incompatible",
-            "startup.view_constructor_not_run",
-            "startup.view_user_failure_clean",
-            "startup.view_commit_incomplete",
-            "startup.view_finalization_incomplete",
-        }
-    ),
     "runtime_admission_writer": frozenset(
         {
             "runtime.hub",
@@ -236,9 +211,8 @@ EXPECTED_ADAPTER_CHECKS: Mapping[str, frozenset[str]] = {
             "shutdown.archive_readable",
         }
     ),
-    "runtime_views_sse": frozenset(
+    "runtime_sse": frozenset(
         {
-            "runtime.view_worker",
             "runtime.sse_reader",
             "local.sse_slow_client",
             "local.sse_overflow",

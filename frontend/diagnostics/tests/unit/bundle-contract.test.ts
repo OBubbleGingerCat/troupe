@@ -119,6 +119,8 @@ describe("deterministic raw bundle contract", () => {
     expect(document.querySelectorAll("script")).toHaveLength(1);
     expect(document.querySelector("script")?.getAttribute("src")).toBe("./src/main.tsx");
     expect(document.querySelector("script")?.textContent?.trim()).toBe("");
+    expect(document.querySelectorAll('link[rel="icon"]')).toHaveLength(1);
+    expect(document.querySelector('link[rel="icon"]')?.getAttribute("href")).toBe("data:,");
     expect(document.querySelector("style, base, link[href^='http']")).toBeNull();
   });
 
@@ -155,11 +157,7 @@ describe("deterministic raw bundle contract", () => {
       fetch,
     });
     await controller.start();
-    const viewClientFactory = vi.fn(() => {
-      throw new Error("static compatibility must not create a query client");
-    });
-
-    render(createElement(App, { liveController: controller, viewClientFactory }));
+    render(createElement(App, { liveController: controller }));
 
     expect(controller.state.phase).toBe("compatibility");
     expect(controller.state.bootstrap?.compatibility).toMatchObject({
@@ -169,7 +167,6 @@ describe("deterministic raw bundle contract", () => {
     expect(screen.getByLabelText("Compatibility status")).toHaveTextContent(
       "Required browser capabilities are unavailable",
     );
-    expect(viewClientFactory).not.toHaveBeenCalled();
     expect(urls).toEqual([
       "http://diagnostics.test/troupe/api/v1/identity",
       "http://diagnostics.test/troupe/api/v1/status",

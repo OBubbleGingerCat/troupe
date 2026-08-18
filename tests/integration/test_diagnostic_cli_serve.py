@@ -51,7 +51,6 @@ def test_archive_server_composes_existing_read_only_owners_without_registry_or_s
     for required in (
         "ArchiveRouteAssembly::new",
         "QueryEndpoints::archive",
-        "ViewEndpoints::archive",
         "DumpEndpoints::archive",
         "PerfettoDumpProducer",
         "dump_captured_prefix_with_version(",
@@ -139,7 +138,6 @@ def test_rust_contract_covers_routes_lifecycle_active_rejection_and_browser_boun
         '"/api/v1/status"',
         '"/api/v1/snapshot"',
         '"/api/v1/events?after=0"',
-        '"/api/v1/views"',
         '"/api/v1/dump"',
         '"/"',
         "CleanupArchiveLease::acquire",

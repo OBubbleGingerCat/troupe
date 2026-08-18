@@ -62,7 +62,6 @@ const DIAGNOSTIC_PYTHON_MODULES: &[&str] = &[
     "fragment_test_support",
     "install",
     "sink",
-    "views",
 ];
 
 const DIAGNOSTIC_SINK_MODULES: &[&str] = &[
@@ -80,7 +79,6 @@ const DIAGNOSTIC_RUNTIME_MODULES: &[&str] = &[
     "act_producer",
     "activation",
     "actor_producer",
-    "archive_views",
     "bootstrap",
     "cue_producer",
     "custom_act_binding",
@@ -98,7 +96,6 @@ const DIAGNOSTIC_RUNTIME_MODULES: &[&str] = &[
     "sink_settlement",
     "supervisor",
     "usage_finalization",
-    "view_compile",
 ];
 
 const DIAGNOSTIC_CLI_MODULES: &[&str] = &[

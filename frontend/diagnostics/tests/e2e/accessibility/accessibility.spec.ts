@@ -36,12 +36,12 @@ const sceneScope = { ...scope(null), actor_id: null };
 const events = [
   {
     kind: "span_started", schema_version: 1, run_id: RUN_ID, sequence: "1",
-    elapsed_ns: "10", scope: sceneScope, caused_by: [], span_kind: "scene.lifecycle",
+    elapsed_ns: "10000000000", scope: sceneScope, caused_by: [], span_kind: "scene.lifecycle",
     detail: {}, parent_span_id: null,
   },
   {
     kind: "span_started", schema_version: 1, run_id: RUN_ID, sequence: "2",
-    elapsed_ns: "20", scope: scope(null), caused_by: [], span_kind: "actor.handle_lifetime",
+    elapsed_ns: "20000000000", scope: scope(null), caused_by: [], span_kind: "actor.handle_lifetime",
     detail: {
       display_name: "Keyboard operator with an intentionally long descriptive label that must wrap safely",
       actor_type: "AccessibilityActor",
@@ -49,28 +49,28 @@ const events = [
   },
   {
     kind: "span_started", schema_version: 1, run_id: RUN_ID, sequence: "3",
-    elapsed_ns: "30", scope: scope("cue-one"), caused_by: [], span_kind: "cue.mailbox_wait",
+    elapsed_ns: "30000000000", scope: scope("cue-one"), caused_by: [], span_kind: "cue.mailbox_wait",
     detail: {}, parent_span_id: null,
   },
   {
     kind: "span_finished", schema_version: 1, run_id: RUN_ID, sequence: "4",
-    elapsed_ns: "40", scope: scope("cue-one"), caused_by: [], span_id: "3",
+    elapsed_ns: "40000000000", scope: scope("cue-one"), caused_by: [], span_id: "3",
     outcome: "completed", error_code: null,
   },
   {
     kind: "span_started", schema_version: 1, run_id: RUN_ID, sequence: "5",
-    elapsed_ns: "50", scope: scope("cue-one"), caused_by: [], span_kind: "cue.execution",
+    elapsed_ns: "50000000000", scope: scope("cue-one"), caused_by: [], span_kind: "cue.execution",
     detail: {}, parent_span_id: null,
   },
   {
     kind: "span_started", schema_version: 1, run_id: RUN_ID, sequence: "6",
-    elapsed_ns: "60", scope: scope("cue-one", "act-one"), caused_by: [], span_kind: "act.lifecycle",
+    elapsed_ns: "60000000000", scope: scope("cue-one", "act-one"), caused_by: [], span_kind: "act.lifecycle",
     detail: { provider: "fixture", effective_model: "model-a", effective_effort: "medium" },
     parent_span_id: null,
   },
   {
     kind: "agent_message_delta", schema_version: 1, run_id: RUN_ID, sequence: "7",
-    elapsed_ns: "70", scope: scope("cue-one", "act-one"), caused_by: [],
+    elapsed_ns: "70000000000", scope: scope("cue-one", "act-one"), caused_by: [],
     message_id: "message-accessible", source_message_id: null,
     text_delta: "A long diagnostic message remains plain, readable, and contained on a narrow mobile viewport. ".repeat(6),
   },
@@ -119,18 +119,16 @@ class Controller {
     this.listeners.forEach((listener) => listener(this.state));
   }
 }
-const emptyViews = () => ({
-  loadCatalog: async () => ({
-    api_schema_version: 1, run_id: RUN_ID, capabilities: {}, views: [],
-  }),
-  query: async () => { throw new Error("empty fixture has no views"); },
-  reportRendererFailure: (_id, error) => error,
-  invalidateView() {}, dispose() {},
-});
 render(h(App, {
   liveController: new Controller(),
-  viewClientFactory: emptyViews,
   productionName: "Accessibility production",
+  historyFetch: async () => new Response(JSON.stringify({
+    api_schema_version: 1,
+    run_id: RUN_ID,
+    captured_watermark: "7",
+    events,
+    next_after: null,
+  }), { status: 200, headers: { "content-type": "application/json" } }),
 }), document.querySelector("#app"));
 `;
 
@@ -162,7 +160,7 @@ function fixturePlugin(): Plugin {
         try {
           const html = await server.transformIndexHtml(pathname, String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Troupe accessibility acceptance</title></head><body><main id="app"></main>
+<link rel="icon" href="data:,"><title>Troupe accessibility acceptance</title></head><body><main id="app"></main>
 <script type="module" src="/__v04-entry.js"></script></body></html>`);
           response.statusCode = 200;
           response.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -177,7 +175,9 @@ function fixturePlugin(): Plugin {
 
 async function visibleApp(page: Page, origin: string, mode: string): Promise<void> {
   await page.goto(`${origin}/__v04?mode=${mode}`, { waitUntil: "networkidle" });
-  await expect(page.getByRole("heading", { name: "Troupe Diagnostics" })).toBeVisible();
+  await expect(page.getByRole("heading", {
+    name: mode === "compatibility" ? "Troupe Diagnostics" : "Troupe Timeline",
+  })).toBeVisible();
 }
 
 export function registerAccessibilityAcceptance(): void {
@@ -220,21 +220,15 @@ export function registerAccessibilityAcceptance(): void {
         && !ALLOWLIST.allowed_rule_ids.includes(violation.id)
       ));
       expect(blocking, JSON.stringify(blocking, null, 2)).toEqual([]);
-      const treegrid = page.getByRole("treegrid", { name: "Production timeline" });
-      const canvas = page.locator("canvas.timeline-canvas");
-      await expect(treegrid).toBeVisible();
-      await expect(canvas).toHaveAttribute("aria-hidden", "true");
-      expect(await treegrid.getAttribute("data-visible-row-ids"))
-        .toBe(await canvas.getAttribute("data-visible-row-ids"));
-      const rows = treegrid.getByRole("row");
-      expect(await rows.count()).toBeGreaterThan(0);
-      for (let index = 0; index < await rows.count(); index += 1) {
-        const row = rows.nth(index);
-        await expect(row).toHaveAttribute("aria-level", /\d+/);
-        const kind = await row.getAttribute("data-kind");
-        expect(kind).not.toBeNull();
-        expect(await row.getAttribute("aria-label")).toContain(`, ${kind}, `);
-      }
+      await expect(page.getByRole("group", { name: "Timeline mode" })).toBeVisible();
+      await expect(page.getByLabel("Actor-centered timeline")).toBeVisible();
+      const lifetime = page.locator(".actor-lifetime-track").first();
+      await expect(lifetime).toBeVisible();
+      await expect(lifetime).toHaveAttribute("aria-label", /Actor lifetime/);
+      await expect(page.locator(".actor-lifecycle-marker[data-event='created']").first())
+        .toHaveAttribute("aria-label", /Actor created/);
+      await expect(page.getByRole("tablist")).toHaveCount(0);
+      await expect(page.locator("canvas, [role='treegrid']")).toHaveCount(0);
     }
   });
 
@@ -242,82 +236,58 @@ export function registerAccessibilityAcceptance(): void {
     await visibleApp(page, origin, "compatibility");
     await expect(page.getByRole("status", { name: "Compatibility status" }))
       .toContainText("Required browser capabilities are unavailable");
-    await expect(page.getByRole("tablist", { name: "Primary diagnostics views" })).toHaveCount(0);
-    await expect(page.getByRole("treegrid", { name: "Production timeline" })).toHaveCount(0);
+    await expect(page.getByRole("group", { name: "Timeline mode" })).toHaveCount(0);
+    await expect(page.locator(".actor-lifetime-track")).toHaveCount(0);
   });
 
-  test("keyboard traverses tree, tabs, and viewport controls without losing focus", async ({ page }) => {
+  test("keyboard traverses timeline modes, lifecycles, and History controls", async ({ page }) => {
     await visibleApp(page, origin, "active");
-    const timelineTab = page.getByRole("tab", { name: "Timeline" });
-    await timelineTab.focus();
-    await page.keyboard.press("ArrowRight");
-    await expect(page.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("tab", { name: "Agent" })).toBeFocused();
-    await page.keyboard.press("End");
-    await expect(page.getByRole("tab", { name: "Views" })).toBeFocused();
-    await page.keyboard.press("Home");
-    await expect(timelineTab).toBeFocused();
+    const live = page.getByRole("button", { name: "Live", exact: true });
+    await live.focus();
+    await expect(live).toHaveAttribute("aria-pressed", "true");
+    const history = page.getByRole("button", { name: "History", exact: true });
+    await history.focus();
     await page.keyboard.press("Enter");
+    await expect(history).toBeFocused();
+    await expect(history).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByLabel("History range selection")).toBeVisible();
 
-    const treegrid = page.getByRole("treegrid", { name: "Production timeline" });
-    const canvas = page.locator("canvas.timeline-canvas");
-    const firstRow = treegrid.getByRole("row").first();
-    await firstRow.focus();
-    await expect(firstRow).not.toHaveAttribute("aria-expanded");
+    const lifetime = page.locator(".actor-lifetime-track").first();
+    await lifetime.focus();
+    await expect(lifetime).toBeFocused();
+    await expect(page.getByRole("tooltip")).toContainText("Actor lifetime");
+    await expect(page.getByRole("tooltip")).toContainText("AccessibilityActor");
 
-    await page.keyboard.press("ArrowDown");
-    const focusedScene = page.locator("[role=row]:focus");
-    await expect(focusedScene).toHaveAttribute("aria-label", /Scene scene-accessibility, scene, running/);
-    await expect(focusedScene).not.toHaveAttribute("aria-expanded");
+    const created = page.locator(".actor-lifecycle-marker[data-event='created']").first();
+    await created.focus();
+    await expect(created).toBeFocused();
+    await expect(page.getByRole("tooltip")).toContainText("Actor created");
 
-    await page.keyboard.press("ArrowDown");
-    await expect(page.locator("[role=row]:focus"))
-      .toHaveAttribute("aria-label", "Actor actor-keyboard, actor, running");
-    await expect(page.locator("[role=row]:focus")).not.toHaveAttribute("aria-expanded");
-    await page.keyboard.press("ArrowDown");
-    const focusedCue = page.locator("[role=row]:focus");
-    await expect(focusedCue).toHaveAttribute("aria-label", /Cue cue-one, cue, running/);
-    await expect(focusedCue).toHaveAttribute("aria-expanded", "false");
-    await page.keyboard.press("ArrowRight");
-    await expect(focusedCue).toHaveAttribute("aria-expanded", "true");
-    expect(await treegrid.getAttribute("data-visible-row-ids"))
-      .toBe(await canvas.getAttribute("data-visible-row-ids"));
-    await page.keyboard.press("End");
-    const focusedRow = page.locator("[role=row]:focus");
-    await expect(focusedRow).toHaveCount(1);
+    const play = page.getByRole("button", { name: "Play History range" });
+    await expect(play).toBeEnabled();
+    await play.focus();
     await page.keyboard.press("Enter");
-    await expect(focusedRow).toHaveAttribute("aria-selected", "true");
-
-    const viewport = page.getByLabel("Timeline viewport");
-    const initial = await viewport.getAttribute("data-start-ns");
-    const zoomIn = page.getByRole("button", { name: "Zoom timeline in" });
-    await zoomIn.focus();
+    const pause = page.getByRole("button", { name: "Pause History playback" });
+    await expect(pause).toBeFocused();
+    await expect(pause).toHaveAttribute("aria-pressed", "true");
+    const doubleSpeed = page.getByRole("button", { name: "2x" });
+    await doubleSpeed.focus();
     await page.keyboard.press("Enter");
-    await expect(zoomIn).toBeFocused();
-    await expect(viewport).not.toHaveAttribute("data-start-ns", initial ?? "");
-    for (const name of ["Pan timeline earlier", "Pan timeline later", "Zoom timeline out"]) {
-      const control = page.getByRole("button", { name });
-      await control.focus();
-      await page.keyboard.press("Enter");
-      await expect(control).toBeFocused();
+    await expect(doubleSpeed).toHaveAttribute("aria-pressed", "true");
+
+    for (const name of ["History range start", "History range end", "History playhead"]) {
+      const slider = page.getByRole("slider", { name });
+      await slider.focus();
+      await expect(slider).toBeFocused();
     }
-    const follow = page.getByRole("button", { name: "Follow live timeline" });
-    await follow.focus();
-    await page.keyboard.press("Enter");
-    await expect(follow).toBeFocused();
-    await expect(follow).toHaveAttribute("aria-pressed", "true");
 
-    const eventsTab = page.getByRole("tab", { name: "Events" });
-    await eventsTab.focus();
+    const actor = page.getByRole("button", { name: /Keyboard operator/ }).first();
+    await actor.focus();
     await page.keyboard.press("Enter");
-    await expect(eventsTab).toHaveAttribute("aria-selected", "true");
-    const selectEvent = page.getByRole("button", { name: "Select event 7" }).first();
-    await selectEvent.focus();
-    await page.keyboard.press("Enter");
-    await expect(selectEvent).toBeFocused();
-    const inspector = page.getByLabel("Event inspector");
-    await expect(inspector).toContainText("agent_message_delta");
-    await expect(inspector).toContainText("message-accessible");
+    await expect(page.getByRole("complementary", {
+      name: "Timeline selection",
+      exact: true,
+    })).toContainText("Keyboard operator with an intentionally long descriptive label");
   });
 
   test("touch controls remain operable and long content stays inside mobile geometry", async ({
@@ -331,24 +301,47 @@ export function registerAccessibilityAcceptance(): void {
     const page = await context.newPage();
     try {
       await visibleApp(page, origin, "active");
-      const zoom = page.getByRole("button", { name: "Zoom timeline in" });
-      await zoom.tap();
-      await expect(zoom).toBeFocused();
-      await page.getByRole("tab", { name: "Agent" }).tap();
-      await expect(page.getByLabel("Agent transcript")).toContainText(
-        "A long diagnostic message remains plain",
-      );
+      const history = page.getByRole("button", { name: "History", exact: true });
+      await history.tap();
+      await expect(history).toHaveAttribute("aria-pressed", "true");
+      const play = page.getByRole("button", { name: "Play History range" });
+      await expect(play).toBeEnabled();
+      await play.tap();
+      await expect(page.getByRole("button", { name: "Pause History playback" })).toBeFocused();
+      const lifetime = page.locator(".actor-lifetime-track").first();
+      await lifetime.focus();
+      await expect(page.getByRole("tooltip")).toContainText("Actor lifetime");
       const geometry = await page.evaluate(() => ({
         bodyWidth: document.body.scrollWidth,
         viewportWidth: document.documentElement.clientWidth,
-        clipped: [...document.querySelectorAll<HTMLElement>("button, output, [role=treeitem]")]
+        clipped: [...document.querySelectorAll<HTMLElement>(
+          ".control-strip button, .control-strip select, .history-controls input, .timeline-inspector button",
+        )]
           .filter((element) => {
             const rect = element.getBoundingClientRect();
             return rect.right > innerWidth + 1 || rect.left < -1;
           }).length,
+        timelineScrollable: (() => {
+          const timeline = document.querySelector<HTMLElement>(".timeline-scroll");
+          return timeline !== null && timeline.scrollWidth > timeline.clientWidth;
+        })(),
+        overflowing: [...document.querySelectorAll<HTMLElement>("body *")]
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.right > innerWidth + 1 || rect.left < -1;
+          })
+          .slice(0, 20)
+          .map((element) => ({
+            element: `${element.tagName.toLowerCase()}.${element.className}`,
+            rect: element.getBoundingClientRect().toJSON(),
+          })),
       }));
-      expect(geometry.bodyWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+      expect(
+        geometry.bodyWidth,
+        JSON.stringify(geometry.overflowing, null, 2),
+      ).toBeLessThanOrEqual(geometry.viewportWidth);
       expect(geometry.clipped).toBe(0);
+      expect(geometry.timelineScrollable).toBe(true);
     } finally {
       await context.close();
     }

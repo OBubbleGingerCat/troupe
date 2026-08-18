@@ -423,7 +423,7 @@ describe("transport controls and compatibility", () => {
   });
 
   it("keeps protocol modules independent from rendering and network globals", () => {
-    for (const file of ["decimal.ts", "event.ts", "view.ts", "http.ts", "sse.ts", "compatibility.ts"]) {
+    for (const file of ["decimal.ts", "event.ts", "http.ts", "sse.ts", "compatibility.ts"]) {
       const source = readProtocolSource(file);
       expect(source).not.toMatch(/from\s+["'](?:preact|@preact\/signals)/);
       expect(source).not.toMatch(/\b(?:document|window|EventSource)\s*[.(]/);

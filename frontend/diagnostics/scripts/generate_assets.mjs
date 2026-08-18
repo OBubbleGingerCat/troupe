@@ -264,11 +264,21 @@ function releaseUrl(buildHash, kind) {
 }
 
 
+function requireEmptyFavicon(document, label) {
+  const favicons = [...document.querySelectorAll('link[rel="icon"]')];
+  if (favicons.length !== 1 || favicons[0].getAttribute("href") !== "data:,") {
+    fail(`${label} must contain exactly one inert data favicon`);
+  }
+  return favicons[0];
+}
+
+
 function releaseHtml(rawHtml, buildHash) {
   const dom = new JSDOM(rawHtml.toString("utf8"));
   const document = dom.window.document;
   const scripts = [...document.querySelectorAll("script")];
   const styles = [...document.querySelectorAll('link[rel="stylesheet"]')];
+  const favicon = requireEmptyFavicon(document, "raw HTML");
   if (
     scripts.length !== 1
     || styles.length !== 1
@@ -280,7 +290,7 @@ function releaseHtml(rawHtml, buildHash) {
   scripts[0].setAttribute("src", releaseUrl(buildHash, "js"));
   styles[0].setAttribute("href", releaseUrl(buildHash, "css"));
   for (const element of document.querySelectorAll("[src], [href]")) {
-    if (element !== scripts[0] && element !== styles[0]) {
+    if (element !== scripts[0] && element !== styles[0] && element !== favicon) {
       fail("raw HTML contains an undeclared resource reference");
     }
   }
@@ -611,6 +621,7 @@ function validateReleaseHtml(html, buildHash) {
   const document = dom.window.document;
   const scripts = [...document.querySelectorAll("script")];
   const styles = [...document.querySelectorAll('link[rel="stylesheet"]')];
+  const favicon = requireEmptyFavicon(document, "release HTML");
   if (
     scripts.length !== 1
     || styles.length !== 1
@@ -622,7 +633,7 @@ function validateReleaseHtml(html, buildHash) {
     fail("release HTML does not use the exact full-hash external resources");
   }
   for (const element of document.querySelectorAll("[src], [href]")) {
-    if (element !== scripts[0] && element !== styles[0]) {
+    if (element !== scripts[0] && element !== styles[0] && element !== favicon) {
       fail("release HTML contains an undeclared resource reference");
     }
   }

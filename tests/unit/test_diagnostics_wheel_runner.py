@@ -300,13 +300,17 @@ def test_verifier_uses_the_realized_repository_contract() -> None:
         "diagnostics/custom.py",
         "diagnostics/production.py",
         "diagnostics/sink.py",
-        "diagnostics/views.py",
     } <= set(verifier._source_examples(verifier.SOURCE_PACKAGE))
     assert verifier.POST_PLAN_EXAMPLE_CHANGES == frozenset(
         {
             "README.md",
             "diagnostics/__init__.py",
             "diagnostics/production.py",
+        }
+    )
+    assert verifier.POST_PLAN_EXAMPLE_REMOVALS == frozenset(
+        {
+            "diagnostics/views.py",
         }
     )
     assert verifier.REALIZED_PUBLIC_EXPORTS == [

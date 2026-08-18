@@ -4,16 +4,15 @@ The public Python diagnostics API is available as `troupe.diagnostics`. It has
 three independent surfaces:
 
 - an optional per-Act `DiagnosticSink` passed to `Actor.act()`;
-- synchronous custom instrumentation with `event()`, `counter()`, and `span()`;
-- static `ViewSpec` declarations on a `Production` class.
+- synchronous custom instrumentation with `event()`, `counter()`, and `span()`.
 
-These surfaces observe or describe a Production. They do not replace the
+These surfaces observe a Production. They do not replace the
 mandatory Run diagnostics pipeline, and none of them can control an Act.
 
 ## End-to-end showcase
 
 [`examples/diagnostics/production.py`](../../examples/diagnostics/production.py)
-composes all three Python surfaces in one real Production. Every finite Scene
+composes both Python surfaces in one real Production. Every finite Scene
 queues a shell-probe Cue and a context-recall Cue on the same persistent Actor,
 then returns after a configurable delay so Runtime creates the next Scene. Run
 it with the command and token-use warning in the
@@ -253,39 +252,9 @@ redaction, or rewriting.
 See [`examples/diagnostics/custom.py`](../../examples/diagnostics/custom.py),
 which the end-to-end Production invokes for every observed turn.
 
-## Static diagnostic views
+## Built-in Timeline
 
-`ViewSpec` is the closed union of `TimelineView`, `MetricView`, `TableView`, and
-`TimeSeriesView`. Each is a final frozen slotted keyword-only value paired with
-its exact query type.
-
-Declare an exact tuple on the Production class:
-
-```python
-class MyProduction(Production):
-    diagnostic_views = (
-        diagnostics.TimelineView(...),
-        diagnostics.MetricView(...),
-        diagnostics.TableView(...),
-        diagnostics.TimeSeriesView(...),
-    )
-```
-
-Selectors name one closed built-in kind or one custom dotted name. Queries may
-use compatible severity/outcome filters, scalar attribute equality/existence,
-one closed grouping dimension, and `count`, `sum`, `min`, `max`, `mean`, or
-`latest` where valid for the source. A table declares 1-32 typed columns and a
-page size from 1 through 500. Each view independently chooses `viewport` or
-`run` time and `selection` or `run` scope.
-
-SQL, regex, joins, arbitrary field paths, Python callables, and custom renderers
-are not accepted. At startup, Runtime reads the class attribute statically,
-requires exact built-in values and unique IDs, compiles at most 64 records, and
-persists pure versioned JSON before calling the Production constructor. An
-invalid active declaration therefore prevents constructor side effects. After
-that point HTTP, live updates, the browser, and archive serving use persisted
-records and do not import or execute Production Python.
-
-All four declarations are executable in
-[`examples/diagnostics/views.py`](../../examples/diagnostics/views.py) and are
-installed by the end-to-end Production before its constructor runs.
+The Web interface owns one system Timeline. Python code cannot register panels,
+queries, renderers, or layout callbacks. `diagnostics.span()`,
+`diagnostics.event()`, and `diagnostics.counter()` remain canonical input to
+that Timeline; names, scopes, outcomes, and attributes are displayed as data.

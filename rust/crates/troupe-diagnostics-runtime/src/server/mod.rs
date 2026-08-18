@@ -8,4 +8,3 @@ pub mod routes;
 pub mod runtime;
 pub mod service;
 pub mod sse;
-pub mod views;

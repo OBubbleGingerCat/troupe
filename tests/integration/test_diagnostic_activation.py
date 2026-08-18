@@ -29,7 +29,6 @@ def test_activation_is_mandatory_and_ready_precedes_every_user_code_phase() -> N
         "ProductionLoadProducer::new",
         ".resolve_path(py, root)",
         ".resolve_class(py, path)",
-        "prepare_production_views",
         ".construct(py, class, production_args)",
     ):
         assert required in source
@@ -38,9 +37,6 @@ def test_activation_is_mandatory_and_ready_precedes_every_user_code_phase() -> N
     )
     assert source.index("write_ready(py, runtime.guard())") < source.index(
         ".resolve_path(py, root)"
-    )
-    assert source.index("prepare_production_views") < source.index(
-        ".construct(py, class, production_args)"
     )
 
 
@@ -97,7 +93,6 @@ def test_active_server_assembles_every_read_only_surface_before_registry_ready()
         "ActiveRouteAssembly::new",
         "QueryEndpoints::active_unobserved",
         "SseEndpoint::active",
-        "ViewEndpoints::active",
         "DumpEndpoints::active",
         "ActiveReplaySource::new",
         "CommitSignal::new",

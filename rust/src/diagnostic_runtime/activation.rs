@@ -2,7 +2,6 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt,
-    path::Path,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
     time::Duration,
 };
@@ -23,7 +22,7 @@ use troupe_diagnostics_perfetto::{
     dump::dump_captured_prefix_with_version,
 };
 use troupe_diagnostics_runtime::{
-    query::{reader::CapturedEventSource, views::ViewQueryEngine},
+    query::reader::CapturedEventSource,
     registry::model::SecurityScope,
     server::{
         assembly::ActiveRouteAssembly,
@@ -36,7 +35,6 @@ use troupe_diagnostics_runtime::{
             replay::{ActiveReplaySource, ReplayDriverConfig, SseEndpoint},
             subscriber::{CommitSignal, SubscriberLimits},
         },
-        views::ViewEndpoints,
     },
     store::{
         progress::WriterDeadlines,
@@ -66,7 +64,6 @@ use crate::{
         runtime_producer,
         shutdown::ShutdownMetadata,
         supervisor::{FirstCoreFailure, RuntimeFailureProbe, RuntimeInfrastructureFailure},
-        view_compile::{ViewStartupLifecycle, prepare_production_views},
     },
     orchestration::{
         actor_registry::ProductionState, production::Production, runtime::RuntimeCore,
@@ -353,48 +350,6 @@ impl RuntimeFailureProbe for ActiveFailureProbe {
     }
 }
 
-struct StartupLifecycle {
-    runtime: ActivatedRuntime,
-}
-
-impl StartupLifecycle {
-    fn into_runtime(self) -> ActivatedRuntime {
-        self.runtime
-    }
-}
-
-impl ViewStartupLifecycle for StartupLifecycle {
-    type Error = DiagnosticShutdownError;
-
-    fn run_directory(&self) -> &Path {
-        self.runtime.guard().layout().run_directory()
-    }
-
-    fn run_id(&self) -> CanonicalUuid {
-        self.runtime.run_id
-    }
-
-    fn finalize_user_failure(mut self) -> Result<(), Self::Error> {
-        remove_pending_run(self.runtime.run_id);
-        shutdown_clean_or_abort(
-            self.runtime
-                .guard
-                .take()
-                .expect("startup lifecycle owns its diagnostic guard"),
-            FinalProductionOutcome::Failed,
-        )
-    }
-
-    fn abort_core_failure(mut self) -> Result<(), Self::Error> {
-        remove_pending_run(self.runtime.run_id);
-        self.runtime
-            .guard
-            .take()
-            .expect("startup lifecycle owns its diagnostic guard")
-            .shutdown()
-    }
-}
-
 #[derive(Default)]
 struct IgnoreLiveEvents;
 
@@ -513,7 +468,6 @@ fn active_routes(
         ReplayDriverConfig::new(SSE_HEARTBEAT_INTERVAL).map_err(route_assembly_error)?;
     let query_failures = failures.clone();
     let sse_failures = failures.clone();
-    let view_failures = failures;
     let assembly = ActiveRouteAssembly::new(
         QueryEndpoints::active_unobserved(run_id, Arc::clone(&lease), move |failure| {
             query_failures.report_query(failure);
@@ -526,12 +480,6 @@ fn active_routes(
             move |failure| sse_failures.report_sse(failure),
         )
         .map_err(route_assembly_error)?,
-        ViewEndpoints::active(
-            run_id,
-            Arc::clone(&lease),
-            ViewQueryEngine::default(),
-            move |failure| view_failures.report_view(failure),
-        ),
         DumpEndpoints::active(run_id, lease, RuntimePerfettoDumpProducer::new()),
     )
     .map_err(route_assembly_error)?;
@@ -866,10 +814,6 @@ pub(crate) fn activate(
         Ok(class) => class,
         Err(error) => return Err(shutdown_after_load_error(runtime, error)),
     };
-    let prepared = prepare_production_views(py, class, StartupLifecycle { runtime })
-        .map_err(|error| ActivationError::diagnostic(error.code(), error))?;
-    let (class, lifecycle, _manifest) = prepared.into_parts();
-    let runtime = lifecycle.into_runtime();
     let construction = ActivationConstructionGuard::enter(runtime.run_id, agent_diagnostics);
     let production = match loader.construct(py, class, production_args) {
         Ok(production) => production,
@@ -1058,7 +1002,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::{Path, PathBuf}};
 
     use clap::Parser;
     use pyo3::types::{PyDict, PyDictMethods};

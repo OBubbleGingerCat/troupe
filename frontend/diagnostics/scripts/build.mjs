@@ -171,11 +171,21 @@ function requireAssetReference(value, extension) {
 }
 
 
+function requireEmptyFavicon(document) {
+  const favicons = [...document.querySelectorAll('link[rel="icon"]')];
+  if (favicons.length !== 1 || favicons[0].getAttribute("href") !== "data:,") {
+    fail("HTML must contain exactly one inert data favicon");
+  }
+  return favicons[0];
+}
+
+
 function validateHtml(html, expectedScript, expectedStyle) {
   const dom = new JSDOM(html);
   const document = dom.window.document;
   const scripts = [...document.querySelectorAll("script")];
   const stylesheets = [...document.querySelectorAll('link[rel="stylesheet"]')];
+  const favicon = requireEmptyFavicon(document);
   if (scripts.length !== 1 || stylesheets.length !== 1) {
     fail("HTML must contain exactly one script and one stylesheet");
   }
@@ -201,7 +211,7 @@ function validateHtml(html, expectedScript, expectedStyle) {
     }
   }
   for (const element of document.querySelectorAll("[src], [href]")) {
-    if (element !== script && element !== stylesheet) {
+    if (element !== script && element !== stylesheet && element !== favicon) {
       fail("HTML contains an undeclared resource reference");
     }
   }
