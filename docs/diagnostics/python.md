@@ -10,6 +10,20 @@ three independent surfaces:
 These surfaces observe or describe a Production. They do not replace the
 mandatory Run diagnostics pipeline, and none of them can control an Act.
 
+## End-to-end showcase
+
+[`examples/diagnostics/production.py`](../../examples/diagnostics/production.py)
+composes all three Python surfaces in one real Production. Every finite Scene
+queues a shell-probe Cue and a context-recall Cue on the same persistent Actor,
+then returns after a configurable delay so Runtime creates the next Scene. Run
+it with the command and token-use warning in the
+[`examples` guide](../../examples/README.md#6-live-diagnostics-showcase).
+
+The embedded Web page receives the same canonical events selected by the
+per-Act sink, except that tool input and output payloads remain sink-only. The
+example prints a bounded evaluation summary rather than duplicating the live
+agent transcript on stdout.
+
 ## Observe one Act
 
 Subclass `DiagnosticSink`, call its base initializer, and implement one ordered
@@ -49,8 +63,9 @@ summary = await sink.wait_closed()
 replace that value. A callback failure is recorded in the sink summary and does
 not change the Act result, agent session, or Production outcome.
 
-The complete runnable pattern is in
-[`examples/diagnostics/sink.py`](../../examples/diagnostics/sink.py).
+The reusable sink implementation is in
+[`examples/diagnostics/sink.py`](../../examples/diagnostics/sink.py), and the
+complete runnable composition is in the end-to-end Production above.
 
 ### Event model
 
@@ -235,7 +250,8 @@ objects, custom serializers, or namespace registry. As with tool payload,
 Troupe enforces shape and size but performs no content scan, credential-key
 redaction, or rewriting.
 
-See [`examples/diagnostics/custom.py`](../../examples/diagnostics/custom.py).
+See [`examples/diagnostics/custom.py`](../../examples/diagnostics/custom.py),
+which the end-to-end Production invokes for every observed turn.
 
 ## Static diagnostic views
 
@@ -271,4 +287,5 @@ that point HTTP, live updates, the browser, and archive serving use persisted
 records and do not import or execute Production Python.
 
 All four declarations are executable in
-[`examples/diagnostics/views.py`](../../examples/diagnostics/views.py).
+[`examples/diagnostics/views.py`](../../examples/diagnostics/views.py) and are
+installed by the end-to-end Production before its constructor runs.

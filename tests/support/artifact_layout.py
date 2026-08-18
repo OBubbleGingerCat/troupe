@@ -73,6 +73,13 @@ ALLOWED_MATURIN_FEATURES: Final = frozenset(
 ALLOWED_CACHE_REQUIREMENTS: Final = frozenset({"npm", "perfetto", "playwright"})
 ALLOWED_EXCLUSIVE_RESOURCES: Final = frozenset({"benchmark-host"})
 GENERATED_GRANTS: Final = frozenset({"G01"})
+POST_PLAN_EXAMPLE_CHANGES: Final = frozenset(
+    {
+        "README.md",
+        "diagnostics/__init__.py",
+        "diagnostics/production.py",
+    }
+)
 PLAN_INDEX_ROW_RE: Final = re.compile(
     r"\| (?P<node>[A-Z][0-9]{2}) \| .*? \| .*? \| [^|]+ \|$"
 )
@@ -563,11 +570,13 @@ def validate_repository_artifacts(repository_root: Path, layout: ArtifactLayout)
         for removed in fragment.removed:
             if removed.path.startswith("examples/"):
                 expected_example_names.discard(removed.path.removeprefix("examples/"))
+    expected_example_names.update(POST_PLAN_EXAMPLE_CHANGES)
     if set(actual_examples) != expected_example_names:
         raise ArtifactLayoutError("example inventory differs from the artifact contract")
     for name, snapshot in layout.base.examples.items():
         if (
             name in expected_example_names
+            and name not in POST_PLAN_EXAMPLE_CHANGES
             and not layout.is_changed_after_base(f"examples/{name}")
             and actual_examples[name] != snapshot.data
         ):

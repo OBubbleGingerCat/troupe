@@ -24,7 +24,7 @@ ACT_INPUT_TOKENS = diagnostics.MetricView(
         group_by=diagnostics.GroupBy(dimension="act"),
     ),
     time_range="run",
-    scope="selection",
+    scope="run",
 )
 
 USAGE_TABLE = diagnostics.TableView(
@@ -57,7 +57,7 @@ QUEUE_DEPTH = diagnostics.TimeSeriesView(
         ),
     ),
     time_range="viewport",
-    scope="selection",
+    scope="run",
 )
 
 DIAGNOSTIC_VIEWS: tuple[diagnostics.ViewSpec, ...] = (

@@ -1093,19 +1093,25 @@ def test_generated_grant_rejects_manifest_member_expansion_drift(
         audit._generated_members(repository, grant)
 
 
-def test_all_realized_post_plan_repairs_are_exact_content_and_commit_bound(
+def test_all_realized_post_plan_changes_are_exact_content_commit_and_status_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     audit = _ownership_module()
 
-    repairs = audit._validated_post_plan_repairs(ROOT)
+    changes = audit._validated_post_plan_changes(ROOT)
 
-    assert repairs == {path: "M" for path in audit.POST_PLAN_REPAIRS}
-    path = next(iter(audit.POST_PLAN_REPAIRS))
-    commit, _sha256 = audit.POST_PLAN_REPAIRS[path]
-    monkeypatch.setitem(audit.POST_PLAN_REPAIRS, path, (commit, "0" * 64))
-    with pytest.raises(audit.OwnershipAuditError, match="post-plan repair content differs"):
-        audit._validated_post_plan_repairs(ROOT)
+    assert changes == {
+        path: status
+        for path, (status, _commit, _sha256) in audit.POST_PLAN_CHANGES.items()
+    }
+    path = next(iter(audit.POST_PLAN_CHANGES))
+    status, commit, sha256 = audit.POST_PLAN_CHANGES[path]
+    monkeypatch.setitem(audit.POST_PLAN_CHANGES, path, (status, commit, "0" * 64))
+    with pytest.raises(audit.OwnershipAuditError, match="post-plan change content differs"):
+        audit._validated_post_plan_changes(ROOT)
+    monkeypatch.setitem(audit.POST_PLAN_CHANGES, path, ("D", commit, sha256))
+    with pytest.raises(audit.OwnershipAuditError, match="unsupported post-plan change status"):
+        audit._validated_post_plan_changes(ROOT)
 
 
 @pytest.mark.parametrize(

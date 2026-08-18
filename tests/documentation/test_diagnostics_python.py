@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import importlib
 import json
 import re
 import runpy
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +22,7 @@ EXAMPLES = (
     ROOT / "examples/diagnostics/custom.py",
     ROOT / "examples/diagnostics/views.py",
 )
+SHOWCASE = ROOT / "examples/diagnostics/production.py"
 ARTIFACT = ROOT / "tests/fixtures/artifact_layout/nodes/O01.json"
 GATE = ROOT / "tests/fixtures/diagnostic_node_gates/O01.json"
 
@@ -58,6 +65,11 @@ def _json(path: Path) -> Any:
 def _between(source: str, start: str, end: str) -> str:
     start_index = source.index(start)
     return source[start_index : source.index(end, start_index)]
+
+
+def _showcase_module(monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.syspath_prepend(str(ROOT))
+    return importlib.import_module("examples.diagnostics.production")
 
 
 def test_document_matches_the_closed_public_event_and_capture_surfaces() -> None:
@@ -212,6 +224,197 @@ def test_examples_are_parseable_bounded_and_callbacks_are_observational() -> Non
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
         assert not ({"eval", "exec"} & called_names)
+
+
+def test_end_to_end_showcase_composes_real_finite_scenes_without_running_provider() -> None:
+    document = _read(DOCUMENT)
+    source = _read(SHOWCASE)
+    tree = ast.parse(source, filename=str(SHOWCASE))
+
+    assert (SHOWCASE.parent / "__init__.py").read_bytes() == b""
+    assert "examples/diagnostics/production.py" in document
+    examples_document = _read(ROOT / "examples/README.md")
+    assert "continuously consumes provider tokens" in examples_document
+    for command in (
+        "troupe diagnostic status --production examples/diagnostics",
+        "troupe diagnostic events --production examples/diagnostics",
+        "troupe diagnostic dump --production examples/diagnostics",
+        "troupe diagnostic serve --production examples/diagnostics",
+    ):
+        assert command in examples_document
+    for marker in (
+        "diagnostic_views = DIAGNOSTIC_VIEWS",
+        "diagnostic_sink=sink",
+        "await sink.wait_closed()",
+        "record_batch(queue_depth=planned_depth, region=operation)",
+        '"example.scene_cycle"',
+        '"example.act_observed"',
+        "await asyncio.gather(",
+        "await asyncio.sleep(self.interval_seconds)",
+    ):
+        assert marker in source
+
+    production = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Production"
+    )
+    scene = next(
+        node
+        for node in production.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "scene"
+    )
+    assert not any(
+        isinstance(node, (ast.For, ast.AsyncFor, ast.While))
+        for node in ast.walk(scene)
+    )
+    assert sum(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "create_task"
+        for node in ast.walk(scene)
+    ) == 2
+
+
+def test_end_to_end_showcase_runs_repeated_scene_cycles_without_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showcase = _showcase_module(monkeypatch)
+    recorded_events: list[tuple[str, dict[str, object]]] = []
+    recorded_counters: list[tuple[str, int]] = []
+
+    def record_event(name: str, *, attributes: dict[str, object]) -> None:
+        recorded_events.append((name, attributes))
+
+    def record_counter(
+        name: str,
+        value: int,
+        *,
+        unit: str,
+        dimensions: dict[str, object] | None = None,
+    ) -> None:
+        _ = (unit, dimensions)
+        recorded_counters.append((name, value))
+
+    fake_diagnostics = SimpleNamespace(
+        span=lambda *_args, **_kwargs: nullcontext(),
+        event=record_event,
+        counter=record_counter,
+    )
+    monkeypatch.setattr(showcase, "diagnostics", fake_diagnostics)
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.barriers: dict[int, asyncio.Event] = {}
+            self.counts: dict[int, int] = {}
+
+        async def cue(self, instruction: dict[str, object]) -> tuple[object, ...]:
+            scene = int(instruction["scene_number"])
+            barrier = self.barriers.setdefault(scene, asyncio.Event())
+            self.calls.append(dict(instruction))
+            self.counts[scene] = self.counts.get(scene, 0) + 1
+            if self.counts[scene] == 2:
+                barrier.set()
+            await barrier.wait()
+            operation = str(instruction["operation"])
+            return (
+                SimpleNamespace(
+                    operation=operation,
+                    result={"operation": operation},
+                    observation={"sink_complete": True},
+                ),
+            )
+
+    async def exercise() -> tuple[SimpleNamespace, FakeWorker]:
+        worker = FakeWorker()
+        state = SimpleNamespace(
+            interval_seconds=0.0,
+            scene_number=0,
+            completed_scenes=0,
+            worker=worker,
+        )
+        await showcase.Production.scene(state)
+        await showcase.Production.scene(state)
+        return state, worker
+
+    state, worker = asyncio.run(exercise())
+    assert state.scene_number == 2
+    assert state.completed_scenes == 2
+    assert [call["operation"] for call in worker.calls] == [
+        "probe",
+        "recall",
+        "probe",
+        "recall",
+    ]
+    assert recorded_counters == [
+        ("example.completed_scenes", 1),
+        ("example.completed_scenes", 2),
+    ]
+    assert [name for name, _ in recorded_events] == [
+        "example.scene_started",
+        "example.scene_completed",
+        "example.scene_started",
+        "example.scene_completed",
+    ]
+
+
+def test_end_to_end_showcase_does_not_complete_a_scene_cancelled_during_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    showcase = _showcase_module(monkeypatch)
+    original_sleep = asyncio.sleep
+    recorded_events: list[str] = []
+
+    async def cancel_interval(delay: float) -> None:
+        if delay == 0:
+            await original_sleep(0)
+            return
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(showcase.asyncio, "sleep", cancel_interval)
+    monkeypatch.setattr(
+        showcase,
+        "diagnostics",
+        SimpleNamespace(
+            span=lambda *_args, **_kwargs: nullcontext(),
+            event=lambda name, **_kwargs: recorded_events.append(name),
+            counter=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    class FakeWorker:
+        async def cue(self, instruction: dict[str, object]) -> tuple[object, ...]:
+            operation = str(instruction["operation"])
+            return (
+                SimpleNamespace(
+                    operation=operation,
+                    result={"operation": operation},
+                    observation={"sink_complete": True},
+                ),
+            )
+
+    state = SimpleNamespace(
+        interval_seconds=1.0,
+        scene_number=0,
+        completed_scenes=0,
+        worker=FakeWorker(),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(showcase.Production.scene(state))
+    assert state.scene_number == 1
+    assert state.completed_scenes == 0
+    assert "example.scene_completed" not in recorded_events
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1", "1 2"])
+def test_end_to_end_showcase_rejects_invalid_intervals(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    showcase = _showcase_module(monkeypatch)
+    with pytest.raises(ValueError):
+        showcase.parse_interval_seconds([value])
 
 
 def test_node_descriptors_project_the_exact_documentation_gate() -> None:

@@ -37,7 +37,11 @@ SOURCE_PACKAGE = ROOT / "src" / "troupe"
 SUPPORT = ROOT / "tests" / "support"
 sys.path.insert(0, str(SUPPORT))
 
-from artifact_layout import expected_package_members, load_artifact_layout  # noqa: E402
+from artifact_layout import (  # noqa: E402
+    POST_PLAN_EXAMPLE_CHANGES,
+    expected_package_members,
+    load_artifact_layout,
+)
 
 
 ARTIFACT_LAYOUT = load_artifact_layout(ROOT)
@@ -68,6 +72,7 @@ for _fragment in ARTIFACT_LAYOUT.fragments.values():
         for removed in _fragment.removed
         if removed.path.startswith("examples/")
     )
+_realized_examples.update(POST_PLAN_EXAMPLE_CHANGES)
 REALIZED_EXAMPLE_FILES = tuple(sorted(_realized_examples))
 EXPECTED_WRAPPER = BASE_ARTIFACTS.package_files["__init__.py"].data
 EXPECTED_STUB = BASE_ARTIFACTS.package_files["__init__.pyi"].data

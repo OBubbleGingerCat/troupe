@@ -19,13 +19,22 @@ class EvaluationSink(diagnostics.DiagnosticSink):
             )
         )
         self.message_text: list[str] = []
+        self.context_samples: list[diagnostics.ContextUsageSampled] = []
         self.final_usage: diagnostics.ActTokenUsageFinalized | None = None
+        self.tool_calls = 0
 
     def on_event(self, event: diagnostics.DiagnosticEvent, /) -> None:
         if isinstance(event, diagnostics.AgentMessageDelta):
             self.message_text.append(event.text_delta)
+        elif isinstance(event, diagnostics.ContextUsageSampled):
+            self.context_samples.append(event)
         elif isinstance(event, diagnostics.ActTokenUsageFinalized):
             self.final_usage = event
+        elif (
+            isinstance(event, diagnostics.SpanStarted)
+            and event.span_kind == "tool.call"
+        ):
+            self.tool_calls += 1
 
 
 async def run_evaluated_act(

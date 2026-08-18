@@ -296,10 +296,19 @@ def test_verifier_uses_the_realized_repository_contract() -> None:
         "py.typed",
     ]
     assert {
+        "diagnostics/__init__.py",
         "diagnostics/custom.py",
+        "diagnostics/production.py",
         "diagnostics/sink.py",
         "diagnostics/views.py",
     } <= set(verifier._source_examples(verifier.SOURCE_PACKAGE))
+    assert verifier.POST_PLAN_EXAMPLE_CHANGES == frozenset(
+        {
+            "README.md",
+            "diagnostics/__init__.py",
+            "diagnostics/production.py",
+        }
+    )
     assert verifier.REALIZED_PUBLIC_EXPORTS == [
         *verifier.PUBLIC_EXPORTS,
         "diagnostics",

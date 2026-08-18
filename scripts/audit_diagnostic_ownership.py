@@ -78,32 +78,39 @@ MODIFICATION_ROLES: Final = frozenset({"seam", "implement", "assemble"})
 ASSEMBLY_NODES: Final = frozenset({"P04", "T02", "H04", "D07", "W15", "V12", "O04", "V03"})
 SEAM_NODES: Final = frozenset({"F04", "F05", "F06"})
 REMOVED_PLAN_PATHS: Final = {"rust/src/application/loader.rs": "L00"}
-POST_PLAN_REPAIRS: Final = {
+POST_PLAN_CHANGES: Final = {
     "rust/crates/troupe-agent-runtime/src/launch/process.rs": (
+        "M",
         "486243290beefc3eba16876de094dc04b85e4e01",
         "3f95bbf18f4a2078917e166bbfb75594759fae48e2c10cb8d6afd145608488a8",
     ),
     "tests/integration/test_cli.py": (
+        "M",
         "b89873ca446e07879fedd45729f895cf706f4b30",
         "b00864fdaa3914dcfc0b70a6569005e4ed420b8a329a112692a88e84659c9fc3",
     ),
     "tests/integration/test_lifecycle.py": (
+        "M",
         "d58a085614e16d4d18249b1567f3492b97b5ebd6",
         "b75a406b1c562fbc9429bd705e231aa1259c87d24590669988750a9bc46fe79f",
     ),
     "tests/support/mock_acp_agent.py": (
+        "M",
         "48287f3eafc6e786efd2b4037c77c1b5c0e9e7ad",
         "6e779a634016458926383e3782eebe5d24e7c31de6e1d4a4cef40de431204437",
     ),
     "tests/unit/test_agent_adapters.py": (
+        "M",
         "486243290beefc3eba16876de094dc04b85e4e01",
         "74b4912b962e67a73640db61fbe12dcdcfb25fbb15ebf839bb2b748d553ad349",
     ),
     "tests/unit/test_documentation.py": (
+        "M",
         "486243290beefc3eba16876de094dc04b85e4e01",
         "7c954ea2659d0a7bddb5e84211659b2254abd5d129511d5a75a00a317ece60f9",
     ),
     "tests/unit/test_examples.py": (
+        "M",
         "486243290beefc3eba16876de094dc04b85e4e01",
         "dc831625328b8789bd5c92df660c6824bf92da0763d47ed12dbd7cef87eb51ed",
     ),
@@ -1119,21 +1126,25 @@ def _validate_removed_preimages(
             raise OwnershipAuditError(f"removed path preimage hash differs: {removed.path}")
 
 
-def _validated_post_plan_repairs(repository_root: Path) -> dict[str, str]:
-    repairs: dict[str, str] = {}
-    for path, (commit, expected_sha256) in POST_PLAN_REPAIRS.items():
+def _validated_post_plan_changes(repository_root: Path) -> dict[str, str]:
+    changes: dict[str, str] = {}
+    for path, (status, commit, expected_sha256) in POST_PLAN_CHANGES.items():
+        if status not in {"A", "M"}:
+            raise OwnershipAuditError(f"unsupported post-plan change status: {path}")
         candidate = repository_root / path
         if not candidate.is_file() or candidate.is_symlink():
-            raise OwnershipAuditError(f"post-plan repair is not a regular file: {path}")
+            raise OwnershipAuditError(f"post-plan change is not a regular file: {path}")
         try:
             actual_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
         except OSError as error:
-            raise OwnershipAuditError(f"could not read post-plan repair {path}: {error}") from error
+            raise OwnershipAuditError(
+                f"could not read post-plan change {path}: {error}"
+            ) from error
         if actual_sha256 != expected_sha256:
-            raise OwnershipAuditError(f"post-plan repair content differs: {path}")
+            raise OwnershipAuditError(f"post-plan change content differs: {path}")
         latest = str(_git(repository_root, "log", "-1", "--format=%H", "--", path)).strip()
         if latest != commit:
-            raise OwnershipAuditError(f"post-plan repair commit differs: {path}")
+            raise OwnershipAuditError(f"post-plan change commit differs: {path}")
         result = subprocess.run(
             ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
             cwd=repository_root,
@@ -1141,9 +1152,11 @@ def _validated_post_plan_repairs(repository_root: Path) -> dict[str, str]:
             capture_output=True,
         )
         if result.returncode != 0:
-            raise OwnershipAuditError(f"post-plan repair commit is not an ancestor: {path}")
-        repairs[path] = "M"
-    return repairs
+            raise OwnershipAuditError(
+                f"post-plan change commit is not an ancestor: {path}"
+            )
+        changes[path] = status
+    return changes
 
 
 def audit_node(node_id: str, base: str) -> None:
@@ -1235,9 +1248,9 @@ def audit_all_realized(base: str, plan_path: Path) -> None:
             if path in expected:
                 raise OwnershipAuditError(f"generated member overlaps a static artifact: {path}")
             expected[path] = "A"
-    for path, status in _validated_post_plan_repairs(ROOT).items():
+    for path, status in _validated_post_plan_changes(ROOT).items():
         if path in expected:
-            raise OwnershipAuditError(f"post-plan repair overlaps planned ownership: {path}")
+            raise OwnershipAuditError(f"post-plan change overlaps planned ownership: {path}")
         expected[path] = status
     actual = _changed_paths(ROOT, resolved_base)
     _compare_diff("all-realized", expected, actual)
