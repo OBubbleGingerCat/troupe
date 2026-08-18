@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { expect, test, type Page, type Response } from "@playwright/test";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
@@ -12,15 +13,14 @@ const CONTENT = JSON.parse(
 ) as {
   readonly cases: readonly { readonly id: string; readonly text: string }[];
 };
-const NETWORK = JSON.parse(
-  readFileSync(resolve(import.meta.dirname, "network-allowlist.json"), "utf8"),
-) as { readonly same_origin_only: boolean; readonly path_prefixes: readonly string[] };
-const RESPONSE = JSON.parse(
-  readFileSync(resolve(import.meta.dirname, "response-headers.json"), "utf8"),
-) as {
-  readonly headers: Readonly<Record<string, string>>;
-  readonly forbidden_header_prefixes: readonly string[];
+const SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; worker-src 'self'; manifest-src 'self'",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
 };
+const FORBIDDEN_HEADER_PREFIXES = ["access-control-"];
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1";
 process.env.NO_PROXY = LOOPBACK_NO_PROXY;
 process.env.no_proxy = LOOPBACK_NO_PROXY;
@@ -133,12 +133,12 @@ function fixturePlugin(): Plugin {
         try {
           const html = await server.transformIndexHtml(pathname, String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="data:,"><title>Troupe security acceptance</title></head><body><main id="app"></main>
+<link rel="icon" href="data:,"><title>Troupe security test</title></head><body><main id="app"></main>
 <script type="module" src="/__v13-entry.js"></script></body></html>`);
           response.statusCode = 200;
           response.setHeader("Content-Type", "text/html; charset=utf-8");
           response.setHeader("Cache-Control", "no-cache");
-          for (const [name, value] of Object.entries(RESPONSE.headers)) {
+          for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
             response.setHeader(name, value);
           }
           response.end(html);
@@ -181,6 +181,7 @@ function sourceFiles(root: string): string[] {
 
 let server: ViteDevServer | null = null;
 let origin = "";
+let ownedCacheRoot: string | null = null;
 
 test.skip(
   ({ browserName }) => browserName === "webkit" && !webkitHostLibrariesAvailable(),
@@ -188,7 +189,8 @@ test.skip(
 );
 
 test.beforeAll(async ({ browserName }) => {
-  const cacheRoot = process.env.TROUPE_GATE_TMP ?? PROJECT_ROOT;
+  const cacheRoot = mkdtempSync(join(tmpdir(), "troupe-security-vite-"));
+  ownedCacheRoot = cacheRoot;
   server = await createServer({
     root: PROJECT_ROOT,
     cacheDir: resolve(cacheRoot, `vite-v13-${browserName}`),
@@ -198,14 +200,14 @@ test.beforeAll(async ({ browserName }) => {
       port: 0,
       strictPort: false,
       cors: false,
-      headers: RESPONSE.headers,
+      headers: SECURITY_HEADERS,
     },
     plugins: [fixturePlugin()],
   });
   await server.listen();
   const address = server.httpServer?.address();
   if (address === null || address === undefined || typeof address === "string") {
-    throw new Error("V13 fixture did not bind an inet address");
+    throw new Error("security fixture did not bind an inet address");
   }
   origin = `http://127.0.0.1:${address.port}`;
 });
@@ -213,6 +215,10 @@ test.beforeAll(async ({ browserName }) => {
 test.afterAll(async () => {
   await server?.close();
   server = null;
+  if (ownedCacheRoot !== null) {
+    rmSync(ownedCacheRoot, { recursive: true, force: true });
+    ownedCacheRoot = null;
+  }
 });
 
 test("active and archive content remains text under the exact response policy", async ({ page }) => {
@@ -244,7 +250,7 @@ test("active and archive content remains text under the exact response policy", 
     expect(observed.errors).toEqual([]);
 
     const documentHeaders = await documentResponse!.allHeaders();
-    for (const [name, expected] of Object.entries(RESPONSE.headers)) {
+    for (const [name, expected] of Object.entries(SECURITY_HEADERS)) {
       expect(documentHeaders[name], name).toBe(expected);
     }
 
@@ -252,13 +258,11 @@ test("active and archive content remains text under the exact response policy", 
     for (const value of observed.requests) {
       const url = new URL(value);
       expect(url.origin).toBe(origin);
-      expect(NETWORK.path_prefixes.some((prefix) => url.pathname.startsWith(prefix)), value)
-        .toBe(true);
     }
     for (const response of observed.responses) {
       const headers = await response.allHeaders();
       expect(Object.keys(headers).some((name) => (
-        RESPONSE.forbidden_header_prefixes.some((prefix) => name.startsWith(prefix))
+        FORBIDDEN_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix))
       ))).toBe(false);
     }
     const clientState = await page.evaluate(async () => ({

@@ -7,7 +7,6 @@ import {
   readdir,
   realpath,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import {
   basename,
@@ -27,7 +26,6 @@ import { build } from "vite";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..", "..");
 const configPath = join(projectRoot, "vite.config.ts");
-const manifestName = "raw-dist-manifest.json";
 const maximumLogicalBytes = 512 * 1024;
 const assetReferencePattern = /^\.\/assets\/diagnostics-([A-Za-z0-9_-]{8,64})\.(js|css)$/;
 const allowedNamespaceUrls = new Set([
@@ -62,35 +60,28 @@ function isWithin(path, parent) {
 }
 
 
-async function requireGateRoot() {
-  const raw = process.env.TROUPE_GATE_TMP;
-  if (raw === undefined || raw.length === 0 || !isAbsolute(raw) || resolve(raw) !== raw) {
-    fail("TROUPE_GATE_TMP must be a canonical absolute path");
-  }
-  let metadata;
-  let canonical;
-  try {
-    metadata = await lstat(raw);
-    canonical = await realpath(raw);
-  } catch (error) {
-    fail(`TROUPE_GATE_TMP must be an existing directory: ${error.message}`);
-  }
-  if (metadata.isSymbolicLink() || !metadata.isDirectory() || canonical !== raw) {
-    fail("TROUPE_GATE_TMP must be a real directory without symlink indirection");
-  }
-  if (isWithin(canonical, repositoryRoot)) {
-    fail("TROUPE_GATE_TMP must be outside the repository");
-  }
-  return canonical;
-}
-
-
-async function requireOutputPath(raw, gateRoot) {
+async function requireOutputPath(raw) {
   if (!isAbsolute(raw) || resolve(raw) !== raw) {
     fail("--out-dir must be a canonical absolute path");
   }
-  if (dirname(raw) !== gateRoot || basename(raw).length === 0) {
-    fail("--out-dir must be a direct child of TROUPE_GATE_TMP");
+  if (basename(raw).length === 0 || isWithin(raw, repositoryRoot)) {
+    fail("--out-dir must be outside the repository");
+  }
+  const parent = dirname(raw);
+  let parentMetadata;
+  let canonicalParent;
+  try {
+    parentMetadata = await lstat(parent);
+    canonicalParent = await realpath(parent);
+  } catch (error) {
+    fail(`--out-dir parent must be an existing directory: ${error.message}`);
+  }
+  if (
+    parentMetadata.isSymbolicLink()
+    || !parentMetadata.isDirectory()
+    || canonicalParent !== parent
+  ) {
+    fail("--out-dir parent must be a real directory without symlink indirection");
   }
   try {
     await lstat(raw);
@@ -243,11 +234,6 @@ function validateJavaScript(javascript) {
 }
 
 
-function sha256(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-
 function buildIdentity(files) {
   const digest = createHash("sha256");
   for (const file of files) {
@@ -294,24 +280,14 @@ async function auditOutput(output) {
     fail(`raw bundle exceeds the ${maximumLogicalBytes}-byte logical budget`);
   }
   return {
-    schema_version: 1,
-    build_sha256: buildIdentity(files),
-    target: "es2020",
-    base: "./",
-    logical_bytes: logicalBytes,
-    files: files.map((file, index) => ({
-      role: ["html", "javascript", "stylesheet"][index],
-      path: file.path,
-      sha256: sha256(file.bytes),
-      bytes: file.bytes.length,
-    })),
+    buildHash: buildIdentity(files),
+    logicalBytes,
   };
 }
 
 
 async function main() {
-  const gateRoot = await requireGateRoot();
-  const output = await requireOutputPath(parseArguments(process.argv.slice(2)), gateRoot);
+  const output = await requireOutputPath(parseArguments(process.argv.slice(2)));
   let succeeded = false;
   try {
     await build({
@@ -328,13 +304,9 @@ async function main() {
         configResolved: (config) => validateResolvedConfig(config, output),
       }],
     });
-    const manifest = await auditOutput(output);
-    await writeFile(join(output, manifestName), `${JSON.stringify(manifest, null, 2)}\n`, {
-      encoding: "utf8",
-      flag: "wx",
-    });
+    const bundle = await auditOutput(output);
     process.stdout.write(
-      `raw diagnostics bundle ${manifest.build_sha256} (${manifest.logical_bytes} bytes)\n`,
+      `raw diagnostics bundle ${bundle.buildHash} (${bundle.logicalBytes} bytes)\n`,
     );
     succeeded = true;
   } finally {

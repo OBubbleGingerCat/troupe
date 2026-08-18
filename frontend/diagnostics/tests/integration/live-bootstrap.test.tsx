@@ -81,7 +81,6 @@ function identity(overrides: Readonly<Record<string, unknown>> = {}): Record<str
     identity_schema_version: 1,
     server_protocol_version: 1,
     event_schema_version: 1,
-    view_schema_version: 1,
     api_schema_version: 1,
     run_id: RUN_ID,
     owner_pid: 8123,
@@ -357,7 +356,7 @@ describe("live diagnostics bootstrap", () => {
   });
 
   it("stays static when a declared schema is incompatible", async () => {
-    const requests = routedFetch(identity({ view_schema_version: 2 }), status());
+    const requests = routedFetch(identity({ api_schema_version: 2 }), status());
     const controller = await startLiveDiagnostics({
       baseUrl: BASE_URL,
       fetch: requests.fetch,
@@ -365,7 +364,7 @@ describe("live diagnostics bootstrap", () => {
     });
 
     expect(controller.state.phase).toBe("compatibility");
-    expect(controller.state.bootstrap?.compatibility.decisions.view.status).toBe("incompatible");
+    expect(controller.state.bootstrap?.compatibility.decisions.api.status).toBe("incompatible");
     expect(requests.urls.some((value) => new URL(value).pathname.endsWith("/snapshot"))).toBe(false);
     expect(FakeEventSource.instances).toHaveLength(0);
   });

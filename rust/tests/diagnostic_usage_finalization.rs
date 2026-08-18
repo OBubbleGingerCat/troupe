@@ -8,9 +8,9 @@ use troupe_diagnostics_core::{
 
 #[allow(dead_code)]
 #[path = "../src/diagnostic_runtime/usage_finalization.rs"]
-mod b17_source;
+mod usage_finalization_source;
 
-use b17_source::machine::{
+use usage_finalization_source::machine::{
     FinalUsage, FinalizationEffects, FinalizationMachine, MachineDrive, SettlementBoundary,
     SlotSnapshot,
 };
@@ -401,7 +401,7 @@ mod diagnostic_runtime {
             let source = fs::read_to_string(
                 crate_root().join("src/diagnostic_runtime/usage_finalization.rs"),
             )
-            .expect("read B17 source");
+            .expect("read usage finalization source");
             assert!(source.contains("entry.machine.drive(snapshot, &mut effects)"));
 
             let runtime = crate_root().join("src/diagnostic_runtime");

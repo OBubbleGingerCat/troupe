@@ -435,7 +435,7 @@ impl StreamingVarint {
     }
 }
 
-/// Validates a streamed T03 trace without retaining the complete trace body.
+/// Validates a streamed Perfetto trace without retaining the complete trace body.
 /// The expected metadata is built from the response headers by the caller.
 pub struct TraceBodyValidator {
     state: TraceBodyState,

@@ -208,21 +208,19 @@ describe("transport controls and compatibility", () => {
     expect(() => decodeSseFrame({ event: "future_control", id: null, data: {} })).toThrow();
   });
 
-  it("checks event, API, control, View and UI versions independently", () => {
+  it("checks event, API, control and UI versions independently", () => {
     const result = evaluateProtocolCompatibility({
       event: 1,
       api: 2,
       control: 1,
-      view: 1,
       ui: 1,
     });
 
-    expect(SUPPORTED_SCHEMA_VERSIONS).toEqual({ event: 1, api: 1, control: 1, view: 1, ui: 1 });
+    expect(SUPPORTED_SCHEMA_VERSIONS).toEqual({ event: 1, api: 1, control: 1, ui: 1 });
     expect(result.mode).toBe("static");
     expect(result.decisions.api.status).toBe("incompatible");
     expect(result.decisions.event.status).toBe("compatible");
     expect(result.decisions.control.status).toBe("compatible");
-    expect(result.decisions.view.status).toBe("compatible");
     expect(result.decisions.ui.status).toBe("compatible");
   });
 

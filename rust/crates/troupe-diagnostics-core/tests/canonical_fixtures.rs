@@ -16,28 +16,25 @@ use troupe_diagnostics_core::{
 const ARBITRARY_TOKEN_COUNT: &str =
     "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
 const MAX_U64: &str = "18446744073709551615";
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FixtureManifest {
-    schema_version: u8,
-    fixtures: Vec<FixtureManifestEntry>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum FixtureFormat {
-    EventArray,
-    MalformedCases,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FixtureManifestEntry {
-    file: String,
-    format: FixtureFormat,
-    sha256: String,
-}
+const EVENT_FIXTURES: &[&str] = &[
+    "act-token-usage-finalized.json",
+    "agent-message-completed.json",
+    "agent-message-delta.json",
+    "agent-plan-snapshot.json",
+    "context-usage-sampled.json",
+    "counter-sampled.json",
+    "custom-counter-sampled.json",
+    "custom-instant-occurred.json",
+    "custom-span-finished.json",
+    "custom-span-started.json",
+    "diagnostic-component-failed.json",
+    "instant-occurred.json",
+    "limits.json",
+    "nested-overlap.json",
+    "observation-gap.json",
+    "span-finished.json",
+    "span-started.json",
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,52 +67,35 @@ fn fixture_bytes(path: &Path) -> Vec<u8> {
     bytes
 }
 
-fn manifest() -> FixtureManifest {
-    let bytes = fixture_bytes(&fixtures_root().join("manifest.json"));
-    serde_json::from_slice(&bytes).expect("fixture manifest must decode")
-}
-
 fn canonical_body(bytes: &[u8]) -> &[u8] {
     bytes
         .strip_suffix(b"\n")
         .expect("fixture reader already checked its final LF")
 }
 
-fn valid_fixture_entries(manifest: &FixtureManifest) -> Vec<&FixtureManifestEntry> {
-    manifest
-        .fixtures
-        .iter()
-        .filter(|entry| entry.format == FixtureFormat::EventArray)
-        .collect()
-}
-
-fn load_event_files(
-    manifest: &FixtureManifest,
-    reverse: bool,
-) -> BTreeMap<String, (Vec<DiagnosticEvent>, Vec<Vec<u8>>)> {
-    let mut entries = valid_fixture_entries(manifest);
+fn load_event_files(reverse: bool) -> BTreeMap<String, (Vec<DiagnosticEvent>, Vec<Vec<u8>>)> {
+    let mut entries = EVENT_FIXTURES.to_vec();
     if reverse {
         entries.reverse();
     }
     entries
         .into_iter()
-        .map(|entry| {
-            let bytes = fixture_bytes(&fixtures_root().join(&entry.file));
+        .map(|file| {
+            let bytes = fixture_bytes(&fixtures_root().join(file));
             let events: Vec<DiagnosticEvent> = serde_json::from_slice(&bytes)
-                .unwrap_or_else(|error| panic!("{} must decode: {error}", entry.file));
+                .unwrap_or_else(|error| panic!("{file} must decode: {error}"));
             assert_eq!(
                 serde_json::to_vec(&events).unwrap(),
                 canonical_body(&bytes),
-                "Rust encoding drifted from checked-in bytes for {}",
-                entry.file
+                "Rust encoding drifted from checked-in bytes for {file}",
             );
             validate_event_stream(&events)
-                .unwrap_or_else(|error| panic!("{} is not a valid stream: {error}", entry.file));
+                .unwrap_or_else(|error| panic!("{file} is not a valid stream: {error}"));
             let per_event = events
                 .iter()
                 .map(|event| serde_json::to_vec(event).unwrap())
                 .collect();
-            (entry.file.clone(), (events, per_event))
+            (file.to_owned(), (events, per_event))
         })
         .collect()
 }
@@ -132,58 +112,26 @@ fn contains_string(value: &Value, expected: &str) -> bool {
 }
 
 #[test]
-fn manifest_is_closed_complete_and_points_to_canonical_event_files() {
-    let manifest = manifest();
-    assert_eq!(manifest.schema_version, 1);
-
-    let expected = [
-        "act-token-usage-finalized.json",
-        "agent-message-completed.json",
-        "agent-message-delta.json",
-        "agent-plan-snapshot.json",
-        "context-usage-sampled.json",
-        "counter-sampled.json",
-        "custom-counter-sampled.json",
-        "custom-instant-occurred.json",
-        "custom-span-finished.json",
-        "custom-span-started.json",
-        "diagnostic-component-failed.json",
-        "instant-occurred.json",
-        "limits.json",
-        "malformed.json",
-        "nested-overlap.json",
-        "observation-gap.json",
-        "span-finished.json",
-        "span-started.json",
-    ];
-    let actual = manifest
-        .fixtures
-        .iter()
-        .map(|entry| entry.file.as_str())
+fn fixture_inventory_is_closed_and_event_files_are_canonical() {
+    let mut actual = fs::read_dir(fixtures_root())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|file| file.ends_with(".json"))
         .collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = EVENT_FIXTURES
+        .iter()
+        .copied()
+        .chain(["malformed.json"])
+        .collect::<Vec<_>>();
+    expected.sort();
     assert_eq!(actual, expected);
-    assert_eq!(
-        manifest
-            .fixtures
-            .iter()
-            .filter(|entry| entry.format == FixtureFormat::MalformedCases)
-            .map(|entry| entry.file.as_str())
-            .collect::<Vec<_>>(),
-        ["malformed.json"]
-    );
-    for entry in &manifest.fixtures {
-        assert_eq!(entry.sha256.len(), 64);
-        assert!(entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert!(fixtures_root().join(&entry.file).is_file());
-    }
-
-    load_event_files(&manifest, false);
+    load_event_files(false);
 }
 
 #[test]
 fn fixtures_cover_the_closed_taxonomy_and_protocol_boundaries() {
-    let manifest = manifest();
-    let files = load_event_files(&manifest, false);
+    let files = load_event_files(false);
     let events = files
         .values()
         .flat_map(|(events, _)| events.iter())
@@ -304,8 +252,7 @@ fn fixtures_cover_the_closed_taxonomy_and_protocol_boundaries() {
 
 #[test]
 fn nested_overlap_fixture_keeps_one_open_span_and_valid_temporal_relationships() {
-    let manifest = manifest();
-    let files = load_event_files(&manifest, false);
+    let files = load_event_files(false);
     let events = &files["nested-overlap.json"].0;
     let started = events
         .iter()
@@ -366,12 +313,11 @@ fn malformed_cases_are_checked_in_and_rejected_by_rust_decode() {
 
 #[test]
 fn reversing_fixture_load_order_does_not_change_any_event_bytes() {
-    let manifest = manifest();
-    let forward = load_event_files(&manifest, false)
+    let forward = load_event_files(false)
         .into_iter()
         .map(|(name, (_, bytes))| (name, bytes))
         .collect::<BTreeMap<_, _>>();
-    let reverse = load_event_files(&manifest, true)
+    let reverse = load_event_files(true)
         .into_iter()
         .map(|(name, (_, bytes))| (name, bytes))
         .collect::<BTreeMap<_, _>>();

@@ -40,7 +40,6 @@ fn with_fresh_events_module(test: &std::ffi::CStr) {
 fn canonical_c03_fixtures_project_losslessly_into_closed_immutable_events() {
     with_fresh_events_module(
         cr#"
-import hashlib as _hashlib
 import json as _json
 from dataclasses import fields as _fields, is_dataclass as _is_dataclass
 from decimal import Decimal as _Decimal
@@ -102,9 +101,6 @@ def _assert_no_mutable_container(value):
             _assert_no_mutable_container(item)
 
 _root = _Path(FIXTURES_ROOT)
-_manifest_bytes = (_root / "manifest.json").read_bytes()
-assert _manifest_bytes.endswith(b"\n")
-_manifest = _json.loads(_manifest_bytes)
 _seen_kinds = set()
 _saw_uuid = False
 _saw_decimal = False
@@ -112,11 +108,10 @@ _saw_arbitrary_token_integer = False
 _saw_scope_and_causality = False
 _tool_details = []
 
-for _entry in _manifest["fixtures"]:
-    _fixture_bytes = (_root / _entry["file"]).read_bytes()
-    assert _hashlib.sha256(_fixture_bytes).hexdigest() == _entry["sha256"]
+for _path in sorted(_root.glob("*.json")):
+    _fixture_bytes = _path.read_bytes()
     _payload = _json.loads(_fixture_bytes)
-    if _entry["format"] == "malformed_cases":
+    if _path.name == "malformed.json":
         for _case in _payload["cases"]:
             try:
                 _event_from_mapping(_case["event"])
@@ -126,7 +121,6 @@ for _entry in _manifest["fixtures"]:
                 raise AssertionError(f"malformed fixture was accepted: {_case['name']}")
         continue
 
-    assert _entry["format"] == "event_array"
     assert type(_payload) is list
     for _raw in _payload:
         _event = _event_from_mapping(_raw)

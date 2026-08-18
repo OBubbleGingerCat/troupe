@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 from troupe import diagnostics
 
 
@@ -73,9 +71,3 @@ def invalid_alias_values() -> None:
 
 def frozen_capture_is_read_only(capture: diagnostics.DiagnosticCapture) -> None:
     capture.agent_messages = False  # E: misc
-
-
-def decimal_is_valid_view_scalar_only() -> None:
-    view_scalar: diagnostics.ViewScalar = Decimal("1.5")
-    frozen_scalar: diagnostics.FrozenJsonValue = Decimal("1.5")
-    _ = (view_scalar, frozen_scalar)

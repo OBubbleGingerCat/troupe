@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { expect, test, type Page, type Response } from "@playwright/test";
@@ -37,20 +38,6 @@ interface GeneratedFile {
   readonly bytes: number;
 }
 
-interface GeneratedManifest {
-  readonly schema_version: number;
-  readonly build_sha256: string;
-  readonly html: {
-    readonly url: string;
-    readonly mime: string;
-    readonly cache_control: string;
-    readonly sha256: string;
-    readonly bytes: number;
-    readonly content: string;
-  };
-  readonly files: readonly GeneratedFile[];
-}
-
 type Scenario = "archive" | "incompatible" | "missing-capability";
 
 interface RequestRecord {
@@ -66,19 +53,46 @@ const BASE_PATHS: Readonly<Record<Scenario, string>> = {
   "missing-capability": "/proxy/missing-capability",
 };
 
-const manifest = JSON.parse(
-  readFileSync(resolve(GENERATED_ROOT, "manifest.json"), "utf8"),
-) as GeneratedManifest;
+const generatedHtml = readFileSync(resolve(GENERATED_ROOT, "index.html"));
+const generatedHtmlText = generatedHtml.toString("utf8");
+const assetPattern = /^diagnostics-([0-9a-f]{64})\.(js|css)\.(raw|gz|br)$/;
 const statusFixture = fixture("status-v1.json");
 const snapshotFixture = fixture("snapshot-v1.json");
 const eventsFixture = fixture("events-v1.json");
-const viewCatalogFixture = fixture("view-catalog-v1.json");
 const representations = new Map<string, Map<GeneratedFile["encoding"], GeneratedFile>>();
-for (const file of manifest.files) {
-  const path = new URL(file.url, "http://diagnostics.test/").pathname;
-  const group = representations.get(path) ?? new Map();
+for (const fileName of readdirSync(GENERATED_ROOT).sort()) {
+  const match = assetPattern.exec(fileName);
+  if (match === null) {
+    continue;
+  }
+  const [, buildHash, kind, suffix] = match;
+  const encoding = suffix === "gz" ? "gzip" : suffix;
+  const assetFilePath = resolve(GENERATED_ROOT, fileName);
+  const bytes = readFileSync(assetFilePath);
+  const file: GeneratedFile = {
+    path: assetFilePath,
+    url: `./assets/diagnostics-${buildHash}.${kind}`,
+    kind: kind as GeneratedFile["kind"],
+    encoding: encoding as GeneratedFile["encoding"],
+    content_encoding: encoding === "raw" ? null : encoding as "gzip" | "br",
+    mime: kind === "js" ? "text/javascript; charset=utf-8" : "text/css; charset=utf-8",
+    cache_control: "public, max-age=31536000, immutable",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    bytes: bytes.length,
+  };
+  const logicalPath = new URL(file.url, "http://diagnostics.test/").pathname;
+  const group = representations.get(logicalPath)
+    ?? new Map<GeneratedFile["encoding"], GeneratedFile>();
   group.set(file.encoding, file);
-  representations.set(path, group);
+  representations.set(logicalPath, group);
+}
+if (representations.size !== 2) {
+  throw new Error("generated diagnostics assets are incomplete");
+}
+for (const logicalPath of representations.keys()) {
+  if (!generatedHtmlText.includes(`.${logicalPath}`)) {
+    throw new Error(`generated HTML does not reference ${logicalPath}`);
+  }
 }
 
 let origin = "";
@@ -107,7 +121,6 @@ function identity(scenario: Scenario, base: string): Record<string, unknown> {
     identity_schema_version: 1,
     server_protocol_version: incompatible ? 2 : 1,
     event_schema_version: incompatible ? 2 : 1,
-    view_schema_version: incompatible ? 2 : 1,
     api_schema_version: incompatible ? 2 : 1,
     run_id: RUN_ID,
     owner_pid: process.pid,
@@ -156,10 +169,10 @@ function serveUi(
 ): GeneratedFile["encoding"] | null {
   writeHeaders(response, SECURITY_HEADERS);
   if (relativePath === "/") {
-    const body = Buffer.from(manifest.html.content);
-    const etag = `"sha256-${manifest.html.sha256}"`;
-    response.setHeader("Content-Type", manifest.html.mime);
-    response.setHeader("Cache-Control", manifest.html.cache_control);
+    const body = generatedHtml;
+    const etag = `"sha256-${createHash("sha256").update(body).digest("hex")}"`;
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    response.setHeader("Cache-Control", "no-cache");
     response.setHeader("ETag", etag);
     if (request.headers["if-none-match"] === etag) {
       response.statusCode = 304;
@@ -182,7 +195,7 @@ function serveUi(
   if (file === undefined) {
     throw new Error(`generated ${relativePath} is missing ${encoding}`);
   }
-  const body = readFileSync(resolve(REPOSITORY_ROOT, file.path));
+  const body = readFileSync(file.path);
   const etag = `"sha256-${file.sha256}"`;
   response.setHeader("Content-Type", file.mime);
   response.setHeader("Cache-Control", file.cache_control);
@@ -244,9 +257,6 @@ function handleRequest(request: IncomingMessage, response: ServerResponse): void
       value = structuredClone(snapshotFixture);
     } else if (apiRelative === "events" && url.searchParams.has("through")) {
       value = structuredClone(eventsFixture);
-    } else if (apiRelative === "views") {
-      value = structuredClone(viewCatalogFixture);
-      value.views = [];
     }
     requests.push({
       scenario: match.scenario,
@@ -330,7 +340,7 @@ test("loads the embedded archive UI through a reverse-proxy subpath", async ({ p
   });
   expect(documentResponse).not.toBeNull();
   await expect(page.locator(".diagnostics-root")).toHaveAttribute("data-source", "archive");
-  await expect(page.getByRole("heading", { name: "Troupe Diagnostics" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Troupe Timeline" })).toBeVisible();
   await expect(
     page.getByRole("banner").getByText("Archived production", { exact: true }),
   ).toBeVisible();
@@ -420,7 +430,7 @@ test("serves HEAD, conditional, and representation-specific cache contracts", as
   const head = await request.head(`${base}/`);
   expect(head.status()).toBe(200);
   expect((await head.body()).byteLength).toBe(0);
-  expect(head.headers()["content-length"]).toBe(String(manifest.html.bytes));
+  expect(head.headers()["content-length"]).toBe(String(generatedHtml.byteLength));
 
   const raw = await request.get(`${base}${assetPath!}`, {
     headers: { "Accept-Encoding": "identity" },

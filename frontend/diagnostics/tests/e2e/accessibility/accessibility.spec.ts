@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Browser, type Page } from "@playwright/test";
@@ -8,9 +9,6 @@ import { createServer, type Plugin, type ViteDevServer } from "vite";
 
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "../../..");
-const ALLOWLIST = JSON.parse(
-  readFileSync(resolve(import.meta.dirname, "axe-allowlist.json"), "utf8"),
-) as { readonly allowed_rule_ids: readonly string[] };
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1";
 process.env.NO_PROXY = LOOPBACK_NO_PROXY;
 process.env.no_proxy = LOOPBACK_NO_PROXY;
@@ -160,7 +158,7 @@ function fixturePlugin(): Plugin {
         try {
           const html = await server.transformIndexHtml(pathname, String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="data:,"><title>Troupe accessibility acceptance</title></head><body><main id="app"></main>
+<link rel="icon" href="data:,"><title>Troupe accessibility test</title></head><body><main id="app"></main>
 <script type="module" src="/__v04-entry.js"></script></body></html>`);
           response.statusCode = 200;
           response.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -180,9 +178,10 @@ async function visibleApp(page: Page, origin: string, mode: string): Promise<voi
   })).toBeVisible();
 }
 
-export function registerAccessibilityAcceptance(): void {
+function registerAccessibilityTests(): void {
   let server: ViteDevServer | null = null;
   let origin = "";
+  let ownedCacheRoot: string | null = null;
 
   test.skip(
     ({ browserName }) => browserName === "webkit" && !webkitHostLibrariesAvailable(),
@@ -190,7 +189,8 @@ export function registerAccessibilityAcceptance(): void {
   );
 
   test.beforeAll(async ({ browserName }) => {
-    const cacheRoot = process.env.TROUPE_GATE_TMP ?? PROJECT_ROOT;
+    const cacheRoot = mkdtempSync(join(tmpdir(), "troupe-accessibility-vite-"));
+    ownedCacheRoot = cacheRoot;
     server = await createServer({
       root: PROJECT_ROOT,
       cacheDir: resolve(cacheRoot, `vite-v04-${browserName}`),
@@ -201,7 +201,7 @@ export function registerAccessibilityAcceptance(): void {
     await server.listen();
     const address = server.httpServer?.address();
     if (address === null || address === undefined || typeof address === "string") {
-      throw new Error("V04 fixture did not bind an inet address");
+      throw new Error("accessibility fixture did not bind an inet address");
     }
     origin = `http://127.0.0.1:${address.port}`;
   });
@@ -209,6 +209,10 @@ export function registerAccessibilityAcceptance(): void {
   test.afterAll(async () => {
     await server?.close();
     server = null;
+    if (ownedCacheRoot !== null) {
+      rmSync(ownedCacheRoot, { recursive: true, force: true });
+      ownedCacheRoot = null;
+    }
   });
 
   test("active and archive surfaces have no unapproved serious axe violation", async ({ page }) => {
@@ -216,8 +220,7 @@ export function registerAccessibilityAcceptance(): void {
       await visibleApp(page, origin, mode);
       const results = await new AxeBuilder({ page }).analyze();
       const blocking = results.violations.filter((violation) => (
-        (violation.impact === "critical" || violation.impact === "serious")
-        && !ALLOWLIST.allowed_rule_ids.includes(violation.id)
+        violation.impact === "critical" || violation.impact === "serious"
       ));
       expect(blocking, JSON.stringify(blocking, null, 2)).toEqual([]);
       await expect(page.getByRole("group", { name: "Timeline mode" })).toBeVisible();
@@ -347,3 +350,6 @@ export function registerAccessibilityAcceptance(): void {
     }
   });
 }
+
+
+registerAccessibilityTests();

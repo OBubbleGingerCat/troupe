@@ -218,7 +218,9 @@ fn generated_route_inventory_is_relative_hashed_and_compile_time_only() {
 
     let html = std::str::from_utf8(generated::INDEX_HTML).unwrap();
     assert_eq!(html.matches("<script ").count(), 1);
-    assert_eq!(html.matches("<link ").count(), 1);
+    assert_eq!(html.matches("<link ").count(), 2);
+    assert!(html.contains("rel=\"icon\" href=\"data:,\""));
+    assert!(html.contains("rel=\"stylesheet\""));
     assert!(!html.contains("<script>") && !html.contains("<style"));
     assert!(!html.contains("http://") && !html.contains("https://") && !html.contains("//assets"));
     assert!(html.contains("src=\"./assets/diagnostics-"));

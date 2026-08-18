@@ -329,7 +329,7 @@ fn captured_materialized_snapshot_does_not_chase_a_newer_live_event_head() {
     let expected = writer
         .snapshot()
         .canonical_json()
-        .expect("captured S12 bytes");
+        .expect("captured snapshot bytes");
     let mut reader =
         DiagnosticReader::open_active(run_id(), active_lease.guard()).expect("open active reader");
     let captured = reader.capture().expect("capture W=1");
@@ -364,7 +364,7 @@ fn gaps_truncations_and_canonical_scalars_are_returned_from_the_stored_model() {
     let hub = diagnostic_hub();
     writer
         .commit_batch(&rich_batch(&hub))
-        .expect("commit rich S12 state");
+        .expect("commit rich snapshot state");
     let mut reader =
         DiagnosticReader::open_active(run_id(), active_lease.guard()).expect("open active reader");
     let captured = reader.capture().expect("capture rich state");

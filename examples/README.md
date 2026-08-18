@@ -109,11 +109,11 @@ troupe --production examples/diagnostics --diagnostic-bind-host 127.0.0.1 --diag
 ```
 
 Open `http://127.0.0.1:43120`. Timeline shows each Scene and both serialized Cues;
-Agent streams messages and tool activity; Usage separates context occupancy from
-final per-Act accounting; and Views contains the example's Timeline, Metric,
-Table, and TimeSeries declarations. The Production prints one compact sink work
-summary per Scene. Remove the loopback bind option only when the trusted-LAN,
-unauthenticated server is intentionally reachable from other hosts.
+Act bars contain agent messages and tool activity, while Python spans and events
+share the same time plane. History can replay an exact committed event prefix,
+including temporary Actors that have left the Live window. The Production prints
+one compact sink work summary per Scene. Bind to `0.0.0.0` only when the
+unauthenticated server is intentionally reachable on a trusted LAN.
 
 While the Production is running, inspect the same Run from another terminal or
 export its currently committed prefix as a Perfetto trace:

@@ -148,7 +148,7 @@ fn preserves_existing_state_root_mode_and_tightens_owned_archive_modes() {
     assert_eq!(
         mode(&paths[0]),
         0o777,
-        "the existing state-root mode is outside S00's exact policy"
+        "the existing state-root mode is outside the archive layout policy"
     );
     for path in &paths[1..] {
         assert_eq!(

@@ -150,7 +150,6 @@ fn server_identity(entry: &RegistryEntry, run_id: CanonicalUuid) -> Vec<u8> {
             "\"identity_schema_version\":1,",
             "\"server_protocol_version\":1,",
             "\"event_schema_version\":1,",
-            "\"view_schema_version\":1,",
             "\"api_schema_version\":1,",
             "\"run_id\":\"{}\",",
             "\"owner_pid\":{},",
@@ -226,7 +225,7 @@ impl FakeServers {
     fn unreachable(&self, entry: &RegistryEntry) {
         self.responses.lock().unwrap().insert(
             entry.owner_pid(),
-            Err("connection refused by D08 fake".to_owned()),
+            Err("connection refused by test server".to_owned()),
         );
     }
 }
@@ -237,7 +236,7 @@ impl ServerIdentityProbe for FakeServers {
         match self.responses.lock().unwrap().get(&entry.owner_pid()) {
             Some(Ok(bytes)) => Ok(bytes.clone()),
             Some(Err(detail)) => Err(ServerProbeError::new(detail.clone())),
-            None => Err(ServerProbeError::new("no D08 fake identity endpoint")),
+            None => Err(ServerProbeError::new("no fake identity endpoint")),
         }
     }
 }

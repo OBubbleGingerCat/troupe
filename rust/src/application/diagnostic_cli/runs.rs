@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires this private command into the CLI dispatcher.
+#![allow(dead_code)]
 
 use std::{
     fmt::{self, Write as _},

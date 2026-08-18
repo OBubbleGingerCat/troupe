@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires this foreground command into the application entry point.
+#![allow(dead_code)]
 
 use std::{fmt, fs, path::Path, process::Command, time::Duration};
 

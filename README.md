@@ -189,7 +189,7 @@ for the canonical observation model.
 
 The [live diagnostics showcase](examples/README.md#6-live-diagnostics-showcase)
 runs a real multi-Scene Production with queued Cues, agent messages, per-Act
-usage, custom instrumentation, Python sink summaries, and all four View types.
+usage, custom instrumentation, Python sink summaries, and Timeline History replay.
 
 ## Start with the examples
 

@@ -78,7 +78,7 @@ candidate 4:
   path: /srv/troupe/production/.troupe/diagnostics/instances/00000000-0000-4000-8000-000000000004.json
   archive_directory: /srv/troupe/production/.troupe/diagnostics/runs/00000000-0000-4000-8000-000000000004
   archive_present: true
-  detail: server identity endpoint is unreachable: connection refused by D08 fake
+  detail: server identity endpoint is unreachable: connection refused by test server
   registry:
     registry_schema_version: 1
     server_protocol_version: 1

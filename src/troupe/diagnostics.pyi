@@ -117,46 +117,6 @@ _CallbackFailureKind: _TypeAlias = _Literal["raised", "invalid_return"]
 _SinkCloseReason: _TypeAlias = _Literal[
     "act_finished", "callback_failed", "delivery_overflow", "runtime_shutdown"
 ]
-_ViewTimeRange: _TypeAlias = _Literal["viewport", "run"]
-_ViewScope: _TypeAlias = _Literal["selection", "run"]
-_Reducer: _TypeAlias = _Literal["count", "sum", "min", "max", "mean", "latest"]
-_TokenMetric: _TypeAlias = _Literal[
-    "provider_total_tokens",
-    "input_tokens",
-    "output_tokens",
-    "thought_tokens",
-    "cached_read_tokens",
-    "cached_write_tokens",
-]
-_GroupDimension: _TypeAlias = _Literal[
-    "scene",
-    "actor",
-    "cue",
-    "act",
-    "event_name",
-    "custom_name",
-    "attribute",
-    "custom_dimension",
-]
-_TableColumnName: _TypeAlias = _Literal[
-    "sequence",
-    "elapsed_ns",
-    "event_kind",
-    "span_kind",
-    "instant_kind",
-    "counter_kind",
-    "scene_id",
-    "actor_id",
-    "cue_id",
-    "act_id",
-    "custom_name",
-    "outcome",
-    "severity",
-    "attribute",
-    "token",
-    "value",
-]
-
 @_final
 @_dataclass(frozen=True, slots=True, kw_only=True)
 class FrozenJsonArray:

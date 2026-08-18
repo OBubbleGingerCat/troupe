@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 and the finite query nodes wire this private target.
+#![allow(dead_code)]
 
 use std::{fmt, path::Path};
 
@@ -7,7 +7,7 @@ use troupe_diagnostics_runtime::query::reader::{
     CapturedEventSource, DiagnosticReader, ReaderFailure,
 };
 
-/// A validated archive reader that owns its Q00 shared lease for the target lifetime.
+/// A validated archive reader that owns its shared lease for the target lifetime.
 pub(crate) struct ArchiveTarget {
     reader: DiagnosticReader<'static>,
     run_id: CanonicalUuid,

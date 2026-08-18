@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires this command into the application entry point.
+#![allow(dead_code)]
 
 use std::{fmt, path::Path};
 

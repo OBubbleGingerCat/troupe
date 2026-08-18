@@ -683,7 +683,7 @@ async fn active_url_uses_h05_stream_and_publishes_on_the_callers_filesystem() {
         CancellationToken::new(),
     )
     .await
-    .expect("publish remote H05 stream");
+    .expect("publish remote diagnostic stream");
     assert_eq!(termination, DumpTermination::Published);
     let trace = fs::read(&output_path).unwrap();
     assert!(String::from_utf8_lossy(&trace).contains("captured_watermark=2 | exported_through=2"));

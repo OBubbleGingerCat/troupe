@@ -49,7 +49,7 @@ unsafe extern "C" {
 pub type TraceProducerFuture<'operation, Summary, Error> =
     Pin<Box<dyn Future<Output = Result<Summary, Error>> + 'operation>>;
 
-/// A T03-compatible producer that only streams bytes into the supplied writer.
+/// A trace producer that only streams bytes into the supplied writer.
 pub trait TraceStreamProducer {
     type Summary;
     type Error;

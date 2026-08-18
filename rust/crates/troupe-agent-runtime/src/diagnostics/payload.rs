@@ -247,8 +247,8 @@ impl fmt::Debug for SinkOnlyToolOutput {
 
 /// The provider payload selection carried from the agent boundary to the per-Act sink projector.
 ///
-/// Values are never part of a canonical diagnostic event. B15 clones this selection and applies
-/// one `AgentToolPayloadActBudget` before constructing the public sink projection.
+/// Values are never part of a canonical diagnostic event. The sink projection clones this
+/// selection and applies one `AgentToolPayloadActBudget` before exposing it publicly.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SinkOnlyToolPayload {
     tool_call_id: Arc<str>,
@@ -333,7 +333,7 @@ fn capture_tool_payload(
     })
 }
 
-/// Debug-build-only view used by the focused integration gate to exercise the real ingress path.
+/// Debug-build-only wrapper used by integration tests to exercise the real ingress path.
 ///
 /// The wrapper deliberately has no constructor, payload accessor, `Deref`, or inner-value escape.
 /// Release products therefore expose neither capture nor construction of sink-only payloads.

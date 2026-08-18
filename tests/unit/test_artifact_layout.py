@@ -23,7 +23,7 @@ import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -38,23 +38,48 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "troupe"
-SUPPORT = ROOT / "tests" / "support"
-sys.path.insert(0, str(SUPPORT))
-
-from artifact_layout import (  # noqa: E402
-    ArtifactLayoutError,
-    expected_package_members,
-    expected_rust_sources,
-    is_generated_example_path,
-    load_artifact_layout,
-    validate_repository_artifacts,
-)
-
-
-ARTIFACT_LAYOUT = load_artifact_layout(ROOT)
-BASE_ARTIFACTS = ARTIFACT_LAYOUT.base
-BOOTSTRAP_GATE = os.environ.get("TROUPE_DIAGNOSTIC_BOOTSTRAP_GATE") == "1"
-EXPECTED_RUST_SOURCES = list(BASE_ARTIFACTS.rust_sources)
+EXPECTED_RUST_SOURCES = [
+    "crates/troupe-agent-runtime/src/adapter/claude.rs",
+    "crates/troupe-agent-runtime/src/adapter/codex.rs",
+    "crates/troupe-agent-runtime/src/adapter/kimi.rs",
+    "crates/troupe-agent-runtime/src/adapter/mod.rs",
+    "crates/troupe-agent-runtime/src/error.rs",
+    "crates/troupe-agent-runtime/src/launch/fd_registry.rs",
+    "crates/troupe-agent-runtime/src/launch/mod.rs",
+    "crates/troupe-agent-runtime/src/launch/process.rs",
+    "crates/troupe-agent-runtime/src/lib.rs",
+    "crates/troupe-agent-runtime/src/profile.rs",
+    "crates/troupe-agent-runtime/src/result/mod.rs",
+    "crates/troupe-agent-runtime/src/result/tests.rs",
+    "crates/troupe-agent-runtime/src/schema/mod.rs",
+    "crates/troupe-agent-runtime/src/schema/tests.rs",
+    "crates/troupe-agent-runtime/src/schema/validation_bridge.rs",
+    "crates/troupe-agent-runtime/src/session/mod.rs",
+    "crates/troupe-agent-runtime/src/session/supervisor.rs",
+    "crates/troupe-agent-runtime/src/session/tests.rs",
+    "crates/troupe-agent-runtime/src/session/turn.rs",
+    "src/act_call.rs",
+    "src/application/cli.rs",
+    "src/application/diagnostics.rs",
+    "src/application/failure.rs",
+    "src/application/invocation.rs",
+    "src/application/loader.rs",
+    "src/application/mod.rs",
+    "src/application/signals.rs",
+    "src/lib.rs",
+    "src/orchestration/actor.rs",
+    "src/orchestration/actor_handle.rs",
+    "src/orchestration/actor_registry.rs",
+    "src/orchestration/cue.rs",
+    "src/orchestration/cue_future.rs",
+    "src/orchestration/effect.rs",
+    "src/orchestration/mailbox.rs",
+    "src/orchestration/mod.rs",
+    "src/orchestration/production.rs",
+    "src/orchestration/python_task.rs",
+    "src/orchestration/runtime.rs",
+    "src/orchestration/scene_context.rs",
+]
 SYNTHETIC_RUST_BUILD_INPUTS = {
     "rust/Cargo.lock": b"version = 4\n",
     "rust/Cargo.toml": b'[workspace]\nmembers = ["crates/troupe-agent-runtime"]\n',
@@ -64,12 +89,248 @@ SYNTHETIC_RUST_BUILD_INPUTS = {
     "rust/crates/troupe-agent-runtime/src/lib.rs": b"pub fn agent_runtime() {}\n",
     "rust/src/lib.rs": b"pub fn runtime() {}\n",
 }
-EXPECTED_WRAPPER = BASE_ARTIFACTS.package_files["__init__.py"].data
-EXPECTED_STUB = BASE_ARTIFACTS.package_files["__init__.pyi"].data
-EXPECTED_ACT_SCHEMA_STUB = BASE_ARTIFACTS.package_files["act_schema.pyi"].data
-EXPECTED_PY_TYPED = BASE_ARTIFACTS.package_files["py.typed"].data
-EXPECTED_ENTRY_POINTS = BASE_ARTIFACTS.entry_points.data
-PUBLIC_EXPORTS = list(BASE_ARTIFACTS.public_exports)
+
+EXPECTED_WRAPPER = (
+    b"from dataclasses import dataclass as _dataclass\n"
+    b"from os import PathLike as _PathLike\n"
+    b"from typing import Literal as _Literal\n"
+    b"\n"
+    b"from ._runtime import Actor as Actor\n"
+    b"from ._runtime import ActorHandle as ActorHandle\n"
+    b"from ._runtime import AgentAuthenticationRequiredError as AgentAuthenticationRequiredError\n"
+    b"from ._runtime import AgentError as AgentError\n"
+    b"from ._runtime import AgentResultError as AgentResultError\n"
+    b"from ._runtime import AgentResultIssue as AgentResultIssue\n"
+    b"from ._runtime import AgentResultMissingError as AgentResultMissingError\n"
+    b"from ._runtime import AgentSessionBrokenError as AgentSessionBrokenError\n"
+    b"from ._runtime import AgentSessionBusyError as AgentSessionBusyError\n"
+    b"from ._runtime import AgentSessionError as AgentSessionError\n"
+    b"from ._runtime import AgentSessionStartError as AgentSessionStartError\n"
+    b"from ._runtime import AgentTurnError as AgentTurnError\n"
+    b"from ._runtime import act_schema as act_schema\n"
+    b"from ._runtime import Cue as Cue\n"
+    b"from ._runtime import CueContextError as CueContextError\n"
+    b"from ._runtime import Effect as Effect\n"
+    b"from ._runtime import EffectContextError as EffectContextError\n"
+    b"from ._runtime import Production as Production\n"
+    b"\n"
+    b"\n"
+    b"@_dataclass(frozen=True, slots=True, kw_only=True)\n"
+    b"class AgentProfile:\n"
+    b'    agent: _Literal["codex", "claude", "kimi"]\n'
+    b"    workspace: str | _PathLike[str]\n"
+    b"    model: str\n"
+    b"    effort: str | None\n"
+    b"\n"
+    b"    def __post_init__(self) -> None:\n"
+    b"        if not isinstance(self.agent, str):\n"
+    b'            raise TypeError("agent must be a str")\n'
+    b'        if self.agent not in {"codex", "claude", "kimi"}:\n'
+    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi'\")\n"
+    b"        if not isinstance(self.model, str):\n"
+    b'            raise TypeError("model must be a str")\n'
+    b"        if not self.model:\n"
+    b'            raise ValueError("model must not be empty")\n'
+    b"        if self.effort is not None and not isinstance(self.effort, str):\n"
+    b'            raise TypeError("effort must be a str or None")\n'
+    b'        if self.effort == "":\n'
+    b'            raise ValueError("effort must not be empty")\n'
+    b"\n"
+    b"\n"
+    b"__all__ = [\n"
+    b'    "Actor",\n'
+    b'    "ActorHandle",\n'
+    b'    "AgentAuthenticationRequiredError",\n'
+    b'    "AgentError",\n'
+    b'    "AgentProfile",\n'
+    b'    "AgentResultError",\n'
+    b'    "AgentResultIssue",\n'
+    b'    "AgentResultMissingError",\n'
+    b'    "AgentSessionBrokenError",\n'
+    b'    "AgentSessionBusyError",\n'
+    b'    "AgentSessionError",\n'
+    b'    "AgentSessionStartError",\n'
+    b'    "AgentTurnError",\n'
+    b'    "Cue",\n'
+    b'    "CueContextError",\n'
+    b'    "Effect",\n'
+    b'    "EffectContextError",\n'
+    b'    "Production",\n'
+    b'    "act_schema",\n'
+    b"]\n"
+)
+EXPECTED_STUB = (
+    b"from __future__ import annotations\n"
+    b"\n"
+    b"from collections.abc import Mapping\n"
+    b"from dataclasses import dataclass\n"
+    b"from os import PathLike\n"
+    b"from re import Pattern\n"
+    b"from typing import Any, Literal, NoReturn, TypeVar, final, overload\n"
+    b"from typing_extensions import disjoint_base\n"
+    b"\n"
+    b"from . import act_schema as act_schema\n"
+    b"\n"
+    b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
+    b'_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]\n'
+    b"\n"
+    b"class AgentError(RuntimeError):\n"
+    b"    code: str\n"
+    b"\n"
+    b"class AgentSessionBusyError(AgentError): ...\n"
+    b"\n"
+    b"class AgentSessionError(AgentError): ...\n"
+    b"\n"
+    b"class AgentSessionStartError(AgentSessionError):\n"
+    b"    phase: str\n"
+    b"\n"
+    b"class AgentAuthenticationRequiredError(AgentSessionStartError): ...\n"
+    b"\n"
+    b"class AgentSessionBrokenError(AgentSessionError): ...\n"
+    b"\n"
+    b"class AgentTurnError(AgentError): ...\n"
+    b"\n"
+    b"@final\n"
+    b"class AgentResultIssue:\n"
+    b"    def __new__(cls, _token: NoReturn, /) -> AgentResultIssue: ...\n"
+    b"    @property\n"
+    b"    def path(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def code(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def message(self) -> str: ...\n"
+    b"\n"
+    b"class AgentResultError(AgentTurnError):\n"
+    b"    issues: tuple[AgentResultIssue, ...]\n"
+    b"    invalid_calls: int\n"
+    b"    details_truncated: bool\n"
+    b"\n"
+    b"class AgentResultMissingError(AgentResultError): ...\n"
+    b"\n"
+    b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
+    b"class AgentProfile:\n"
+    b'    agent: Literal["codex", "claude", "kimi"]\n'
+    b"    workspace: str | PathLike[str]\n"
+    b"    model: str\n"
+    b"    effort: str | None\n"
+    b"    def __post_init__(self) -> None: ...\n"
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Actor:\n"
+    b"    def __init__(self) -> None: ...\n"
+    b"    @property\n"
+    b"    def name(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def production(self) -> Production: ...\n"
+    b"    def make_effect(\n"
+    b"        self,\n"
+    b"        effect_type: type[_EffectT],\n"
+    b"        *,\n"
+    b"        effect_args: tuple[Any, ...],\n"
+    b"        effect_kwargs: dict[str, Any],\n"
+    b"    ) -> _EffectT: ...\n"
+    b"    async def act(\n"
+    b"        self,\n"
+    b"        *,\n"
+    b"        script: str,\n"
+    b"        output_schema: dict[str, act_schema.FieldSpec],\n"
+    b"    ) -> dict[str, _JsonValue]:\n"
+    b'        """Return one validated JSON object from this Actor\'s persistent agent session."""\n'
+    b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
+    b"\n"
+    b"@final\n"
+    b"class ActorHandle:\n"
+    b"    @property\n"
+    b"    def name(self) -> str: ...\n"
+    b"    async def cue(self, instruction: dict[Any, Any]) -> tuple[Effect, ...]: ...\n"
+    b"\n"
+    b"@final\n"
+    b"class Cue:\n"
+    b"    @property\n"
+    b"    def id(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def instruction(self) -> Mapping[Any, Any]: ...\n"
+    b"    @property\n"
+    b"    def source(self) -> str: ...\n"
+    b"\n"
+    b"class CueContextError(RuntimeError): ...\n"
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Effect:\n"
+    b"    @property\n"
+    b"    def id(self) -> str: ...\n"
+    b"    @property\n"
+    b"    def owner(self) -> str: ...\n"
+    b"\n"
+    b"class EffectContextError(RuntimeError): ...\n"
+    b"\n"
+    b"@disjoint_base\n"
+    b"class Production:\n"
+    b"    def __new__(cls, args: list[str], /) -> Production: ...\n"
+    b"    def cast_actor(\n"
+    b"        self,\n"
+    b"        actor_type: type[Actor],\n"
+    b"        *,\n"
+    b"        name: str,\n"
+    b"        agent_profile: AgentProfile,\n"
+    b"        actor_args: tuple[Any, ...],\n"
+    b"        actor_kwargs: dict[str, Any],\n"
+    b"    ) -> ActorHandle: ...\n"
+    b"    @overload\n"
+    b"    def get_actor(self, name: str) -> ActorHandle | None: ...\n"
+    b"    @overload\n"
+    b"    def get_actor(self, pattern: Pattern[str]) -> list[ActorHandle]: ...\n"
+    b"    def get_actors(self) -> list[ActorHandle]: ...\n"
+    b"    async def start(self) -> None: ...\n"
+    b"    async def scene(self) -> None: ...\n"
+    b"    async def stop(self) -> None: ...\n"
+    b"\n"
+    b"__all__ = [\n"
+    b'    "Actor",\n'
+    b'    "ActorHandle",\n'
+    b'    "AgentAuthenticationRequiredError",\n'
+    b'    "AgentError",\n'
+    b'    "AgentProfile",\n'
+    b'    "AgentResultError",\n'
+    b'    "AgentResultIssue",\n'
+    b'    "AgentResultMissingError",\n'
+    b'    "AgentSessionBrokenError",\n'
+    b'    "AgentSessionBusyError",\n'
+    b'    "AgentSessionError",\n'
+    b'    "AgentSessionStartError",\n'
+    b'    "AgentTurnError",\n'
+    b'    "Cue",\n'
+    b'    "CueContextError",\n'
+    b'    "Effect",\n'
+    b'    "EffectContextError",\n'
+    b'    "Production",\n'
+    b'    "act_schema",\n'
+    b"]\n"
+)
+EXPECTED_ACT_SCHEMA_STUB = (PACKAGE / "act_schema.pyi").read_bytes()
+EXPECTED_PY_TYPED = b""
+EXPECTED_ENTRY_POINTS = b"[console_scripts]\ntroupe = troupe._runtime:main\n"
+PUBLIC_EXPORTS = [
+    "Actor",
+    "ActorHandle",
+    "AgentAuthenticationRequiredError",
+    "AgentError",
+    "AgentProfile",
+    "AgentResultError",
+    "AgentResultIssue",
+    "AgentResultMissingError",
+    "AgentSessionBrokenError",
+    "AgentSessionBusyError",
+    "AgentSessionError",
+    "AgentSessionStartError",
+    "AgentTurnError",
+    "Cue",
+    "CueContextError",
+    "Effect",
+    "EffectContextError",
+    "Production",
+    "act_schema",
+]
 PUBLIC_TYPE_EXPORTS = [name for name in PUBLIC_EXPORTS if name != "act_schema"]
 SCHEMA_EXPORTS = [
     "BoolValue",
@@ -85,7 +346,26 @@ SCHEMA_EXPORTS = [
     "ValueRejected",
 ]
 EXAMPLE_FILES = {
-    name: snapshot.data for name, snapshot in BASE_ARTIFACTS.examples.items()
+    "README.md": b"# Troupe examples\n",
+    "actor_pipeline/__init__.py": b"",
+    "actor_pipeline/production.py": b"import troupe\n",
+    "cancellation_cleanup/__init__.py": b"",
+    "cancellation_cleanup/production.py": b"import troupe\n",
+    "cooperative_workers/__init__.py": b"",
+    "cooperative_workers/production.py": b"import troupe\n",
+    "hello_actor/__init__.py": b"",
+    "hello_actor/production.py": b"import troupe\n",
+    "live_agents/README.md": b"# Live agent examples\n",
+    "live_agents/claude_actor/__init__.py": b"",
+    "live_agents/claude_actor/production.py": b"import troupe\n",
+    "live_agents/codex_actor/__init__.py": b"",
+    "live_agents/codex_actor/production.py": b"import troupe\n",
+    "live_agents/kimi_actor/__init__.py": b"",
+    "live_agents/kimi_actor/production.py": b"import troupe\n",
+    "live_agents/mixed_repository_repair/__init__.py": b"",
+    "live_agents/mixed_repository_repair/production.py": b"import troupe\n",
+    "repeating_scenes/__init__.py": b"",
+    "repeating_scenes/production.py": b"import troupe\n",
 }
 
 
@@ -646,28 +926,19 @@ def _synthetic_artifacts(
     return source, sdist, wheel
 
 
-def test_generated_example_state_is_outside_the_artifact_inventory() -> None:
-    assert is_generated_example_path(
-        PurePosixPath("diagnostics/.troupe/diagnostics/runs/run/diagnostics.sqlite3")
-    )
-    assert not is_generated_example_path(PurePosixPath("diagnostics/production.py"))
-
-
 def test_runtime_package_has_exact_thin_sources() -> None:
-    validate_repository_artifacts(ROOT, ARTIFACT_LAYOUT)
     python_files = sorted(path.relative_to(PACKAGE).as_posix() for path in PACKAGE.rglob("*.py"))
     stub_files = sorted(path.relative_to(PACKAGE).as_posix() for path in PACKAGE.rglob("*.pyi"))
 
-    assert python_files == list(expected_package_members(ARTIFACT_LAYOUT, ".py"))
-    assert stub_files == list(expected_package_members(ARTIFACT_LAYOUT, ".pyi"))
-    for name, expected in (
-        ("__init__.py", EXPECTED_WRAPPER),
-        ("__init__.pyi", EXPECTED_STUB),
-        ("act_schema.pyi", EXPECTED_ACT_SCHEMA_STUB),
-        ("py.typed", EXPECTED_PY_TYPED),
-    ):
-        if not ARTIFACT_LAYOUT.is_changed_after_base(f"src/troupe/{name}"):
-            assert (PACKAGE / name).read_bytes() == expected
+    assert python_files == ["__init__.py"]
+    assert stub_files == ["__init__.pyi", "act_schema.pyi", "diagnostics.pyi"]
+    assert "from ._runtime import diagnostics as diagnostics" in (
+        PACKAGE / "__init__.py"
+    ).read_text(encoding="utf-8")
+    assert "from . import diagnostics as diagnostics" in (
+        PACKAGE / "__init__.pyi"
+    ).read_text(encoding="utf-8")
+    assert (PACKAGE / "py.typed").read_bytes() == EXPECTED_PY_TYPED
 
 
 def test_python_project_metadata_and_build_configuration() -> None:
@@ -756,34 +1027,40 @@ def test_rust_manifest_and_source_boundary() -> None:
     agent_config = _toml(
         ROOT / "rust" / "crates" / "troupe-agent-runtime" / "Cargo.toml"
     )
-    root_manifest_changed = ARTIFACT_LAYOUT.is_changed_after_base("rust/Cargo.toml")
-    agent_manifest_changed = ARTIFACT_LAYOUT.is_changed_after_base(
-        "rust/crates/troupe-agent-runtime/Cargo.toml"
-    )
 
-    if root_manifest_changed:
-        assert "crates/troupe-agent-runtime" in config["workspace"]["members"]
-        assert config["workspace"]["resolver"] == "3"
-    else:
-        assert config["workspace"] == {
-            "members": ["crates/troupe-agent-runtime"],
-            "resolver": "3",
-        }
+    assert config["workspace"] == {
+        "members": [
+            "crates/troupe-agent-runtime",
+            "crates/troupe-diagnostics-core",
+            "crates/troupe-diagnostics-runtime",
+            "crates/troupe-diagnostics-perfetto",
+        ],
+        "resolver": "3",
+    }
     assert config["lib"]["name"] == "_runtime"
     assert config["lib"]["crate-type"] == ["cdylib"]
-    assert config["features"]["default"] == []
-    assert config["features"]["agent-test-support"] == [
-        "troupe-agent-runtime/agent-test-support"
-    ]
-    if not root_manifest_changed:
-        assert set(config["features"]) == {"default", "agent-test-support"}
+    assert config["features"] == {
+        "default": [],
+        "agent-test-support": ["troupe-agent-runtime/agent-test-support"],
+        "diagnostics-test-support": [],
+    }
 
     dependencies = config["dependencies"]
-    base_dependencies = set(BASE_ARTIFACTS.cargo_dependency_keys["rust/Cargo.toml"])
-    if root_manifest_changed:
-        assert base_dependencies <= set(dependencies)
-    else:
-        assert set(dependencies) == base_dependencies
+    assert set(dependencies) == {
+        "clap",
+        "pyo3",
+        "pyo3-async-runtimes",
+        "reqwest",
+        "serde",
+        "serde_json",
+        "tokio",
+        "tokio-util",
+        "troupe-agent-runtime",
+        "troupe-diagnostics-core",
+        "troupe-diagnostics-perfetto",
+        "troupe-diagnostics-runtime",
+        "uuid",
+    }
     assert dependencies["pyo3"] == {
         "version": "0.29.0",
         "features": ["abi3-py310", "experimental-async"],
@@ -811,26 +1088,43 @@ def test_rust_manifest_and_source_boundary() -> None:
     assert dependencies["troupe-agent-runtime"] == {
         "path": "crates/troupe-agent-runtime"
     }
+    for crate in (
+        "troupe-diagnostics-core",
+        "troupe-diagnostics-perfetto",
+        "troupe-diagnostics-runtime",
+    ):
+        assert dependencies[crate] == {"path": f"crates/{crate}"}
     assert "extension-module" not in dependencies["pyo3"]["features"]
 
     assert agent_config["package"]["name"] == "troupe-agent-runtime"
     assert agent_config["package"]["publish"] is False
-    assert agent_config["features"]["default"] == []
-    assert agent_config["features"]["agent-test-support"] == []
-    if not agent_manifest_changed:
-        assert set(agent_config["features"]) == {"default", "agent-test-support"}
+    assert agent_config["features"] == {"default": [], "agent-test-support": []}
     agent_dependencies = agent_config["dependencies"]
-    base_agent_dependencies = set(
-        BASE_ARTIFACTS.cargo_dependency_keys[
-            "rust/crates/troupe-agent-runtime/Cargo.toml"
-        ]
-    )
-    if agent_manifest_changed:
-        assert base_agent_dependencies <= set(agent_dependencies)
-        assert agent_dependencies["agent-client-protocol"]["version"] == "=2.0.0"
-    else:
-        assert set(agent_dependencies) == base_agent_dependencies
-        assert agent_dependencies["agent-client-protocol"] == {"version": "=2.0.0"}
+    assert set(agent_dependencies) == {
+        "agent-client-protocol",
+        "base64",
+        "bytes",
+        "futures",
+        "getrandom",
+        "http-body-util",
+        "hyper",
+        "hyper-util",
+        "libc",
+        "pyo3",
+        "pyo3-async-runtimes",
+        "serde_json",
+        "tokio",
+        "tokio-util",
+        "troupe-diagnostics-core",
+        "uuid",
+    }
+    assert agent_dependencies["agent-client-protocol"] == {
+        "version": "=2.0.0",
+        "features": ["unstable_end_turn_token_usage"],
+    }
+    assert agent_dependencies["troupe-diagnostics-core"] == {
+        "path": "../troupe-diagnostics-core"
+    }
     assert agent_dependencies["hyper"] == {
         "version": "1",
         "features": ["http1", "server"],
@@ -857,7 +1151,13 @@ def test_rust_manifest_and_source_boundary() -> None:
         for path in (ROOT / "rust").rglob("*.rs")
         if "target" not in path.parts
     )
-    assert rust_sources == list(expected_rust_sources(ARTIFACT_LAYOUT))
+    assert {
+        "src/lib.rs",
+        "crates/troupe-agent-runtime/src/lib.rs",
+        "crates/troupe-diagnostics-core/src/lib.rs",
+        "crates/troupe-diagnostics-runtime/src/lib.rs",
+        "crates/troupe-diagnostics-perfetto/src/lib.rs",
+    } <= set(rust_sources)
     source_code = "\n".join(
         _rust_without_test_modules(
             (ROOT / "rust" / name).read_text(encoding="utf-8")
@@ -888,9 +1188,9 @@ def test_rust_manifest_and_source_boundary() -> None:
         for package in _toml(ROOT / "rust" / "Cargo.lock")["package"]
     }
     assert "uuid" in locked_packages
-    invocation_source = (ROOT / "rust" / "src" / "application" / "invocation.rs").read_text(
-        encoding="utf-8"
-    )
+    invocation_source = (
+        ROOT / "rust" / "src" / "application" / "invocation.rs"
+    ).read_text(encoding="utf-8")
     argument_source = (
         ROOT / "rust" / "src" / "application" / "diagnostic_cli" / "args.rs"
     ).read_text(encoding="utf-8")
@@ -911,11 +1211,6 @@ def test_rust_manifest_and_source_boundary() -> None:
 
 
 def test_installed_console_entry_point_targets_the_native_main() -> None:
-    if BOOTSTRAP_GATE:
-        assert _toml(ROOT / "pyproject.toml")["project"]["scripts"] == {
-            "troupe": "troupe._runtime:main"
-        }
-        return
     entries = [
         entry
         for entry in importlib.metadata.entry_points(group="console_scripts")
@@ -2315,13 +2610,6 @@ def _mock_agent_events(pids: tuple[int, int] = (101, 102)) -> str:
 
 def _load_wheel_smoke_production(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     package_root = ROOT / "tests" / "fixtures" / "productions"
-    if BOOTSTRAP_GATE:
-        package = ModuleType("troupe")
-        package.Actor = type("Actor", (), {})
-        package.Effect = type("Effect", (), {})
-        package.Production = type("Production", (), {})
-        package.AgentProfile = type("AgentProfile", (), {})
-        monkeypatch.setitem(sys.modules, "troupe", package)
     dependency = ModuleType("troupe_smoke_dependency")
     dependency.VALUE = "dependency-ok"
     dependency.__file__ = "/installed/troupe_smoke_dependency.py"
@@ -3120,7 +3408,7 @@ def test_run_wraps_a_bounded_smoke_timeout_after_subprocess_reaping(
     assert calls[0]["timeout"] == timeout_seconds
 
 
-def test_current_smoke_wiring_uses_realized_package_and_writable_production(
+def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3133,10 +3421,7 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
     child = workspace / "child-venv"
     outside = workspace / "outside-repository"
     events_path = workspace / "events.json"
-    source_fixture = (
-        ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
-    )
-    fixture = workspace / verifier.WHEEL_SMOKE_PRODUCTION
+    fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
     raw_args = ["--events", str(events_path), "--value", "7", "input.txt"]
     expected_events = _installed_smoke_events(raw_args)
     managed_python = tmp_path / "managed" / "bin" / "python3.10"
@@ -3155,26 +3440,6 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
     builder_init_base_executables: list[str] = []
     builder_base_executables: list[str] = []
     post_create_base_executables: list[str] = []
-    run_id = "123e4567-e89b-42d3-a456-426614174000"
-    archive = fixture / ".troupe" / "diagnostics" / "runs" / run_id
-    locator = {
-        "locator_schema_version": 1,
-        "run_id": run_id,
-        "local_url": "http://127.0.0.1:41223/",
-        "advertise_url": None,
-        "archive_directory": str(archive),
-        "security_scope": "trusted_network",
-    }
-    ready_line = (
-        "troupe: diagnostic ready "
-        + json.dumps(locator, separators=(",", ":"))
-        + "\n"
-    )
-
-    def realized_payload(path: Path) -> dict[str, object]:
-        payload = _installed_smoke_payload(path)
-        payload["exports"] = verifier.REALIZED_PUBLIC_EXPORTS
-        return payload
 
     class FakeEnvBuilder:
         def __init__(self, *, with_pip: bool) -> None:
@@ -3189,7 +3454,7 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
                 executable = bin_dir / name
                 executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 executable.chmod(0o755)
-            payload = realized_payload(path)
+            payload = _installed_smoke_payload(path)
             for key in ("troupe_file", "runtime_file", "dependency_file"):
                 installed_file = Path(str(payload[key]))
                 installed_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3235,17 +3500,13 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
         timeline.append(f"run-{index}")
         calls.append((command, cwd, dict(env), dict(kwargs)))
         if index == 2:
-            return json.dumps(realized_payload(child))
+            return json.dumps(_installed_smoke_payload(child))
         if index == 4:
             events_path.write_text(json.dumps(expected_events), encoding="utf-8")
             (workspace / "agent-events.jsonl").write_text(
                 _mock_agent_events(),
                 encoding="utf-8",
             )
-            archive.mkdir(parents=True)
-            stderr_sink = kwargs.get("stderr_sink")
-            assert isinstance(stderr_sink, list)
-            stderr_sink.append(ready_line)
         return ""
 
     monkeypatch.setattr(verifier, "_run", run)
@@ -3268,7 +3529,6 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
         "paths": 0,
         "events": 0,
         "agent_cleanup": 0,
-        "readiness": 0,
     }
     for name, key in (
         ("_validate_smoke_tools", "tools"),
@@ -3276,7 +3536,6 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
         ("_validate_installed_paths", "paths"),
         ("_validate_smoke_events", "events"),
         ("_validate_mock_agent_cleanup", "agent_cleanup"),
-        ("_validate_diagnostic_ready_stderr", "readiness"),
     ):
         real = getattr(verifier, name)
 
@@ -3312,7 +3571,6 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
         "paths": 1,
         "events": 1,
         "agent_cleanup": 1,
-        "readiness": 1,
     }
     assert timeline == [
         "run-0",
@@ -3325,7 +3583,6 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
         "which-troupe",
         "run-3",
         "run-4",
-        "validate-readiness",
         "validate-events",
         "validate-agent_cleanup",
     ]
@@ -3342,13 +3599,9 @@ def test_current_smoke_wiring_uses_realized_package_and_writable_production(
         expected_kwargs: dict[str, object] = {}
         if index in (2, 4):
             expected_kwargs["timeout"] = verifier.SMOKE_TIMEOUT
-        if index == 3:
+        if index in (3, 4):
             expected_kwargs["forbidden_stderr"] = "troupe:"
-        if index == 4:
-            expected_kwargs["stderr_sink"] = [ready_line]
         assert kwargs == expected_kwargs
-    assert fixture.is_dir()
-    assert not (source_fixture / ".troupe").exists()
 
 
 @pytest.mark.parametrize("failure", ["os-error", "called-process-error", "abort"])

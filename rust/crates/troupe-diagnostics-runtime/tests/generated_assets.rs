@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use serde_json::Value;
-
 mod generated {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -10,71 +8,51 @@ mod generated {
     ));
 }
 
-const GENERATED_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/generated/");
-const MANIFEST: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/generated/manifest.json"
-));
 const RUST_TABLE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/generated/assets.rs"
 ));
 
 #[test]
-fn generated_include_table_matches_manifest_and_checked_bytes() {
+fn generated_include_table_binds_checked_assets() {
     assert_eq!(
         sha256_hex(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
-    let manifest: Value = serde_json::from_str(MANIFEST).expect("generated manifest is JSON");
-    assert_eq!(manifest["schema_version"], 1);
-    assert_eq!(manifest["build_sha256"], generated::BUILD_SHA256);
-    assert_eq!(
-        manifest["html"]["content"].as_str().unwrap().as_bytes(),
-        generated::INDEX_HTML
+    assert_eq!(generated::BUILD_SHA256.len(), 64);
+    assert!(
+        generated::BUILD_SHA256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     );
     assert_eq!(
         sha256_hex(generated::INDEX_HTML),
         generated::INDEX_HTML_SHA256
     );
-    assert_eq!(manifest["html"]["sha256"], generated::INDEX_HTML_SHA256);
-    assert_eq!(manifest["html"]["mime"], generated::INDEX_HTML_MIME);
-    assert_eq!(
-        manifest["html"]["cache_control"],
-        generated::INDEX_HTML_CACHE_CONTROL
-    );
+    assert_eq!(generated::INDEX_HTML_MIME, "text/html; charset=utf-8");
+    assert_eq!(generated::INDEX_HTML_CACHE_CONTROL, "no-cache");
+    let html = std::str::from_utf8(generated::INDEX_HTML).unwrap();
+    assert!(html.contains(&format!(
+        "./assets/diagnostics-{}.js",
+        generated::BUILD_SHA256
+    )));
+    assert!(html.contains(&format!(
+        "./assets/diagnostics-{}.css",
+        generated::BUILD_SHA256
+    )));
 
-    let files = manifest["files"].as_array().unwrap();
-    assert_eq!(files.len(), 6);
     assert_eq!(generated::REPRESENTATIONS.len(), 6);
     let mut combinations = BTreeSet::new();
     for representation in generated::REPRESENTATIONS {
-        let entry = files
-            .iter()
-            .find(|entry| {
-                entry["path"]
-                    .as_str()
-                    .is_some_and(|path| path.ends_with(representation.file_name))
-            })
-            .expect("every include-table member is declared");
-        assert_eq!(entry["url"], representation.url);
-        assert_eq!(entry["kind"], representation.kind);
-        assert_eq!(entry["encoding"], representation.encoding);
-        match representation.content_encoding {
-            Some(value) => assert_eq!(entry["content_encoding"], value),
-            None => assert!(entry["content_encoding"].is_null()),
-        }
-        assert_eq!(entry["mime"], representation.mime);
-        assert_eq!(entry["cache_control"], representation.cache_control);
-        assert_eq!(entry["sha256"], representation.sha256);
-        assert_eq!(
-            entry["bytes"].as_u64().unwrap(),
-            u64::try_from(representation.bytes_len).unwrap()
-        );
         assert_eq!(representation.bytes.len(), representation.bytes_len);
         assert_eq!(sha256_hex(representation.bytes), representation.sha256);
+        assert!(representation.file_name.contains(generated::BUILD_SHA256));
         assert!(representation.url.starts_with("./assets/diagnostics-"));
         assert!(representation.url.contains(generated::BUILD_SHA256));
+        assert_eq!(
+            representation.cache_control,
+            "public, max-age=31536000, immutable"
+        );
         combinations.insert((representation.kind, representation.encoding));
     }
     assert_eq!(
@@ -93,14 +71,6 @@ fn generated_include_table_matches_manifest_and_checked_bytes() {
         sha256_hex(generated::THIRD_PARTY_NOTICES),
         generated::THIRD_PARTY_NOTICES_SHA256
     );
-    assert_eq!(
-        manifest["notices"]["sha256"],
-        generated::THIRD_PARTY_NOTICES_SHA256
-    );
-    assert_eq!(
-        manifest["notices"]["bytes"].as_u64().unwrap(),
-        u64::try_from(generated::THIRD_PARTY_NOTICES.len()).unwrap()
-    );
     assert!(
         String::from_utf8_lossy(generated::THIRD_PARTY_NOTICES)
             .contains("Troupe Diagnostics Web UI - Third-Party Notices")
@@ -109,28 +79,30 @@ fn generated_include_table_matches_manifest_and_checked_bytes() {
 
 #[test]
 fn generated_source_is_compile_time_only_and_budgeted() {
-    assert_eq!(RUST_TABLE.matches("include_bytes!").count(), 7);
+    assert_eq!(RUST_TABLE.matches("include_bytes!").count(), 8);
     for forbidden in ["std::fs", "Command::new", "flate", "brotli", "node_modules"] {
         assert!(!RUST_TABLE.contains(forbidden));
     }
-    assert!(!MANIFEST.contains(".map\""));
-    assert!(!MANIFEST.contains("node_modules"));
-
-    let manifest: Value = serde_json::from_str(MANIFEST).unwrap();
+    let raw_bytes = generated::REPRESENTATIONS
+        .iter()
+        .filter(|item| item.encoding == "raw")
+        .map(|item| item.bytes_len)
+        .sum::<usize>();
+    let brotli_bytes = generated::REPRESENTATIONS
+        .iter()
+        .filter(|item| item.encoding == "br")
+        .map(|item| item.bytes_len)
+        .sum::<usize>();
+    let all_bytes = generated::REPRESENTATIONS
+        .iter()
+        .map(|item| item.bytes_len)
+        .sum::<usize>();
+    assert!(generated::INDEX_HTML.len() + raw_bytes <= 512 * 1024);
+    assert!(generated::INDEX_HTML.len() + brotli_bytes <= 160 * 1024);
     assert!(
-        manifest["budgets"]["logical_uncompressed_bytes"]
-            .as_u64()
-            .unwrap()
-            <= 512 * 1024
+        generated::INDEX_HTML.len() + generated::THIRD_PARTY_NOTICES.len() + all_bytes
+            <= 768 * 1024
     );
-    assert!(
-        manifest["budgets"]["first_load_brotli_bytes"]
-            .as_u64()
-            .unwrap()
-            <= 160 * 1024
-    );
-    assert!(manifest["budgets"]["all_embedded_bytes"].as_u64().unwrap() <= 768 * 1024);
-    assert!(std::path::Path::new(GENERATED_ROOT).is_absolute());
 }
 
 fn sha256_hex(input: &[u8]) -> String {

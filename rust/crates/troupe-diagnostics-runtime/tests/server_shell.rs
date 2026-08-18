@@ -210,7 +210,6 @@ fn default_listener_is_ephemeral_ready_and_reports_complete_identity() {
     assert_eq!(identity["identity_schema_version"], 1);
     assert_eq!(identity["server_protocol_version"], 1);
     assert_eq!(identity["event_schema_version"], 1);
-    assert_eq!(identity["view_schema_version"], 1);
     assert_eq!(identity["api_schema_version"], 1);
     assert_eq!(identity["run_id"], RUN_ID);
     assert_eq!(identity["owner_pid"], 8123);
@@ -232,10 +231,7 @@ fn default_listener_is_ephemeral_ready_and_reports_complete_identity() {
             "max_batch_age_ms": "25",
             "max_batch_canonical_bytes": "1048576",
             "max_batch_events": "512",
-            "max_metric_series": "64",
             "max_page_rows": "500",
-            "max_time_series_points": "1024",
-            "max_time_series_series": "64",
             "max_uncommitted_canonical_bytes": "67108864",
             "max_uncommitted_events": "32768",
             "shutdown_drain_timeout_ms": "30000",

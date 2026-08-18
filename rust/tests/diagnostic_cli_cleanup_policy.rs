@@ -195,7 +195,6 @@ fn matching_identity(entry: &RegistryEntry) -> Vec<u8> {
             "\"identity_schema_version\":1,",
             "\"server_protocol_version\":1,",
             "\"event_schema_version\":1,",
-            "\"view_schema_version\":1,",
             "\"api_schema_version\":1,",
             "\"run_id\":\"{}\",",
             "\"owner_pid\":{},",
@@ -265,7 +264,7 @@ impl ServerIdentityProbe for FakeServers {
         match self.values.lock().unwrap().get(&entry.owner_pid()) {
             Some(Ok(bytes)) => Ok(bytes.clone()),
             Some(Err(detail)) => Err(ServerProbeError::new(detail.clone())),
-            None => Err(ServerProbeError::new("no D05 fake identity endpoint")),
+            None => Err(ServerProbeError::new("no fake identity endpoint")),
         }
     }
 }
@@ -761,7 +760,7 @@ fn transient_availability_probe_reports_a_shared_reader_and_retains_no_cleanup_l
 
     drop(reader);
     CleanupArchiveLease::acquire(&directory)
-        .expect("D05 never holds a cleanup lease across preview; D11 owns that phase");
+        .expect("preview never holds a cleanup lease across policy evaluation");
 }
 
 #[cfg(unix)]
@@ -858,5 +857,5 @@ fn source_boundary_has_only_a_transient_probe_and_no_removal_authority() {
     assert!(!source.contains("CleanupArchiveLease"));
     assert!(!source.contains("fs::remove"));
     assert!(!source.contains("fs::rename"));
-    assert!(source.contains("D11 is the only phase allowed"));
+    assert!(source.contains("only the apply path holds the lease"));
 }

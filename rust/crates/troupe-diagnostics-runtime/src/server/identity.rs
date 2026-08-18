@@ -10,9 +10,8 @@ use crate::registry::{
 };
 
 const EVENT_SCHEMA_VERSION: u8 = 1;
-const VIEW_SCHEMA_VERSION: u8 = 1;
 const API_SCHEMA_VERSION: u8 = 1;
-const V1_OPERATIONAL_LIMITS: [(&str, u64); 11] = [
+const V1_OPERATIONAL_LIMITS: [(&str, u64); 8] = [
     ("max_uncommitted_events", 32_768),
     ("max_uncommitted_canonical_bytes", 64 * 1024 * 1024),
     ("max_batch_age_ms", 25),
@@ -21,9 +20,6 @@ const V1_OPERATIONAL_LIMITS: [(&str, u64); 11] = [
     ("writer_stall_timeout_ms", 10_000),
     ("shutdown_drain_timeout_ms", 30_000),
     ("max_page_rows", 500),
-    ("max_metric_series", 64),
-    ("max_time_series_points", 1024),
-    ("max_time_series_series", 64),
 ];
 
 pub const IDENTITY_SCHEMA_VERSION: u8 = 1;
@@ -78,7 +74,6 @@ pub struct ServerIdentity {
     identity_schema_version: u8,
     server_protocol_version: u16,
     event_schema_version: u8,
-    view_schema_version: u8,
     api_schema_version: u8,
     run_id: CanonicalUuid,
     owner_pid: u32,
@@ -115,7 +110,6 @@ impl ServerIdentity {
             identity_schema_version: IDENTITY_SCHEMA_VERSION,
             server_protocol_version: SERVER_PROTOCOL_VERSION,
             event_schema_version: EVENT_SCHEMA_VERSION,
-            view_schema_version: VIEW_SCHEMA_VERSION,
             api_schema_version: API_SCHEMA_VERSION,
             run_id,
             owner_pid,
@@ -142,10 +136,6 @@ impl ServerIdentity {
 
     pub const fn event_schema_version(&self) -> u8 {
         self.event_schema_version
-    }
-
-    pub const fn view_schema_version(&self) -> u8 {
-        self.view_schema_version
     }
 
     pub const fn api_schema_version(&self) -> u8 {

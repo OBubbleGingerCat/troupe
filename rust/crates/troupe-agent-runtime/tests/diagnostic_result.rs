@@ -490,7 +490,7 @@ impl SessionHarness {
         );
         control
             .install_diagnostic_context(context)
-            .expect("attach F06 turn diagnostics to the real session");
+            .expect("attach turn diagnostics to the real session");
         let slot = Arc::clone(&self.slot);
         let spawned_control = Arc::clone(&control);
         let prompt = format!("{SCRIPT_SENTINEL}: {act_id}");
@@ -557,7 +557,7 @@ fn assert_real_session_handoff(
         "the real result path emits candidates"
     );
     let turns = destination.submitted_turns();
-    assert_eq!(turns.len(), 1, "the real F06 path submits one turn");
+    assert_eq!(turns.len(), 1, "the real session path submits one turn");
     let turn = &turns[0];
     assert_eq!(turn.identity().act_id(), act_id);
     assert_eq!(turn.identity().turn_id(), format!("turn-{act_id}"));
@@ -1015,7 +1015,7 @@ async fn production_result_path_emits_bounded_deterministic_diagnostics() {
     ] {
         assert!(
             !source.contains(forbidden),
-            "ordinary library surface retained A08 test seam: {forbidden}"
+            "ordinary library surface retained a test-only seam: {forbidden}"
         );
     }
 }

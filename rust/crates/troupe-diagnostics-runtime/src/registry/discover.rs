@@ -711,8 +711,6 @@ pub struct DecodedServerIdentity {
     server_protocol_version: u64,
     #[serde(rename = "event_schema_version")]
     _event_schema_version: u64,
-    #[serde(rename = "view_schema_version")]
-    _view_schema_version: u64,
     #[serde(rename = "api_schema_version")]
     _api_schema_version: u64,
     run_id: CanonicalUuid,
@@ -741,10 +739,6 @@ impl DecodedServerIdentity {
 
     pub const fn event_schema_version(&self) -> u64 {
         self._event_schema_version
-    }
-
-    pub const fn view_schema_version(&self) -> u64 {
-        self._view_schema_version
     }
 
     pub const fn api_schema_version(&self) -> u64 {

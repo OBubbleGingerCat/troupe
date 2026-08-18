@@ -1,8 +1,8 @@
 use prost::Message;
 
-// This is a deliberately private mirror of the stable Perfetto fields listed in
-// schema/used-fields.json. Keep schema changes auditable instead of generating
-// code from Perfetto's much larger, partially unstable schema graph.
+// This is a deliberately private mirror of the Perfetto v57.2 fields required
+// by the encoder. It is maintained by hand instead of generating code from
+// Perfetto's much larger, partially unstable schema graph.
 
 // perfetto-schema: definition perfetto.protos.BuiltinClock
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]

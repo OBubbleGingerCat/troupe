@@ -357,14 +357,14 @@ async fn live_and_archive_share_tail_after_zero_and_explicit_query_semantics() {
     let server = DiagnosticServer::start(
         ServerConfig::new(run_id(), std::process::id(), process_identity())
             .with_bind("127.0.0.1", 0),
-        endpoints.route_definitions().expect("valid H01 routes"),
+        endpoints.route_definitions().expect("valid query routes"),
     )
     .expect("start diagnostic server");
     let base_url = WebBaseUrl::parse(&format!("http://{}/", server.connect_addr()))
         .expect("valid local server URL");
     let client = DiagnosticHttpClient::connect(base_url)
         .await
-        .expect("validated D01 HTTP client");
+        .expect("validated diagnostic HTTP client");
 
     let starts = [
         EventStart::Tail(Count::new(0)),

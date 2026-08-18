@@ -32,7 +32,6 @@ pub(crate) enum ActCallerExit {
     Cleared,
 }
 
-// checked-usage-finalization-slot:start
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UsageFinalizationSettlement {
     NotSubmitted,
@@ -162,8 +161,6 @@ impl UsageFinalizationAck {
         self.usage_sequence
     }
 }
-// checked-usage-finalization-slot:end
-
 pub(crate) struct UsageFinalizationBridge {
     register_slot: fn(UsageFinalizationSlot),
     settlement_ready: fn(&str),

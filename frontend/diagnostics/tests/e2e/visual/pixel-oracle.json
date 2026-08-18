@@ -1,7 +1,0 @@
-{
-  "schema": "troupe.diagnostics.visual-pixel-oracle.v1",
-  "channel_delta": 16,
-  "maximum_changed_pixel_ratio": 0.005,
-  "minimum_canvas_painted_pixels": 100,
-  "row_alignment_tolerance_css_pixels": 1
-}

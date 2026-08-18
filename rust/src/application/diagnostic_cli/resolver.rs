@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 and command nodes wire this private resolver.
+#![allow(dead_code)]
 
 use std::{fmt, fs, path::Path};
 

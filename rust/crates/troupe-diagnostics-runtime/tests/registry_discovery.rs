@@ -131,7 +131,6 @@ fn server_identity(entry: &RegistryEntry) -> Value {
         "identity_schema_version": 1,
         "server_protocol_version": 1,
         "event_schema_version": 1,
-        "view_schema_version": 1,
         "api_schema_version": 1,
         "run_id": entry.run_id(),
         "owner_pid": entry.owner_pid(),
@@ -158,7 +157,6 @@ fn strict_server_identity_decoder_is_reusable_without_a_registry_entry() {
     assert_eq!(identity.identity_schema_version(), 1);
     assert_eq!(identity.server_protocol_version(), 1);
     assert_eq!(identity.event_schema_version(), 1);
-    assert_eq!(identity.view_schema_version(), 1);
     assert_eq!(identity.api_schema_version(), 1);
     assert_eq!(identity.run_id(), entry.run_id());
     assert_eq!(identity.owner_pid(), entry.owner_pid());

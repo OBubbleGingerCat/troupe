@@ -1,10 +1,5 @@
-import { spawnSync } from "node:child_process";
-import {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
   cleanup,
@@ -18,10 +13,7 @@ import {
   describe,
   expect,
   it,
-  vi,
 } from "vitest";
-
-vi.mock("uplot", () => ({ default: class MockUPlot {} }));
 
 import { App } from "../../src/app.tsx";
 import type { DiagnosticFetch } from "../../src/live/bootstrap.ts";
@@ -29,26 +21,7 @@ import { createLiveDiagnosticsController } from "../../src/live/reconnect.ts";
 
 
 const frontendRoot = resolve(process.cwd());
-const runner = resolve(frontendRoot, "scripts/build.mjs");
 const runId = "12345678-1234-4234-9234-123456789abc";
-
-
-function gateRoot(): string {
-  const value = process.env.TROUPE_GATE_TMP;
-  if (value === undefined || value.length === 0) {
-    throw new Error("bundle contract tests require TROUPE_GATE_TMP");
-  }
-  return value;
-}
-
-
-function runBuild(outDir: string) {
-  return spawnSync(process.execPath, [runner, "--out-dir", outDir], {
-    cwd: frontendRoot,
-    env: process.env,
-    encoding: "utf8",
-  });
-}
 
 
 function identity() {
@@ -56,7 +29,6 @@ function identity() {
     identity_schema_version: 1,
     server_protocol_version: 1,
     event_schema_version: 1,
-    view_schema_version: 1,
     api_schema_version: 1,
     run_id: runId,
     owner_pid: 1234,
@@ -124,22 +96,6 @@ describe("deterministic raw bundle contract", () => {
     expect(document.querySelector("style, base, link[href^='http']")).toBeNull();
   });
 
-  it("refuses repository output and pre-existing invocation paths before Vite runs", () => {
-    const repositoryOutput = resolve(frontendRoot, "dist");
-    const outside = runBuild(repositoryOutput);
-    expect(outside.status).toBe(1);
-    expect(outside.stderr).toContain("direct child of TROUPE_GATE_TMP");
-
-    const existing = mkdtempSync(join(gateRoot(), "bundle-contract-existing-"));
-    try {
-      const occupied = runBuild(existing);
-      expect(occupied.status).toBe(1);
-      expect(occupied.stderr).toContain("must not already exist");
-    } finally {
-      rmSync(existing, { recursive: true, force: true });
-    }
-  });
-
   it("renders only static compatibility without snapshot, query, or live transport", async () => {
     vi.stubGlobal("EventSource", undefined);
     const urls: string[] = [];
@@ -171,7 +127,7 @@ describe("deterministic raw bundle contract", () => {
       "http://diagnostics.test/troupe/api/v1/identity",
       "http://diagnostics.test/troupe/api/v1/status",
     ]);
-    expect(urls.every((url) => !/\/(snapshot|events|views)(?:[/?]|$)/.test(url))).toBe(true);
+    expect(urls.every((url) => !/\/(snapshot|events)(?:[/?]|$)/.test(url))).toBe(true);
     controller.stop();
   });
 });

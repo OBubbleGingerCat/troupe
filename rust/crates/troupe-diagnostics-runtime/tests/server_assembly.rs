@@ -16,9 +16,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 use troupe_diagnostics_core::{id::CanonicalUuid, scalar::SchemaU64};
 use troupe_diagnostics_runtime::{
     archive::lease::ActiveArchiveLease,
-    query::{
-        reader::CapturedEventSource,
-    },
+    query::reader::CapturedEventSource,
     registry::{model::WebBaseUrl, process_identity::ProcessIdentity},
     server::{
         assembly::{ActiveRouteAssembly, ArchiveRouteAssembly},

@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires this finite command into the CLI dispatcher.
+#![allow(dead_code)]
 
 use std::{
     fmt::{self, Write as _},
@@ -146,7 +146,7 @@ pub(crate) async fn execute(arguments: EventsArgs) -> Result<String, EventsError
     if follow {
         return Err(EventsError::new(
             EventsErrorCode::FollowUnsupported,
-            "finite events cannot execute a follow request; D10 owns streaming",
+            "finite events cannot execute a follow request; use the streaming events path",
         ));
     }
     let target = resolve(target).await.map_err(EventsError::resolver)?;

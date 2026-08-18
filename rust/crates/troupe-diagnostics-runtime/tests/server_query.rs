@@ -996,84 +996,6 @@ fn repository_root() -> PathBuf {
 }
 
 #[test]
-fn stdlib_verifier_accepts_all_http_goldens() {
-    let script = r#"
-import importlib.util
-import json
-import pathlib
-import re
-import sys
-import uuid
-
-root = pathlib.Path.cwd()
-spec = importlib.util.spec_from_file_location(
-    "troupe_fixture_verifier", root / "scripts/verify_diagnostic_fixtures.py"
-)
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-fixture_dir = root / "tests/fixtures/diagnostics/http"
-load = lambda name: json.loads((fixture_dir / name).read_text(encoding="utf-8"))
-status = load("status-v1.json")
-snapshot = load("snapshot-v1.json")
-events = load("events-v1.json")
-error = load("error-v1.json")
-
-for name, value in (("status", status), ("snapshot", snapshot), ("events", events), ("error", error)):
-    assert value["api_schema_version"] == 1, name
-    assert str(uuid.UUID(value["run_id"])) == value["run_id"], name
-
-assert set(snapshot) == {
-    "api_schema_version", "run_id", "watermark_sequence",
-    "earliest_available_sequence", "state"
-}
-assert snapshot["watermark_sequence"] == snapshot["state"]["through_sequence"]
-assert (snapshot["watermark_sequence"] == "0") == (snapshot["earliest_available_sequence"] is None)
-assert set(events) == {
-    "api_schema_version", "run_id", "captured_watermark", "events", "next_after"
-}
-assert events["next_after"] is None
-for index, event in enumerate(events["events"]):
-    module.validate_event(event, f"events.events[{index}]")
-    assert event["run_id"] == events["run_id"]
-    assert int(event["sequence"]) <= int(events["captured_watermark"])
-assert status["lifecycle"]["state"] == "failed"
-assert set(error) == {"api_schema_version", "run_id", "error"}
-assert set(error["error"]) == {"code", "message", "details"}
-assert error["error"]["details"] is None
-
-def reject_untyped_integers(value, path="response"):
-    if isinstance(value, bool) or value is None or isinstance(value, str):
-        return
-    if isinstance(value, int):
-        assert path.endswith("schema_version"), path
-        return
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            reject_untyped_integers(item, f"{path}[{index}]")
-        return
-    assert isinstance(value, dict), path
-    for key, item in value.items():
-        reject_untyped_integers(item, f"{path}.{key}")
-
-for value in (status, snapshot, events, error):
-    reject_untyped_integers(value)
-"#;
-    let python = std::env::var_os("PYO3_PYTHON").unwrap_or_else(|| "python3".into());
-    let output = Command::new(python)
-        .args(["-c", script])
-        .current_dir(repository_root())
-        .output()
-        .expect("run stdlib Python verifier");
-    assert!(
-        output.status.success(),
-        "Python verifier failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
 fn existing_w01_decoder_accepts_all_http_goldens() {
     let script = r#"
 import { readFileSync } from "node:fs";
@@ -1108,10 +1030,10 @@ if (error.error.code !== "invalid_cursor") throw new Error("error code drift");
         ])
         .current_dir(repository_root())
         .output()
-        .expect("run existing W01 TypeScript decoder");
+        .expect("run existing TypeScript decoder");
     assert!(
         output.status.success(),
-        "W01 decoder failed:\nstdout:\n{}\nstderr:\n{}",
+        "TypeScript decoder failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

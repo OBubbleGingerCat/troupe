@@ -27,9 +27,7 @@ use troupe_diagnostics_runtime::{
         process_identity::current_process_identity,
     },
     server::runtime::{DiagnosticServer, ServerConfig},
-    store::{
-        connection::{DiagnosticStore, InitialStoreMetadata},
-    },
+    store::connection::{DiagnosticStore, InitialStoreMetadata},
 };
 
 #[path = "../src/application/diagnostic_cli/archive_target.rs"]

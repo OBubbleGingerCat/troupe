@@ -135,7 +135,7 @@ impl ActSettlementCoordinator {
         self.settle(Some(sink), false)
     }
 
-    /// B14 uses this path when an Act has authority but no Python sink.
+    /// Settles an Act that has diagnostic authority but no Python sink.
     pub(crate) fn settle_authority_only(&self) -> Result<(), ActSettlementError> {
         self.settle(None, true)
     }
@@ -300,7 +300,7 @@ mod active {
                 )),
             };
 
-            // Once K02 is sealed, authority must remain expired even if Python projection fails.
+            // Once the sink is sealed, authority must remain expired even if Python projection fails.
             *phase = SinkSettlementPhase::Sealed;
             if let Err(error) = Python::attach(|py| {
                 call_base_sink_method(py, &self.request, "_diagnostic_seal", None)

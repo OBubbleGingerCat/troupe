@@ -13,14 +13,14 @@ captures committed watermark `W`; the default prefix is `1..W`, while
 `--through SEQ` selects `1..SEQ` and must not exceed `W`. An empty prefix is a
 valid trace containing Run descriptors and metadata but no event packets.
 
-For a local inactive archive, the T03 encoder reads through a shared archive
-lease and streams the prefix to the T08 local atomic-file publisher. A
+For a local inactive archive, the Perfetto encoder reads through a shared archive
+lease and streams the prefix to the local atomic-file publisher. A
 `--production` target that resolves to an inactive archive follows the same
 path.
 
 For `--url`, or `--production` resolved to an active server, the CLI calls the
 identity-checked, read-only `GET /api/v1/dump[?through=SEQ]` endpoint. The server
-captures and encodes the prefix, streams it to the caller, and the caller's T08
+captures and encodes the prefix, streams it to the caller, and the caller's
 publisher creates the requested local output. The HTTP request cannot name a
 server filesystem path or request server-side force replacement. CLI
 `--output` and `--force` affect only the caller's local filesystem.
@@ -33,7 +33,7 @@ the trace, or opens a public service automatically.
 
 ## Atomic publication
 
-The local T08 wrapper creates an exclusive temporary regular file in the output
+The local publisher creates an exclusive temporary regular file in the output
 directory, encodes, flushes, syncs, and closes it, and then performs same-directory
 atomic publication. Without `--force`, an existing target is never replaced.
 Force accepts only an identity-checked regular file, creates an exclusive hard-link
@@ -85,10 +85,7 @@ canonical store and Web transcript.
 
 ## Compatibility provenance
 
-The private protobuf declarations are audited against official Perfetto v57.2,
-commit `da1d152cff27890903d158fe96751de3aab883cc`, with checked upstream source
-hashes and a closed used-field manifest. Release compatibility has three pinned
-offline layers: independent protobuf decoding of byte-exact goldens, official
-v57.2 `trace_processor_shell` SQL assertions, and a pinned official Perfetto UI
-browser smoke test. A current public UI check is informational and does not
-define release correctness.
+The private protobuf declarations are derived from official Perfetto v57.2 at
+commit `da1d152cff27890903d158fe96751de3aab883cc`. The vendored source snapshots,
+hashes, license, and selected field set record the schema provenance. Encoder
+tests verify deterministic packets, metadata, boundary values, and open spans.

@@ -34,7 +34,6 @@ export interface ServerIdentity {
   readonly identity_schema_version: number;
   readonly server_protocol_version: number;
   readonly event_schema_version: number;
-  readonly view_schema_version: number;
   readonly api_schema_version: number;
   readonly run_id: CanonicalUuid;
   readonly owner_pid: number;
@@ -112,7 +111,6 @@ const IDENTITY_FIELDS = [
   "identity_schema_version",
   "server_protocol_version",
   "event_schema_version",
-  "view_schema_version",
   "api_schema_version",
   "run_id",
   "owner_pid",
@@ -244,10 +242,6 @@ export function decodeServerIdentity(value: unknown, path = "identity"): ServerI
     event_schema_version: positiveVersion(
       identity.event_schema_version,
       `${path}.event_schema_version`,
-    ),
-    view_schema_version: positiveVersion(
-      identity.view_schema_version,
-      `${path}.view_schema_version`,
     ),
     api_schema_version: positiveVersion(
       identity.api_schema_version,
@@ -538,7 +532,6 @@ export async function bootstrapDiagnostics(
       event: identity.event_schema_version,
       api: identity.api_schema_version,
       control: identity.server_protocol_version,
-      view: identity.view_schema_version,
       ui: SUPPORTED_SCHEMA_VERSIONS.ui,
     },
     { missingBrowserCapabilities: missingCapabilities(fetchImpl, EventSourceImpl) },

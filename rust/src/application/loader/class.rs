@@ -87,7 +87,7 @@ pub(crate) struct ResolvedProductionClass {
 }
 
 impl ResolvedProductionClass {
-    // B08 consumes this seam before calling construct_production.
+    // The loader uses this before constructing the Production.
     #[allow(dead_code)]
     pub(crate) fn inspect_static_attribute(
         &self,

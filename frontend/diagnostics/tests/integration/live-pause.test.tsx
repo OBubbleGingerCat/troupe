@@ -23,7 +23,6 @@ function identity(): Record<string, unknown> {
     identity_schema_version: 1,
     server_protocol_version: 1,
     event_schema_version: 1,
-    view_schema_version: 1,
     api_schema_version: 1,
     run_id: RUN_ID,
     owner_pid: 8123,

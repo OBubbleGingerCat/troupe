@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 and the HTTP command nodes wire this private client.
+#![allow(dead_code)]
 
 use std::{fmt, time::Duration};
 

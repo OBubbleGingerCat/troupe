@@ -166,11 +166,3 @@ CREATE TABLE diagnostic_view_manifest (
         typeof(manifest_json) = 'blob' AND json_valid(CAST(manifest_json AS TEXT))
     )
 ) STRICT;
-
-CREATE TABLE diagnostic_view_records (
-    view_id TEXT PRIMARY KEY CHECK (length(view_id) > 0),
-    ordinal INTEGER NOT NULL UNIQUE CHECK (ordinal >= 0),
-    view_schema_version INTEGER NOT NULL CHECK (view_schema_version >= 1),
-    renderer TEXT NOT NULL CHECK (length(renderer) > 0),
-    record_json BLOB NOT NULL CHECK (typeof(record_json) = 'blob')
-) STRICT, WITHOUT ROWID;

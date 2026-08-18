@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires the streaming client into the application entry point.
+#![allow(dead_code)]
 
 use std::{fmt, time::Duration};
 

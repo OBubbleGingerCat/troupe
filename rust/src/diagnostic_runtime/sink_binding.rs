@@ -339,7 +339,7 @@ mod active {
                 standalone_observer,
                 ToolPayloadCapturePolicy::new(capture.tool_inputs, capture.tool_outputs),
             );
-            // K02 startup/registration is the last resource acquisition that can fail. If
+            // Diagnostic context installation is the last resource acquisition that can fail. If
             // attachment rejects an invalid control, the sink is still UNBOUND, the reservation
             // drops unpublished, and the unreachable handle is closed by capability shutdown.
             control
@@ -358,7 +358,7 @@ mod active {
             // user override or competing bind can introduce a fallible semantic transition here.
             bind_method.call1((sink,))?;
             reservation.publish(Arc::clone(&subscriber));
-            // B05 allocates act IDs from a checked monotonic counter and retains this fresh
+            // Act IDs come from a checked monotonic counter, and the prepared producer retains this
             // ActCall control in the prepared producer. Its defensive registry-race branch is
             // therefore unreachable on this valid path, so commit cannot follow a half-publish.
             prepared.commit();
@@ -1026,7 +1026,7 @@ mod active {
             Ok(())
         }
 
-        #[allow(dead_code)] // Installed by the ordered B14 successor before subscriber publication.
+        #[allow(dead_code)] // Installed before subscriber publication.
         fn install_authority_expiry(
             &self,
             authority: Arc<dyn ActAuthorityExpiry>,
@@ -1276,7 +1276,7 @@ mod active {
             self.subscriber.terminal_enqueued.load(Ordering::Acquire)
         }
 
-        #[allow(dead_code)] // Installed by the ordered B14 successor during its admission transaction.
+        #[allow(dead_code)] // Installed during the admission transaction.
         pub(crate) fn install_authority_expiry(
             &self,
             authority: Arc<dyn ActAuthorityExpiry>,

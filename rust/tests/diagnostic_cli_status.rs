@@ -203,18 +203,18 @@ async fn live_status_queries_h01_and_preserves_available_writer_quota_and_limits
     let server = DiagnosticServer::start(
         ServerConfig::new(run_id(), std::process::id(), process_identity())
             .with_bind("127.0.0.1", 0),
-        endpoints.route_definitions().expect("valid H01 routes"),
+        endpoints.route_definitions().expect("valid query routes"),
     )
     .expect("start diagnostic server");
     let base_url = WebBaseUrl::parse(&format!("http://{}/", server.connect_addr()))
         .expect("valid local server URL");
     let client = DiagnosticHttpClient::connect(base_url)
         .await
-        .expect("validated D01 HTTP client");
+        .expect("validated diagnostic HTTP client");
 
     let document = status::query(ResolvedDiagnosticTarget::Live(client))
         .await
-        .expect("live H01 status");
+        .expect("live diagnostic status");
     let json = document.render(DocumentFormat::Json);
     for required in [
         "\"source\":\"active\"",
@@ -358,7 +358,7 @@ async fn captured_h01_response_run_identity_is_checked_against_the_resolved_serv
             .with_bind("127.0.0.1", 0),
         endpoints
             .route_definitions()
-            .expect("valid mismatched H01 routes"),
+            .expect("valid mismatched query routes"),
     )
     .expect("start identity-mismatch server");
     let base_url = WebBaseUrl::parse(&format!("http://{}/", server.connect_addr()))

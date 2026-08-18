@@ -297,7 +297,7 @@ fn c03_fixture_streams_rebuild_from_events_byte_exactly() {
 
     for (name, bytes) in fixtures {
         let events: Vec<DiagnosticEvent> =
-            serde_json::from_slice(bytes).expect("parse C03 fixture");
+            serde_json::from_slice(bytes).expect("parse snapshot fixture");
         let mut materialized = SnapshotProjector::new(run_id());
         for event in &events {
             materialized

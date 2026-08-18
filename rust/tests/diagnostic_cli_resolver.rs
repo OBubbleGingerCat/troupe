@@ -135,7 +135,6 @@ fn matching_identity(entry: &RegistryEntry) -> Vec<u8> {
             "\"identity_schema_version\":1,",
             "\"server_protocol_version\":1,",
             "\"event_schema_version\":1,",
-            "\"view_schema_version\":1,",
             "\"api_schema_version\":1,",
             "\"run_id\":\"{}\",",
             "\"owner_pid\":{},",
@@ -408,7 +407,7 @@ fn implicit_selection_counts_only_q00_validated_stale_archives() {
     processes.gone(&stale);
 
     let target = resolve_production_with(production.root(), None, &processes, &servers)
-        .expect("the one Q00-valid archive is the unique implicit target");
+        .expect("the one valid archive is the unique implicit target");
     assert!(!target.is_live());
     assert_eq!(target.run_id(), valid_id);
 }
@@ -425,7 +424,6 @@ fn url_identity(run_id: CanonicalUuid, protocol: u64, base_path: &str) -> Vec<u8
             "\"identity_schema_version\":1,",
             "\"server_protocol_version\":{},",
             "\"event_schema_version\":1,",
-            "\"view_schema_version\":1,",
             "\"api_schema_version\":1,",
             "\"run_id\":\"{}\",",
             "\"owner_pid\":4242,",

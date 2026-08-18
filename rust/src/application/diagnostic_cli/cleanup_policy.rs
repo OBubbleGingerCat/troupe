@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 and D11 consume the private preview and apply plan.
+#![allow(dead_code)]
 
 use std::{
     cmp::Ordering,
@@ -611,8 +611,8 @@ pub(crate) struct RealCleanupLeaseProbe;
 impl CleanupLeaseProbe for RealCleanupLeaseProbe {
     fn probe(&self, run_directory: &Path) -> CleanupLeaseAvailability {
         // This is a non-blocking availability check only. The runtime helper drops the lock before
-        // returning; D05 never owns or returns a cleanup lease. D11 is the only phase allowed to
-        // hold that lease across identity revalidation and whole-directory deletion.
+        // returning; only the apply path holds the lease across identity revalidation and
+        // whole-directory deletion.
         match probe_archive_lease_with(
             &RealArchiveLeaseOpener,
             run_directory,

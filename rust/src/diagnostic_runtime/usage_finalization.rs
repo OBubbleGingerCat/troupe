@@ -801,7 +801,7 @@ mod active {
                         usage.cached_read_tokens,
                         usage.cached_write_tokens,
                     )
-                    .expect("A04 and B17 construct a validated terminal usage"),
+                    .expect("the normalizer constructs validated terminal usage"),
                 )
             }),
             subscriber,

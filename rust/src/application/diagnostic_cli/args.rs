@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires this private grammar into the application entry point.
+#![allow(dead_code)]
 
 use std::{ffi::OsString, path::PathBuf};
 

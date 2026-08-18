@@ -11,10 +11,8 @@
     "node": ">=22 <23"
   },
   "dependencies": {
-    "@preact/signals": "2.11.1",
     "lucide-preact": "1.31.0",
-    "preact": "10.29.8",
-    "uplot": "1.6.32"
+    "preact": "10.29.8"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",

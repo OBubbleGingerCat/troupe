@@ -15,5 +15,3 @@ one Troupe Run. Start with the page matching the task at hand:
   archive serving, and cleanup.
 - [Perfetto export](perfetto.md): stable-prefix `.pftrace` capture, local atomic
   publication, precision, sensitivity, and compatibility provenance.
-- [Release checklist](RELEASE_CHECKLIST.md): executable release gates and
-  retained acceptance evidence.

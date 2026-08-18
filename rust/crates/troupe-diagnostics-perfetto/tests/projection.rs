@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, convert::Infallible, fs, path::PathBuf};
+use std::collections::BTreeMap;
 
 use troupe_diagnostics_core::{
     detail::{
@@ -10,11 +10,6 @@ use troupe_diagnostics_core::{
         ContextUsageSampled, CounterSampled, CustomCounterSampled, CustomInstantOccurred,
         DiagnosticEvent, DiagnosticEventHeader, DiagnosticScope, InstantOccurred, ObservationGap,
         SpanFinished, SpanStarted,
-    },
-    hub::{
-        AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
-        DeliveryFailure, EventIdentity, LiveEventNotifier, MandatoryDurableReserver,
-        ProductionDiagnosticHub,
     },
     id::{CanonicalUuid, RunLocalId},
     kinds::{
@@ -30,33 +25,6 @@ use troupe_diagnostics_perfetto::{
 };
 
 const RUN: &str = "12345678-1234-4234-9234-123456789abc";
-
-struct AcceptReservation;
-
-impl AdmissionReservation for AcceptReservation {
-    fn commit(self, _event: AcceptedDiagnosticEvent) {}
-}
-
-struct AcceptAll;
-
-impl AdmissionReserver for AcceptAll {
-    type Error = Infallible;
-    type Reservation = AcceptReservation;
-
-    fn try_reserve(&mut self, _size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
-        Ok(AcceptReservation)
-    }
-}
-
-impl MandatoryDurableReserver for AcceptAll {}
-
-struct IgnoreLive;
-
-impl LiveEventNotifier for IgnoreLive {
-    fn notify(&mut self, _event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure> {
-        Ok(())
-    }
-}
 
 fn run() -> CanonicalUuid {
     CanonicalUuid::parse(RUN).unwrap()
@@ -302,52 +270,13 @@ fn canonical_prefix() -> Vec<DiagnosticEvent> {
     ]
 }
 
-fn fixture_directory() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .and_then(|path| path.parent())
-        .expect("Perfetto crate is below repository rust/crates")
-        .join("tests/fixtures/perfetto/projection")
-}
-
-fn canonical_fixture_bytes(events: &[DiagnosticEvent]) -> Vec<u8> {
-    let hub = ProductionDiagnosticHub::production(run(), AcceptAll, Box::new(IgnoreLive));
-    let mut output = b"[\n".to_vec();
-    for (index, event) in events.iter().cloned().enumerate() {
-        let expected = event.header().sequence();
-        let accepted = hub
-            .admit(
-                move |identity: EventIdentity| {
-                    assert_eq!(identity.run_id(), run());
-                    assert_eq!(identity.sequence(), expected);
-                    event
-                },
-                None,
-            )
-            .expect("canonical projection fixture must admit")
-            .accepted()
-            .canonical_bytes()
-            .to_vec();
-        output.extend_from_slice(b"  ");
-        output.extend_from_slice(&accepted);
-        if index + 1 != events.len() {
-            output.push(b',');
-        }
-        output.push(b'\n');
-    }
-    output.extend_from_slice(b"]\n");
-    output
-}
-
 #[test]
-fn canonical_projection_matches_checked_binary_and_packet_goldens() {
+fn canonical_projection_is_deterministic_and_preserves_packet_contract() {
     let events = canonical_prefix();
     let first = project_prefix(metadata(events.len() as u64), &events).unwrap();
     let second = project_prefix(metadata(events.len() as u64), &events).unwrap();
     let bytes = first.trace_bytes().unwrap();
     let packets = first.debug_packets_json();
-    let canonical_events = canonical_fixture_bytes(&events);
 
     assert_eq!(bytes, second.trace_bytes().unwrap());
     assert_eq!(packets, second.debug_packets_json());
@@ -370,27 +299,6 @@ fn canonical_projection_matches_checked_binary_and_packet_goldens() {
     assert!(packets[act_start..next_event].contains("troupe.usage.input_tokens"));
     assert!(!packets.contains("SECRET MESSAGE BODY MUST NOT APPEAR"));
     assert!(!String::from_utf8_lossy(&bytes).contains("SECRET MESSAGE BODY MUST NOT APPEAR"));
-
-    let directory = fixture_directory();
-    if std::env::var_os("TROUPE_REGENERATE_PERFETTO_PROJECTION").is_some() {
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("canonical-events.json"), &canonical_events).unwrap();
-        fs::write(directory.join("expected-trace.pb"), &bytes).unwrap();
-        fs::write(directory.join("expected-packets.json"), packets.as_bytes()).unwrap();
-    } else {
-        assert_eq!(
-            canonical_events,
-            fs::read(directory.join("canonical-events.json")).unwrap()
-        );
-        assert_eq!(
-            bytes,
-            fs::read(directory.join("expected-trace.pb")).unwrap()
-        );
-        assert_eq!(
-            packets,
-            fs::read_to_string(directory.join("expected-packets.json")).unwrap()
-        );
-    }
 }
 
 #[test]

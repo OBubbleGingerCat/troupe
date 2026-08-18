@@ -5,7 +5,6 @@ export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze({
   event: 1,
   api: 1,
   control: 1,
-  view: 1,
   ui: 1,
 } as const);
 
@@ -67,7 +66,6 @@ export function evaluateProtocolCompatibility(
     event: checkSchemaCompatibility("event", received.event, supported.event),
     api: checkSchemaCompatibility("api", received.api, supported.api),
     control: checkSchemaCompatibility("control", received.control, supported.control),
-    view: checkSchemaCompatibility("view", received.view, supported.view),
     ui: checkSchemaCompatibility("ui", received.ui, supported.ui),
   } satisfies Record<SchemaDomain, VersionCompatibilityDecision>;
   const incompatible = Object.values(decisions).some(

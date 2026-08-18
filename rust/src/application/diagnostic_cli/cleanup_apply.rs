@@ -1,4 +1,4 @@
-#![allow(dead_code)] // D07 wires this private apply engine into the CLI dispatcher.
+#![allow(dead_code)]
 
 use std::{
     collections::BTreeMap,

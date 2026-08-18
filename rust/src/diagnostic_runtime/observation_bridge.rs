@@ -867,7 +867,7 @@ mod active {
                             ContextSampleOrigin::Provider,
                             None,
                         )
-                        .expect("A06 emitted a validated context occupancy"),
+                        .expect("the observer emitted a validated context occupancy"),
                     )
                 },
             )?;
@@ -949,7 +949,7 @@ mod active {
                         origin,
                         observed_elapsed_ns,
                     )
-                    .expect("A06/A07 emitted validated context and cost values"),
+                    .expect("the observer emitted validated context and cost values"),
                 )
             })?;
             if let Some(session) = state.sessions.get_mut(&key) {

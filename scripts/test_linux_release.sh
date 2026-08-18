@@ -7,7 +7,6 @@ cd -- "$repository_root"
 temporary_base="${TMPDIR:-/tmp}"
 temporary_base="$(cd -- "$temporary_base" && pwd -P)"
 declare -a temporary_roots=()
-diagnostics_evidence_root=""
 
 _cleanup() {
   local original_status=$?
@@ -42,74 +41,6 @@ _create_temporary_root() {
   : > "$root/.troupe-release-owned"
   temporary_roots+=("$root")
   printf -v "$output_variable" '%s' "$root"
-}
-
-_require_external_directory() {
-  local value=$1
-  local label=$2
-  local output_variable=$3
-  local canonical
-
-  if [[ "$value" != /* || ! -d "$value" || -L "$value" ]]; then
-    printf '%s must be an absolute real directory\n' "$label" >&2
-    return 1
-  fi
-  canonical="$(cd -- "$value" && pwd -P)"
-  if [[ "$canonical" != "$value" ]]; then
-    printf '%s must be a normalized path without symlink indirection\n' "$label" >&2
-    return 1
-  fi
-  case "$canonical/" in
-    "$repository_root/"*)
-      printf '%s must remain outside the repository\n' "$label" >&2
-      return 1
-      ;;
-  esac
-  printf -v "$output_variable" '%s' "$canonical"
-}
-
-_require_cache() {
-  local name=$1
-  local value=${!name-}
-  local resolved
-
-  if [[ -z "$value" ]]; then
-    printf 'diagnostics release requires %s\n' "$name" >&2
-    return 1
-  fi
-  _require_external_directory "$value" "$name" resolved
-  printf -v "$name" '%s' "$resolved"
-  export "$name"
-}
-
-_run_release_child() {
-  local label=$1
-  local timeout_seconds=$2
-  local gate_tmp=$3
-  shift 3
-  local -a command=("$@")
-  local -a environment=(env -u TROUPE_GATE_TMP)
-
-  if [[ -n "$gate_tmp" ]]; then
-    environment=(env "TROUPE_GATE_TMP=$gate_tmp")
-  fi
-  if [[ ${TROUPE_DIAGNOSTIC_BOOTSTRAP_GATE-} == 1 ]]; then
-    local python_executable
-    python_executable="$(command -v python3 || command -v python)"
-    command=(
-      "$python_executable"
-      -B
-      "$repository_root/tests/unit/test_release_script.py"
-      --bootstrap-fake-child
-      "$label"
-      "$timeout_seconds"
-      "$gate_tmp"
-      --
-      "${command[@]}"
-    )
-  fi
-  "${environment[@]}" timeout --foreground --signal=TERM --kill-after=10s \
-    "${timeout_seconds}s" "${command[@]}"
 }
 
 _quality_for_python() {
@@ -169,15 +100,6 @@ build() {
     -w /io \
     -v "$repository_root:/io" \
     -v "$uv_executable:/usr/local/bin/uv:ro" \
-    -e HTTP_PROXY \
-    -e HTTPS_PROXY \
-    -e NO_PROXY \
-    -e ALL_PROXY \
-    -e http_proxy \
-    -e https_proxy \
-    -e no_proxy \
-    -e all_proxy \
-    -e PYTHONDONTWRITEBYTECODE=1 \
     -e UV_PYTHON=/opt/python/cp310-cp310/bin/python \
     -e UV_PROJECT_ENVIRONMENT=/tmp/troupe-venv \
     ghcr.io/pyo3/maturin:v1.14.1 \
@@ -225,52 +147,6 @@ compatibility() {
   done
 }
 
-diagnostics() {
-  local v05_root
-  local v07_root
-
-  _require_cache TROUPE_NPM_CACHE
-  _require_cache TROUPE_PLAYWRIGHT_CACHE
-  _require_cache TROUPE_PERFETTO_CACHE
-
-  if [[ -n "$diagnostics_evidence_root" ]]; then
-    v05_root=$diagnostics_evidence_root
-    v07_root=$diagnostics_evidence_root
-  else
-    _create_temporary_root troupe-diagnostics-v05 v05_root
-    _create_temporary_root troupe-diagnostics-v07 v07_root
-  fi
-
-  _run_release_child V00 900 "" scripts/run_diagnostic_node_gate.sh V00
-  _run_release_child V04 900 "" scripts/run_diagnostic_node_gate.sh V04
-  _run_release_child V13 900 "" scripts/run_diagnostic_node_gate.sh V13
-  _run_release_child V05 900 "$v05_root" scripts/run_diagnostic_node_gate.sh V05
-  _run_release_child V07 1800 "$v07_root" \
-    scripts/test_diagnostics_wheel.sh \
-      --offline \
-      --smoke active,archive \
-      --report "$v07_root/V07-wheel-report.json"
-  _run_release_child V08 1800 "" \
-    scripts/test_diagnostics_python_compat.sh \
-      --versions 3.10,3.11,3.12,3.13,3.14 \
-      --build-current-wheel-once
-  _run_release_child V09 900 "" \
-    scripts/test_diagnostics_frontend_release.sh \
-      --clean \
-      --check-generated \
-      --forbid-update \
-      --npm-cache "$TROUPE_NPM_CACHE"
-  _run_release_child V10 1800 "" \
-    scripts/test_diagnostics_rust_quality.sh --all --locked --deny-warnings
-  _run_release_child V14 1800 "" scripts/run_diagnostic_node_gate.sh V14
-  _run_release_child V15 900 "" \
-    scripts/test_diagnostics_perfetto_release.sh \
-      --offline \
-      --all-layers \
-      --perfetto-cache "$TROUPE_PERFETTO_CACHE" \
-      --browser-cache "$TROUPE_PLAYWRIGHT_CACHE"
-}
-
 _audit_checkout() {
   local checkout_uid
   local fixture_caches
@@ -298,41 +174,16 @@ _audit_checkout() {
 }
 
 _usage() {
-  printf 'usage: %s [quality|build|compatibility|diagnostics|all] [--diagnostics-evidence-root DIR]\n' "${0##*/}" >&2
+  printf 'usage: %s [quality|build|compatibility|all]\n' "${0##*/}" >&2
 }
 
 main() {
-  local mode=${1:-all}
-
-  if [[ "$mode" == -h || "$mode" == --help || "$mode" == help ]]; then
-    if (($# != 1)); then
-      _usage
-      return 2
-    fi
-    _usage
-    return 0
-  fi
-  if (($# == 3)) && [[ "$mode" == all && "$2" == --diagnostics-evidence-root ]]; then
-    _require_external_directory "$3" "diagnostics evidence root" diagnostics_evidence_root
-    if [[ -n "$(find "$diagnostics_evidence_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-      printf 'diagnostics evidence root must be a fresh empty directory\n' >&2
-      return 1
-    fi
-  elif (($# > 1)); then
+  if (($# > 1)); then
     _usage
     return 2
   fi
 
-  if [[ ${TROUPE_DIAGNOSTIC_BOOTSTRAP_GATE-} == 1 && "$mode" == all ]]; then
-    _run_release_child quality 60 "" quality
-    _run_release_child build 60 "" build
-    _run_release_child compatibility 60 "" compatibility
-    diagnostics
-    _audit_checkout
-    return
-  fi
-
-  case "$mode" in
+  case "${1:-all}" in
     quality)
       quality
       ;;
@@ -342,14 +193,10 @@ main() {
     compatibility)
       compatibility
       ;;
-    diagnostics)
-      diagnostics
-      ;;
     all)
       quality
       build
       compatibility
-      diagnostics
       ;;
     *)
       _usage

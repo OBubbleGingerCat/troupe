@@ -247,7 +247,7 @@ impl TestServer {
                     return Ok(query.handle_finite_events(request));
                 }
                 let cursor = resolve_effective_cursor(request.uri().query(), request.headers())
-                    .expect("D10 sends a valid H02 cursor");
+                    .expect("the follow client sends a valid stream cursor");
                 observations.lock().unwrap().push(CursorObservation {
                     value: cursor.value().get(),
                     source: cursor.source(),
