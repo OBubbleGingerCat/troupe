@@ -235,6 +235,8 @@ def test_end_to_end_showcase_composes_real_finite_scenes_without_running_provide
     assert "examples/diagnostics/production.py" in document
     examples_document = _read(ROOT / "examples/README.md")
     assert "continuously consumes provider tokens" in examples_document
+    assert "agent-test-support" in examples_document
+    assert "maturin develop --uv --locked" in examples_document
     for command in (
         "troupe diagnostic status --production examples/diagnostics",
         "troupe diagnostic events --production examples/diagnostics",
@@ -274,6 +276,28 @@ def test_end_to_end_showcase_composes_real_finite_scenes_without_running_provide
         and node.func.attr == "create_task"
         for node in ast.walk(scene)
     ) == 2
+    custom_span_blocks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Attribute)
+            and isinstance(item.context_expr.func.value, ast.Name)
+            and item.context_expr.func.value.id == "diagnostics"
+            and item.context_expr.func.attr == "span"
+            for item in node.items
+        )
+    ]
+    assert custom_span_blocks
+    assert all(
+        not any(
+            isinstance(descendant, ast.Await)
+            for statement in block.body
+            for descendant in ast.walk(statement)
+        )
+        for block in custom_span_blocks
+    )
 
 
 def test_end_to_end_showcase_runs_repeated_scene_cycles_without_provider(

@@ -469,6 +469,12 @@ def _sdist_package_prefix(names: Sequence[str]) -> str:
     return matches[0]
 
 
+def _source_example_is_generated(path: PurePosixPath) -> bool:
+    return any(part in {".troupe", "__pycache__"} for part in path.parts) or (
+        path.suffix in (".pyc", ".pyo")
+    )
+
+
 def _source_examples(source_package: Path) -> dict[str, bytes]:
     examples = source_package.parent.parent / "examples"
     try:
@@ -481,8 +487,7 @@ def _source_examples(source_package: Path) -> dict[str, bytes]:
             if not path.is_file():
                 continue
             name = path.relative_to(examples).as_posix()
-            parts = PurePosixPath(name).parts
-            if "__pycache__" in parts or path.suffix in (".pyc", ".pyo"):
+            if _source_example_is_generated(PurePosixPath(name)):
                 continue
             files[name] = path.read_bytes()
         if tuple(sorted(files)) != expected_names:

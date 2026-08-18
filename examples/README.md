@@ -92,6 +92,18 @@ This example starts two real Codex turns per Scene until you press `Ctrl+C`, so 
 continuously consumes provider tokens. The final argument is the delay in seconds
 after both Acts finish and before `scene()` returns; the default is 30 seconds.
 
+The repository's integration-test setup installs a native extension with
+`agent-test-support` into `.venv`. That build intentionally uses inert agent
+sessions unless a test injects a mock launcher, so it cannot run this live
+example. When running from a checkout after the test setup, reinstall the native
+extension with the default production features first. Installed release wheels
+do not need this step:
+
+```shell
+env -u CONDA_PREFIX uv run --no-sync maturin develop --uv --locked \
+  --manifest-path rust/Cargo.toml
+```
+
 ```console
 troupe --production examples/diagnostics --diagnostic-bind-host 127.0.0.1 --diagnostic-port 43120 -- 30
 ```

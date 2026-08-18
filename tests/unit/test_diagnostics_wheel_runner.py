@@ -10,7 +10,7 @@ import stat
 import subprocess
 import sys
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -314,6 +314,20 @@ def test_verifier_uses_the_realized_repository_contract() -> None:
         "diagnostics",
     ]
     verifier._validate_expected_contract(expected)
+
+
+def test_source_example_inventory_ignores_generated_runtime_state() -> None:
+    verifier = load_verifier()
+
+    assert verifier._source_example_is_generated(
+        PurePosixPath("diagnostics/.troupe/diagnostics/runs/run/diagnostics.sqlite3")
+    )
+    assert verifier._source_example_is_generated(
+        PurePosixPath("diagnostics/__pycache__/production.cpython-313.pyc")
+    )
+    assert not verifier._source_example_is_generated(
+        PurePosixPath("diagnostics/production.py")
+    )
 
 
 def test_sdist_manifest_normalization_must_preserve_toml_semantics() -> None:

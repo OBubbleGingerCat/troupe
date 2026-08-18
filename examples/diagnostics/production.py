@@ -71,33 +71,29 @@ class DiagnosticActor(troupe.Actor):
         planned_depth = int(cue.instruction["planned_depth"])
         sink = EvaluationSink()
 
-        with diagnostics.span(
-            "example.observed_turn",
-            attributes={"scene": scene_number, "operation": operation},
-        ):
-            record_batch(queue_depth=planned_depth, region=operation)
-            result = await self.act(
-                script=self.script(
-                    scene_number=scene_number,
-                    operation=operation,
+        record_batch(queue_depth=planned_depth, region=operation)
+        result = await self.act(
+            script=self.script(
+                scene_number=scene_number,
+                operation=operation,
+            ),
+            output_schema={
+                "scene": troupe.act_schema.Int64Value(
+                    description="the current diagnostics showcase Scene number",
+                    min=scene_number,
+                    max=scene_number,
                 ),
-                output_schema={
-                    "scene": troupe.act_schema.Int64Value(
-                        description="the current diagnostics showcase Scene number",
-                        min=scene_number,
-                        max=scene_number,
-                    ),
-                    "operation": troupe.act_schema.StrValue(
-                        description="the operation requested by the current Cue",
-                        choices=[operation],
-                    ),
-                    "marker": troupe.act_schema.StrValue(
-                        description="the exact diagnostics probe marker",
-                        choices=[PROBE_MARKER],
-                    ),
-                },
-                diagnostic_sink=sink,
-            )
+                "operation": troupe.act_schema.StrValue(
+                    description="the operation requested by the current Cue",
+                    choices=[operation],
+                ),
+                "marker": troupe.act_schema.StrValue(
+                    description="the exact diagnostics probe marker",
+                    choices=[PROBE_MARKER],
+                ),
+            },
+            diagnostic_sink=sink,
+        )
 
         summary = await sink.wait_closed()
         message_characters = len("".join(sink.message_text))
@@ -204,70 +200,71 @@ class Production(troupe.Production):
                 "example.scene_started",
                 attributes={"scene": scene_number, "queued_cues": 2},
             )
-            probe_task = asyncio.create_task(
-                self.worker.cue(
-                    {
-                        "scene_number": scene_number,
-                        "operation": "probe",
-                        "planned_depth": 2,
-                    }
-                )
+
+        probe_task = asyncio.create_task(
+            self.worker.cue(
+                {
+                    "scene_number": scene_number,
+                    "operation": "probe",
+                    "planned_depth": 2,
+                }
             )
-            await asyncio.sleep(0)
-            recall_task = asyncio.create_task(
-                self.worker.cue(
-                    {
-                        "scene_number": scene_number,
-                        "operation": "recall",
-                        "planned_depth": 1,
-                    }
-                )
+        )
+        await asyncio.sleep(0)
+        recall_task = asyncio.create_task(
+            self.worker.cue(
+                {
+                    "scene_number": scene_number,
+                    "operation": "recall",
+                    "planned_depth": 1,
+                }
             )
-            probe_effects, recall_effects = await asyncio.gather(
-                probe_task,
-                recall_task,
-            )
-            probe = cast(ObservedTurn, probe_effects[0])
-            recall = cast(ObservedTurn, recall_effects[0])
-            print(
-                json.dumps(
-                    {
-                        "scene": scene_number,
-                        "turns": [
-                            {
-                                "operation": probe.operation,
-                                "result": probe.result,
-                                "diagnostics": probe.observation,
-                            },
-                            {
-                                "operation": recall.operation,
-                                "result": recall.result,
-                                "diagnostics": recall.observation,
-                            },
-                        ],
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-            await asyncio.sleep(self.interval_seconds)
-            self.completed_scenes += 1
-            diagnostics.counter(
-                "example.completed_scenes",
-                self.completed_scenes,
-                unit="scenes",
-            )
-            diagnostics.event(
-                "example.scene_completed",
-                attributes={
+        )
+        probe_effects, recall_effects = await asyncio.gather(
+            probe_task,
+            recall_task,
+        )
+        probe = cast(ObservedTurn, probe_effects[0])
+        recall = cast(ObservedTurn, recall_effects[0])
+        print(
+            json.dumps(
+                {
                     "scene": scene_number,
-                    "acts": 2,
-                    "sink_complete": bool(
-                        probe.observation["sink_complete"]
-                        and recall.observation["sink_complete"]
-                    ),
+                    "turns": [
+                        {
+                            "operation": probe.operation,
+                            "result": probe.result,
+                            "diagnostics": probe.observation,
+                        },
+                        {
+                            "operation": recall.operation,
+                            "result": recall.result,
+                            "diagnostics": recall.observation,
+                        },
+                    ],
                 },
-            )
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        await asyncio.sleep(self.interval_seconds)
+        self.completed_scenes += 1
+        diagnostics.counter(
+            "example.completed_scenes",
+            self.completed_scenes,
+            unit="scenes",
+        )
+        diagnostics.event(
+            "example.scene_completed",
+            attributes={
+                "scene": scene_number,
+                "acts": 2,
+                "sink_complete": bool(
+                    probe.observation["sink_complete"]
+                    and recall.observation["sink_complete"]
+                ),
+            },
+        )
 
     async def stop(self) -> None:
         diagnostics.event(
