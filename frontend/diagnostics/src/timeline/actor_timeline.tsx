@@ -56,6 +56,7 @@ const ACT_BAR_OFFSET = 49;
 const CUSTOM_SPAN_OFFSET = 73;
 const CUSTOM_SPAN_DEPTH_STEP = 17;
 const CUE_BAR_HEIGHT = 11;
+const CUE_LANE_STEP = 24;
 const ACT_BAR_HEIGHT = 14;
 const CUSTOM_SPAN_HEIGHT = 13;
 const HISTORY_MIN_RANGE = 12;
@@ -70,6 +71,20 @@ interface DisplayRow {
   readonly slot: number;
   readonly actor: ActorRecord | null;
   readonly pinned: boolean;
+}
+
+interface DisplayRowLayout extends DisplayRow {
+  readonly top: number;
+  readonly height: number;
+  readonly cueLaneCount: number;
+}
+
+interface TimelineLayout {
+  readonly rows: readonly DisplayRowLayout[];
+  readonly rowByActor: ReadonlyMap<string, DisplayRowLayout>;
+  readonly cueLaneById: ReadonlyMap<string, number>;
+  readonly cues: readonly CueRecord[];
+  readonly height: number;
 }
 
 type ActorDatumKind =
@@ -395,12 +410,84 @@ function timeTicks(range: TimelineRange): readonly number[] {
   return ticks;
 }
 
+function buildTimelineLayout(
+  data: TimelineData,
+  mode: TimelineMode,
+  range: TimelineRange,
+  cursor: number,
+  rows: readonly DisplayRow[],
+): TimelineLayout {
+  const visibleActorIds = new Set(
+    rows.flatMap((row) => row.actor === null ? [] : [row.actor.id]),
+  );
+  const cues = data.cues.filter((cue) => (
+    visibleActorIds.has(cue.actorId)
+    && intersects(cue.admitted, cue.end, range)
+    && (mode === "history" || cue.admitted <= cursor)
+  ));
+  const cueLaneById = new Map<string, number>();
+  const laneCountByActor = new Map<string, number>();
+
+  for (const row of rows) {
+    if (row.actor === null) {
+      continue;
+    }
+    const actorId = row.actor.id;
+    const laneEnds: number[] = [];
+    const actorCues = cues
+      .filter((cue) => cue.actorId === actorId)
+      .sort((left, right) => (
+        left.admitted - right.admitted
+        || left.execution - right.execution
+        || left.id.localeCompare(right.id)
+      ));
+    for (const cue of actorCues) {
+      const intervalEnd = Math.max(
+        cue.admitted,
+        cue.end ?? (mode === "live" ? cursor : range.end),
+      );
+      let lane = laneEnds.findIndex((end) => end <= cue.admitted);
+      if (lane === -1) {
+        lane = laneEnds.length;
+      }
+      laneEnds[lane] = intervalEnd;
+      cueLaneById.set(cue.id, lane);
+    }
+    laneCountByActor.set(actorId, Math.max(1, laneEnds.length));
+  }
+
+  let top = SCENE_AREA_HEIGHT;
+  const layoutRows = rows.map((row): DisplayRowLayout => {
+    const cueLaneCount = row.actor === null
+      ? 1
+      : laneCountByActor.get(row.actor.id) ?? 1;
+    const height = ROW_HEIGHT + (cueLaneCount - 1) * CUE_LANE_STEP;
+    const layoutRow = { ...row, top, height, cueLaneCount };
+    top += height;
+    return layoutRow;
+  });
+  const rowByActor = new Map<string, DisplayRowLayout>();
+  for (const row of layoutRows) {
+    if (row.actor !== null) {
+      rowByActor.set(row.actor.id, row);
+    }
+  }
+
+  return {
+    rows: layoutRows,
+    rowByActor,
+    cueLaneById,
+    cues,
+    height: top + 12,
+  };
+}
+
 function TimelinePlot({
   data,
   mode,
   range,
   cursor,
-  rows,
+  layout,
   selectedActorId,
   onSelectActor,
 }: {
@@ -408,7 +495,7 @@ function TimelinePlot({
   readonly mode: TimelineMode;
   readonly range: TimelineRange;
   readonly cursor: number;
-  readonly rows: readonly DisplayRow[];
+  readonly layout: TimelineLayout;
   readonly selectedActorId: string | null;
   readonly onSelectActor: (actorId: string) => void;
 }): JSX.Element {
@@ -433,24 +520,13 @@ function TimelinePlot({
   const width = measuredWidth;
   const padding = 14;
   const innerWidth = width - padding * 2;
-  const height = SCENE_AREA_HEIGHT + rows.length * ROW_HEIGHT + 12;
+  const { cues, cueLaneById, height, rowByActor, rows } = layout;
   const duration = Math.max(1, range.end - range.start);
   const x = (time: number): number => (
     padding + ((Math.max(range.start, Math.min(range.end, time)) - range.start) / duration) * innerWidth
   );
-  const rowByActor = new Map<string, number>();
-  rows.forEach((row, index) => {
-    if (row.actor !== null) {
-      rowByActor.set(row.actor.id, index);
-    }
-  });
   const scenes = data.scenes.filter((scene) => (
     intersects(scene.start, scene.end, range) && (mode === "history" || scene.start <= cursor)
-  ));
-  const cues = data.cues.filter((cue) => (
-    rowByActor.has(cue.actorId)
-    && intersects(cue.admitted, cue.end, range)
-    && (mode === "history" || cue.admitted <= cursor)
   ));
   const visibleCueIds = new Set(cues.map((cue) => cue.id));
   const acts = data.acts.filter((act) => (
@@ -474,10 +550,10 @@ function TimelinePlot({
   ));
   const ticks = timeTicks(range);
   const cursorX = x(cursor);
-  const hoveredRowIndex = hoveredDatum === null
+  const hoveredRow = hoveredDatum === null
     ? undefined
     : rowByActor.get(hoveredDatum.actor.id);
-  const tooltipPoint = hoveredDatum === null || hoveredRowIndex === undefined
+  const tooltipPoint = hoveredDatum === null || hoveredRow === undefined
     ? null
     : {
         x: x(hoveredDatum.anchorAt ?? hoveredDatum.at),
@@ -606,24 +682,29 @@ function TimelinePlot({
         ))}
 
         {rows.map((row, index) => {
-          const top = SCENE_AREA_HEIGHT + index * ROW_HEIGHT;
           return (
             <g key={`row-${row.slot}`}>
               <rect
                 x="0"
-                y={top}
+                y={row.top}
                 width={width}
-                height={ROW_HEIGHT}
+                height={row.height}
                 fill={index % 2 === 0 ? "#fbfcfb" : "#f4f6f4"}
               />
-              <line class="row-rule" x1="0" x2={width} y1={top + ROW_HEIGHT} y2={top + ROW_HEIGHT} />
+              <line
+                class="row-rule"
+                x1="0"
+                x2={width}
+                y1={row.top + row.height}
+                y2={row.top + row.height}
+              />
             </g>
           );
         })}
 
         {cues.map((cue) => {
-          const rowIndex = rowByActor.get(cue.actorId)!;
-          const actorY = SCENE_AREA_HEIGHT + rowIndex * ROW_HEIGHT + ACTOR_RAIL_OFFSET;
+          const row = rowByActor.get(cue.actorId)!;
+          const actorY = row.top + ACTOR_RAIL_OFFSET;
           const cueX = x(cue.admitted);
           const selected = cue.actorId === selectedActorId;
           const scene = sceneForId(data, cue.sceneId);
@@ -641,12 +722,14 @@ function TimelinePlot({
           );
         })}
 
-        {rows.map((row, index) => {
+        {rows.map((row) => {
           const actor = row.actor;
           if (actor === null) {
             return null;
           }
-          const rowTop = SCENE_AREA_HEIGHT + index * ROW_HEIGHT;
+          const rowTop = row.top;
+          const extraCueTrackHeight = (row.cueLaneCount - 1) * CUE_LANE_STEP;
+          const actBarY = rowTop + ACT_BAR_OFFSET + extraCueTrackHeight;
           const y = rowTop + ACTOR_RAIL_OFFSET;
           const state = actorState(actor, cursor);
           const opacity = stateOpacity(state);
@@ -718,6 +801,7 @@ function TimelinePlot({
               class="actor-visual"
               opacity={opacity}
               data-selected={selected}
+              data-cue-lanes={row.cueLaneCount}
               onClick={() => onSelectActor(actor.id)}
             >
               {selected ? (
@@ -725,7 +809,7 @@ function TimelinePlot({
                   x="2"
                   y={rowTop + 3}
                   width={width - 4}
-                  height={ROW_HEIGHT - 6}
+                  height={row.height - 6}
                   fill="#e5f1ee"
                   opacity="0.72"
                 />
@@ -866,8 +950,8 @@ function TimelinePlot({
               {actorCues.map((cue) => {
                 const cueVisualState = cueState(cue, cursor);
                 const cueOpacity = stateOpacity(cueVisualState);
-                const cueBarY = rowTop + CUE_BAR_OFFSET;
-                const actBarY = rowTop + ACT_BAR_OFFSET;
+                const cueLane = cueLaneById.get(cue.id) ?? 0;
+                const cueBarY = rowTop + CUE_BAR_OFFSET + cueLane * CUE_LANE_STEP;
                 const waitStartX = x(cue.admitted);
                 const executionX = x(cue.execution);
                 const executionStarted = mode === "history" || cursor >= cue.execution;
@@ -910,7 +994,13 @@ function TimelinePlot({
                   anchorY: cueBarY + CUE_BAR_HEIGHT / 2,
                 };
                 return (
-                  <g class="cue-track" data-cue-id={cue.id} key={cue.id} opacity={cueOpacity}>
+                  <g
+                    class="cue-track"
+                    data-cue-id={cue.id}
+                    data-cue-lane={cueLane}
+                    key={cue.id}
+                    opacity={cueOpacity}
+                  >
                     {waitWidth >= 2 ? (
                       <g
                         class="cue-wait-track"
@@ -1076,7 +1166,8 @@ function TimelinePlot({
                     })}
                     {cueSpans.map((span) => {
                       const depth = spanDepth(span, spanById);
-                      const spanY = rowTop + CUSTOM_SPAN_OFFSET + depth * CUSTOM_SPAN_DEPTH_STEP;
+                      const spanY = rowTop + CUSTOM_SPAN_OFFSET + extraCueTrackHeight
+                        + depth * CUSTOM_SPAN_DEPTH_STEP;
                       const spanVisualState = lifecycleState(span.start, span.end, span.outcome, cursor);
                       const spanStartX = x(Math.max(span.start, range.start));
                       const naturalSpanEnd = span.end ?? (mode === "live" ? cursor : range.end);
@@ -1099,7 +1190,7 @@ function TimelinePlot({
                       const parent = span.parentSpanId === null ? undefined : spanById.get(span.parentSpanId);
                       const parentY = parent === undefined
                         ? actBarY + ACT_BAR_HEIGHT
-                        : rowTop + CUSTOM_SPAN_OFFSET
+                        : rowTop + CUSTOM_SPAN_OFFSET + extraCueTrackHeight
                           + spanDepth(parent, spanById) * CUSTOM_SPAN_DEPTH_STEP
                           + CUSTOM_SPAN_HEIGHT;
                       const act = span.actId === null ? undefined : actById.get(span.actId);
@@ -1237,12 +1328,12 @@ function TimelinePlot({
                         ? undefined
                         : spanById.get(event.containingSpanId);
                       const act = event.actId === null ? undefined : actById.get(event.actId);
-                      const eventY = rowTop + 108;
+                      const eventY = rowTop + 108 + extraCueTrackHeight;
                       const eventScopeY = containingSpan === undefined
                         ? act === undefined
                           ? cueBarY + CUE_BAR_HEIGHT
                           : actBarY + ACT_BAR_HEIGHT
-                        : rowTop + CUSTOM_SPAN_OFFSET
+                        : rowTop + CUSTOM_SPAN_OFFSET + extraCueTrackHeight
                           + spanDepth(containingSpan, spanById) * CUSTOM_SPAN_DEPTH_STEP
                           + CUSTOM_SPAN_HEIGHT;
                       const markerX = x(event.at);
@@ -1358,31 +1449,30 @@ function TimelinePlot({
 function ActorLabels({
   mode,
   cursor,
-  rows,
+  layout,
   selectedActorId,
   onSelectActor,
 }: {
   readonly mode: TimelineMode;
   readonly cursor: number;
-  readonly rows: readonly DisplayRow[];
+  readonly layout: TimelineLayout;
   readonly selectedActorId: string | null;
   readonly onSelectActor: (actorId: string) => void;
 }): JSX.Element {
   return (
-    <div class="actor-label-axis" style={{ height: `${SCENE_AREA_HEIGHT + rows.length * ROW_HEIGHT + 12}px` }}>
+    <div class="actor-label-axis" style={{ height: `${layout.height}px` }}>
       <div class="scene-axis-label">
         <span>Scenes</span>
         <small>Run elapsed</small>
       </div>
-      {rows.map((row, index) => {
+      {layout.rows.map((row) => {
         const actor = row.actor;
-        const top = SCENE_AREA_HEIGHT + index * ROW_HEIGHT;
         if (actor === null) {
           return (
             <div
               class="actor-slot-empty"
               key={`empty-${row.slot}`}
-              style={{ top: `${top}px` }}
+              style={{ top: `${row.top}px`, height: `${row.height}px` }}
               aria-hidden="true"
             />
           );
@@ -1393,7 +1483,8 @@ function ActorLabels({
             class="actor-label"
             type="button"
             key={actor.id}
-            style={{ top: `${top}px` }}
+            style={{ top: `${row.top}px`, height: `${row.height}px` }}
+            data-cue-lanes={row.cueLaneCount}
             data-selected={actor.id === selectedActorId}
             data-state={state}
             onClick={() => onSelectActor(actor.id)}
@@ -1425,6 +1516,13 @@ function TimelineSurface(props: {
   readonly onSelectActor: (actorId: string) => void;
 }): JSX.Element {
   const scrollHost = useRef<HTMLDivElement | null>(null);
+  const layout = useMemo(() => buildTimelineLayout(
+    props.data,
+    props.mode,
+    props.range,
+    props.cursor,
+    props.rows,
+  ), [props.cursor, props.data, props.mode, props.range, props.rows]);
   useLayoutEffect(() => {
     const element = scrollHost.current;
     if (element === null || props.mode !== "live" || !props.followLive) {
@@ -1462,11 +1560,19 @@ function TimelineSurface(props: {
         <ActorLabels
           mode={props.mode}
           cursor={props.cursor}
-          rows={props.rows}
+          layout={layout}
           selectedActorId={props.selectedActorId}
           onSelectActor={props.onSelectActor}
         />
-        <TimelinePlot {...props} />
+        <TimelinePlot
+          data={props.data}
+          mode={props.mode}
+          range={props.range}
+          cursor={props.cursor}
+          layout={layout}
+          selectedActorId={props.selectedActorId}
+          onSelectActor={props.onSelectActor}
+        />
       </div>
     </div>
   );

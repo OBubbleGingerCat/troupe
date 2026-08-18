@@ -164,6 +164,24 @@ describe("Actor timeline lifecycle affordances", () => {
     expect(wait).not.toBeNull();
     expect(wait).toHaveAttribute("data-blocked-by", "act-1");
 
+    const firstCue = view.container.querySelector<SVGGElement>(
+      ".cue-track[data-cue-id='cue-1']",
+    );
+    const secondCue = view.container.querySelector<SVGGElement>(
+      ".cue-track[data-cue-id='cue-2']",
+    );
+    expect(firstCue).toHaveAttribute("data-cue-lane", "0");
+    expect(secondCue).toHaveAttribute("data-cue-lane", "1");
+    const firstExecutionY = Number(
+      firstCue?.querySelector(".cue-execution-bar")?.getAttribute("y"),
+    );
+    const secondWaitY = Number(
+      secondCue?.querySelector(".cue-wait-bar")?.getAttribute("y"),
+    );
+    expect(secondWaitY - firstExecutionY).toBe(24);
+    expect(view.container.querySelector(".actor-visual")).toHaveAttribute("data-cue-lanes", "2");
+    expect(view.container.querySelector(".actor-label")).toHaveStyle({ height: "140px" });
+
     fireEvent.mouseEnter(wait!);
     expect(screen.getByRole("tooltip")).toHaveTextContent("Cue wait");
     expect(screen.getByRole("tooltip")).toHaveTextContent("Cue cue-2");
