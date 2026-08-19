@@ -55,6 +55,10 @@ const CUE_BAR_OFFSET = 31;
 const ACT_BAR_OFFSET = 49;
 const CUSTOM_SPAN_OFFSET = 73;
 const CUSTOM_SPAN_DEPTH_STEP = 17;
+const EVENT_MARKER_MIN_OFFSET = 108;
+const EVENT_MARKER_SPAN_GAP = 17;
+const EVENT_MARKER_HIT_RADIUS = 12;
+const EVENT_MARKER_LANE_STEP = 28;
 const CUE_BAR_HEIGHT = 11;
 const CUE_LANE_STEP = 24;
 const ACT_BAR_HEIGHT = 14;
@@ -85,6 +89,19 @@ interface TimelineLayout {
   readonly cueLaneById: ReadonlyMap<string, number>;
   readonly cues: readonly CueRecord[];
   readonly height: number;
+}
+
+function eventMarkerOffset(deepestSpanDepth: number | undefined): number {
+  if (deepestSpanDepth === undefined) {
+    return EVENT_MARKER_MIN_OFFSET;
+  }
+  return Math.max(
+    EVENT_MARKER_MIN_OFFSET,
+    CUSTOM_SPAN_OFFSET
+      + deepestSpanDepth * CUSTOM_SPAN_DEPTH_STEP
+      + CUSTOM_SPAN_HEIGHT
+      + EVENT_MARKER_SPAN_GAP,
+  );
 }
 
 type ActorDatumKind =
@@ -378,6 +395,7 @@ function actorRows(
   const selected = data.actors.find((actor) => actor.id === selectedActorId) ?? null;
   if (
     selected !== null
+    && selected.end === null
     && selected.start <= cursor
     && !regular.some((actor) => actor.id === selected.id)
   ) {
@@ -422,6 +440,10 @@ function buildTimelineLayout(
   );
   const cues = data.cues.filter((cue) => (
     visibleActorIds.has(cue.actorId)
+    && !(
+      cue.lifecycleObserved === false
+      && (cue.lastObserved ?? cue.admitted) < range.start
+    )
     && intersects(cue.admitted, cue.end, range)
     && (mode === "history" || cue.admitted <= cursor)
   ));
@@ -456,12 +478,82 @@ function buildTimelineLayout(
     laneCountByActor.set(actorId, Math.max(1, laneEnds.length));
   }
 
+  const visibleCueIds = new Set(cues.map((cue) => cue.id));
+  const spansById = new Map(data.customSpans.map((span) => [span.id, span]));
+  const cueActorById = new Map(cues.map((cue) => [cue.id, cue.actorId]));
+  const deepestSpanDepthByCue = new Map<string, number>();
+  for (const span of data.customSpans) {
+    deepestSpanDepthByCue.set(
+      span.cueId,
+      Math.max(deepestSpanDepthByCue.get(span.cueId) ?? 0, spanDepth(span, spansById)),
+    );
+  }
+  const customBottomByActor = new Map<string, number>();
+  const recordCustomBottom = (actorId: string, bottom: number): void => {
+    customBottomByActor.set(
+      actorId,
+      Math.max(customBottomByActor.get(actorId) ?? 0, bottom),
+    );
+  };
+  for (const span of data.customSpans) {
+    const actorId = cueActorById.get(span.cueId);
+    if (actorId === undefined || !intersects(span.start, span.end, range)) {
+      continue;
+    }
+    if (mode === "live" && span.start > cursor) {
+      continue;
+    }
+    const depth = spanDepth(span, spansById);
+    recordCustomBottom(
+      actorId,
+      CUSTOM_SPAN_OFFSET + depth * CUSTOM_SPAN_DEPTH_STEP + CUSTOM_SPAN_HEIGHT + 5,
+    );
+  }
+  const systemEventCueIds = new Set<string>();
+  for (const cue of cues) {
+    if (cue.events.some((event) => (
+      event.at >= range.start
+      && event.at <= range.end
+      && (mode === "history" || event.at <= cursor)
+    ))) {
+      systemEventCueIds.add(cue.id);
+      recordCustomBottom(
+        cue.actorId,
+        eventMarkerOffset(deepestSpanDepthByCue.get(cue.id)) + EVENT_MARKER_HIT_RADIUS,
+      );
+    }
+  }
+  for (const event of data.customEvents) {
+    const actorId = cueActorById.get(event.cueId);
+    if (
+      actorId === undefined
+      || !visibleCueIds.has(event.cueId)
+      || event.at < range.start
+      || event.at > range.end
+      || (mode === "live" && event.at > cursor)
+    ) {
+      continue;
+    }
+    // Keep event hit targets below the deepest custom span so the two hover
+    // surfaces remain independently usable when Python events are nested.
+    recordCustomBottom(
+      actorId,
+      eventMarkerOffset(deepestSpanDepthByCue.get(event.cueId))
+        + (systemEventCueIds.has(event.cueId) ? EVENT_MARKER_LANE_STEP : 0)
+        + EVENT_MARKER_HIT_RADIUS,
+    );
+  }
+
   let top = SCENE_AREA_HEIGHT;
   const layoutRows = rows.map((row): DisplayRowLayout => {
     const cueLaneCount = row.actor === null
       ? 1
       : laneCountByActor.get(row.actor.id) ?? 1;
-    const height = ROW_HEIGHT + (cueLaneCount - 1) * CUE_LANE_STEP;
+    const extraCueHeight = (cueLaneCount - 1) * CUE_LANE_STEP;
+    const customHeight = row.actor === null
+      ? 0
+      : customBottomByActor.get(row.actor.id) ?? 0;
+    const height = Math.max(ROW_HEIGHT, customHeight) + extraCueHeight;
     const layoutRow = { ...row, top, height, cueLaneCount };
     top += height;
     return layoutRow;
@@ -802,6 +894,9 @@ function TimelinePlot({
               opacity={opacity}
               data-selected={selected}
               data-cue-lanes={row.cueLaneCount}
+              data-actor-id={actor.id}
+              data-row-top={rowTop}
+              data-row-height={row.height}
               onClick={() => onSelectActor(actor.id)}
             >
               {selected ? (
@@ -977,8 +1072,21 @@ function TimelinePlot({
                 const cueActs = acts.filter((act) => act.cueId === cue.id);
                 const cueSpans = customSpans.filter((span) => span.cueId === cue.id);
                 const cueCustomEvents = customEvents.filter((event) => event.cueId === cue.id);
+                const deepestCueSpanDepth = cueSpans.length === 0
+                  ? undefined
+                  : Math.max(...cueSpans.map((span) => spanDepth(span, spanById)));
+                const eventMarkerBaseY = rowTop
+                  + eventMarkerOffset(deepestCueSpanDepth)
+                  + extraCueTrackHeight;
+                const hasSystemEvents = cue.events.some((event) => (
+                  event.at >= range.start
+                  && event.at <= range.end
+                  && (mode === "history" || event.at <= cursor)
+                ));
                 const waitKey = `${cue.id}:wait`;
-                const waitStatus = executionStarted ? "Completed" : "Active";
+                const waitStatus = cursor < cue.admitted
+                  ? "Pending"
+                  : executionStarted ? "Completed" : "Active";
                 const waitLabelText = `Cue wait · ${cue.id}`;
                 const waitTooltip: TimelineTooltipState = {
                   key: waitKey,
@@ -1265,7 +1373,7 @@ function TimelinePlot({
                       .filter((event) => mode === "history" || event.at <= cursor)
                       .map((event) => {
                         const markerX = x(event.at);
-                        const markerY = actBarY + ACT_BAR_HEIGHT + 6;
+                        const markerY = eventMarkerBaseY;
                         const act = actById.get(event.actId);
                         const markerStatus = eventStatusLabel(event, cursor);
                         const tooltipState: TimelineTooltipState = {
@@ -1299,10 +1407,10 @@ function TimelinePlot({
                           >
                             <rect
                               class="event-marker__hit"
-                              x={markerX - 12}
-                              y={markerY - 12}
-                              width="24"
-                              height="24"
+                              x={markerX - EVENT_MARKER_HIT_RADIUS}
+                              y={markerY - EVENT_MARKER_HIT_RADIUS}
+                              width={EVENT_MARKER_HIT_RADIUS * 2}
+                              height={EVENT_MARKER_HIT_RADIUS * 2}
                             />
                             <line
                               class="event-marker__anchor"
@@ -1328,7 +1436,8 @@ function TimelinePlot({
                         ? undefined
                         : spanById.get(event.containingSpanId);
                       const act = event.actId === null ? undefined : actById.get(event.actId);
-                      const eventY = rowTop + 108 + extraCueTrackHeight;
+                      const eventY = eventMarkerBaseY
+                        + (hasSystemEvents ? EVENT_MARKER_LANE_STEP : 0);
                       const eventScopeY = containingSpan === undefined
                         ? act === undefined
                           ? cueBarY + CUE_BAR_HEIGHT
@@ -1372,10 +1481,10 @@ function TimelinePlot({
                         >
                           <rect
                             class="event-marker__hit"
-                            x={markerX - 12}
-                            y={eventY - 12}
-                            width="24"
-                            height="24"
+                            x={markerX - EVENT_MARKER_HIT_RADIUS}
+                            y={eventY - EVENT_MARKER_HIT_RADIUS}
+                            width={EVENT_MARKER_HIT_RADIUS * 2}
+                            height={EVENT_MARKER_HIT_RADIUS * 2}
                           />
                           <line
                             class="event-marker__anchor"
@@ -1485,6 +1594,9 @@ function ActorLabels({
             key={actor.id}
             style={{ top: `${row.top}px`, height: `${row.height}px` }}
             data-cue-lanes={row.cueLaneCount}
+            data-actor-id={actor.id}
+            data-row-top={row.top}
+            data-row-height={row.height}
             data-selected={actor.id === selectedActorId}
             data-state={state}
             onClick={() => onSelectActor(actor.id)}
@@ -1736,7 +1848,7 @@ export function ActorTimeline({
   const [historyPlaying, setHistoryPlaying] = useState(false);
   const [historySpeed, setHistorySpeed] = useState(1);
   const [selectedActorId, setSelectedActorId] = useState<string | null>(
-    data.actors[0]?.id ?? null,
+    data.actors.find((actor) => liveActorVisible(actor, data.liveNow, 60, null))?.id ?? null,
   );
 
   useEffect(() => {
@@ -1747,6 +1859,19 @@ export function ActorTimeline({
     });
     setHistoryCursor((current) => Math.min(current, timelineData.totalTime));
   }, [timelineData.totalTime]);
+
+  useEffect(() => {
+    if (mode !== "live" || selectedActorId === null) {
+      return;
+    }
+    const selected = data.actors.find((actor) => actor.id === selectedActorId);
+    if (
+      selected === undefined
+      || !liveActorVisible(selected, data.liveNow, liveWindow, null)
+    ) {
+      setSelectedActorId(null);
+    }
+  }, [data.actors, data.liveNow, liveWindow, mode, selectedActorId]);
 
   useEffect(() => {
     if (mode !== "history" || !historyPlaying) {

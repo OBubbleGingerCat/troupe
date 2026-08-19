@@ -236,7 +236,7 @@ test("active and archive content remains text under the exact response policy", 
     await expect(markers).toHaveCount(CONTENT.cases.length);
     for (let index = 0; index < CONTENT.cases.length; index += 1) {
       const item = CONTENT.cases[index]!;
-      await markers.nth(index).hover();
+      await markers.nth(index).locator(".event-marker__hit").hover();
       const expectedLabel = item.text.trim().replace(/\s+/g, " ").slice(0, 42);
       await expect(page.getByRole("tooltip").locator("strong")).toHaveText(expectedLabel);
     }

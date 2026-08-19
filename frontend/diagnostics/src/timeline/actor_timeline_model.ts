@@ -20,6 +20,10 @@ export interface ActorRecord {
   readonly end: number | null;
   readonly outcome: LifecycleOutcome | null;
   readonly liveSlot: number;
+  /** False means this row was recovered without its Actor lifetime span. */
+  readonly lifetimeObserved?: boolean;
+  /** Most recent scoped evidence for a row recovered without its lifetime span. */
+  readonly lastObserved?: number;
 }
 
 export type DiagnosticAttribute = string | number | boolean | readonly (string | number | boolean)[];
@@ -76,6 +80,10 @@ export interface CueRecord {
   readonly end: number | null;
   readonly outcome: LifecycleOutcome | null;
   readonly events: readonly SystemEventRecord[];
+  /** False means no mailbox-wait or execution lifecycle span was observed for this Cue. */
+  readonly lifecycleObserved?: boolean;
+  /** Most recent scoped evidence for a Cue recovered without its lifecycle spans. */
+  readonly lastObserved?: number;
 }
 
 export interface TimelineRange {
@@ -141,7 +149,13 @@ export function liveActorVisible(
     return false;
   }
   const range = { start: Math.max(0, now - windowSeconds), end: now };
-  return actor.id === selectedActorId || actor.end === null || intersects(actor.start, actor.end, range);
+  if (actor.end !== null && actor.end <= now) {
+    return false;
+  }
+  if (actor.lifetimeObserved === false) {
+    return actor.id === selectedActorId || (actor.lastObserved ?? actor.start) >= range.start;
+  }
+  return actor.id === selectedActorId || actor.end === null;
 }
 
 export function formatElapsed(seconds: number): string {

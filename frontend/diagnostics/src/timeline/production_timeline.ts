@@ -121,6 +121,22 @@ function projectTimelineSpans(events: readonly DiagnosticEvent[]): readonly Proj
   return [...byId.values()].sort(compareStart);
 }
 
+function mergeTimelineSpans(
+  projected: readonly ProjectedSpan[],
+  recovered: readonly ProjectedSpan[],
+): readonly ProjectedSpan[] {
+  const byId = new Map<string, ProjectedSpan>();
+  for (const span of [...projected, ...recovered]) {
+    const previous = byId.get(span.span_id);
+    byId.set(span.span_id, {
+      span_id: span.span_id,
+      start: span.start ?? previous?.start ?? null,
+      finish: span.finish ?? previous?.finish ?? null,
+    });
+  }
+  return [...byId.values()].sort(compareStart);
+}
+
 function unionEvents(state: DiagnosticState): readonly DiagnosticEvent[] {
   const edge = presentedLiveEdge(state);
   const bySequence = new Map<string, DiagnosticEvent>();
@@ -230,6 +246,10 @@ function buildActors(
       end: span.finish === null ? null : elapsedSeconds(span.finish.elapsed_ns),
       outcome: span.finish?.outcome ?? null,
       liveSlot: byId.size,
+      lifetimeObserved: true,
+      lastObserved: span.finish === null
+        ? elapsedSeconds(span.start.elapsed_ns)
+        : elapsedSeconds(span.finish.elapsed_ns),
     };
     const previous = byId.get(id);
     if (previous === undefined || candidate.start < previous.start) {
@@ -255,24 +275,28 @@ function buildActors(
       ? event
       : null;
     const previous = byId.get(id);
+    const at = elapsedSeconds(event.elapsed_ns);
     if (previous !== undefined) {
-      if (cast !== null && previous.name === id) {
-        byId.set(id, {
-          ...previous,
+      byId.set(id, {
+        ...previous,
+        lastObserved: Math.max(previous.lastObserved ?? previous.start, at),
+        ...(cast !== null && previous.name === id ? {
           name: stringDetail(cast.detail, "display_name") ?? previous.name,
           role: stringDetail(cast.detail, "actor_type") ?? previous.role,
-        });
-      }
+        } : {}),
+      });
       continue;
     }
     byId.set(id, {
       id,
       name: cast === null ? id : stringDetail(cast.detail, "display_name") ?? id,
       role: cast === null ? "Actor" : stringDetail(cast.detail, "actor_type") ?? "Actor",
-      start: elapsedSeconds(event.elapsed_ns),
+      start: at,
       end: null,
       outcome: null,
       liveSlot: byId.size,
+      lifetimeObserved: false,
+      lastObserved: at,
     });
   }
   for (const span of spans) {
@@ -291,6 +315,8 @@ function buildActors(
       end: null,
       outcome: null,
       liveSlot: byId.size,
+      lifetimeObserved: false,
+      lastObserved: elapsedSeconds(span.start.elapsed_ns),
     });
   }
   return [...byId.values()]
@@ -306,6 +332,8 @@ interface CueParts {
   execution: number | null;
   end: number | null;
   outcome: CueRecord["outcome"];
+  lifecycleObserved: boolean;
+  lastObserved: number | null;
 }
 
 function buildCues(
@@ -333,6 +361,8 @@ function buildCues(
       execution: null,
       end: null,
       outcome: null,
+      lifecycleObserved: false,
+      lastObserved: null,
     };
     byId.set(id, created);
     return created;
@@ -342,7 +372,12 @@ function buildCues(
     if (cue === null) {
       continue;
     }
+    cue.lastObserved = Math.max(
+      cue.lastObserved ?? 0,
+      elapsedSeconds(span.finish?.elapsed_ns ?? span.start.elapsed_ns),
+    );
     if (span.start.span_kind === "cue.mailbox_wait") {
+      cue.lifecycleObserved = true;
       cue.admitted = cue.admitted === null
         ? elapsedSeconds(span.start.elapsed_ns)
         : Math.min(cue.admitted, elapsedSeconds(span.start.elapsed_ns));
@@ -350,6 +385,7 @@ function buildCues(
         cue.execution = elapsedSeconds(span.finish.elapsed_ns);
       }
     } else if (span.start.span_kind === "cue.execution") {
+      cue.lifecycleObserved = true;
       cue.execution = elapsedSeconds(span.start.elapsed_ns);
       cue.end = span.finish === null ? null : elapsedSeconds(span.finish.elapsed_ns);
       cue.outcome = span.finish?.outcome ?? null;
@@ -357,7 +393,11 @@ function buildCues(
   }
   for (const event of events) {
     const cue = ensure(event.scope);
-    if (cue === null || event.kind !== "instant_occurred") {
+    if (cue === null) {
+      continue;
+    }
+    cue.lastObserved = Math.max(cue.lastObserved ?? 0, elapsedSeconds(event.elapsed_ns));
+    if (event.kind !== "instant_occurred") {
       continue;
     }
     if (["cue.admitted", "cue.enqueued", "cue.dispatched"].includes(event.instant_kind)) {
@@ -378,6 +418,8 @@ function buildCues(
       end: cue.end,
       outcome: cue.outcome,
       events: [],
+      lifecycleObserved: cue.lifecycleObserved,
+      lastObserved: cue.lastObserved ?? admitted,
     };
   }).sort((left, right) => left.admitted - right.admitted);
 }
@@ -708,9 +750,13 @@ export function selectProductionTimelineData(
 ): TimelineData {
   const edge = presentedLiveEdge(state);
   const events = unionEvents(state);
+  const spans = mergeTimelineSpans(
+    edge.projection.spans.items,
+    projectTimelineSpans(events),
+  );
   const liveNow = elapsedSeconds(edge.observed_elapsed_ns);
   return assembleTimelineData(
-    edge.projection.spans.items,
+    spans,
     events,
     liveNow,
     state.cursor.committed_watermark,

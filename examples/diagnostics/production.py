@@ -14,6 +14,7 @@ from .sink import EvaluationSink, JsonValue
 
 
 DEFAULT_INTERVAL_SECONDS = 30.0
+COMPLEX_STAGE_DELAY_SECONDS = 0.12
 PROBE_MARKER = "troupe-diagnostics-ready"
 
 
@@ -150,26 +151,121 @@ class DiagnosticActor(troupe.Actor):
         )
 
 
+class TelemetryActor(troupe.Actor):
+    """Provider-free Actor used to exercise the timeline's nested telemetry tracks."""
+
+    def __init__(self, role: str) -> None:
+        self.role = role
+
+    async def cued(self, cue: troupe.Cue) -> tuple[troupe.Effect, ...]:
+        scene_number = int(cue.instruction["scene_number"])
+        phase = str(cue.instruction["phase"])
+        actor_role = self.role
+        attributes: dict[str, int | str] = {
+            "scene": scene_number,
+            "phase": phase,
+            "role": actor_role,
+        }
+
+        # Keep these spans deliberately nested so the UI must allocate enough
+        # vertical room for depth, sibling events, and their connectors.
+        with diagnostics.span("example.pipeline_cycle", attributes=attributes):
+            diagnostics.event("example.pipeline_received", attributes=attributes)
+            await asyncio.sleep(COMPLEX_STAGE_DELAY_SECONDS)
+            with diagnostics.span("example.stage_decode", attributes={"phase": phase}):
+                diagnostics.event(
+                    "example.stage_started",
+                    attributes={"scene": scene_number, "phase": phase},
+                )
+                await asyncio.sleep(COMPLEX_STAGE_DELAY_SECONDS)
+                with diagnostics.span(
+                    "example.operation_commit",
+                    attributes={"role": actor_role},
+                ):
+                    diagnostics.event(
+                        "example.operation_ready",
+                        attributes={"scene": scene_number, "role": actor_role},
+                    )
+                    await asyncio.sleep(COMPLEX_STAGE_DELAY_SECONDS)
+                diagnostics.event(
+                    "example.stage_finished",
+                    attributes={"scene": scene_number, "phase": phase},
+                )
+            diagnostics.counter(
+                "example.pipeline_depth",
+                scene_number,
+                unit="scene",
+                dimensions={"role": actor_role},
+            )
+            diagnostics.event(
+                "example.pipeline_committed",
+                attributes={"scene": scene_number, "phase": phase},
+            )
+        diagnostics.event(
+            "example.actor_cue_finished",
+            attributes={"scene": scene_number, "role": actor_role},
+        )
+        return ()
+
+
 class Production(troupe.Production):
     def __init__(self, args: list[str]) -> None:
-        self.interval_seconds = parse_interval_seconds(args)
+        self.mode = "complex" if args and args[0] == "complex" else "showcase"
+        interval_args = args[1:] if self.mode == "complex" else args
+        self.interval_seconds = parse_interval_seconds(interval_args)
         self.scene_number = 0
         self.completed_scenes = 0
-        profile = troupe.AgentProfile(
+        self.profile = troupe.AgentProfile(
             agent="codex",
             workspace=Path.cwd(),
             model="gpt-5.6-sol",
             effort="medium",
         )
-        self.worker = self.cast_actor(
-            DiagnosticActor,
-            name="diagnostic-worker",
-            agent_profile=profile,
-            actor_args=(),
-            actor_kwargs={},
-        )
+        self.worker: troupe.ActorHandle | None = None
+        self.telemetry_actors: tuple[troupe.ActorHandle, ...] = ()
+        if self.mode == "showcase":
+            self.worker = self.cast_actor(
+                DiagnosticActor,
+                name="diagnostic-worker",
+                agent_profile=self.profile,
+                actor_args=(),
+                actor_kwargs={},
+            )
+        else:
+            self.telemetry_actors = tuple(
+                self.cast_actor(
+                    TelemetryActor,
+                    name=f"telemetry-{role}",
+                    agent_profile=self.profile,
+                    actor_args=(role,),
+                    actor_kwargs={},
+                )
+                for role in ("ingest", "review", "publish")
+            )
 
     async def start(self) -> None:
+        if self.mode == "complex":
+            diagnostics.event(
+                "example.complex_started",
+                attributes={
+                    "interval_seconds": self.interval_seconds,
+                    "persistent_actors": len(self.telemetry_actors),
+                    "dynamic_actors": "one_per_scene",
+                },
+            )
+            print(
+                json.dumps(
+                    {
+                        "diagnostics_showcase": "complex_started",
+                        "scene_interval_seconds": self.interval_seconds,
+                        "provider_turns": 0,
+                        "warning": "provider-free long-run timeline fixture; stop with Ctrl+C",
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return
         diagnostics.event(
             "example.showcase_started",
             attributes={"interval_seconds": self.interval_seconds},
@@ -187,6 +283,9 @@ class Production(troupe.Production):
         )
 
     async def scene(self) -> None:
+        if self.mode == "complex":
+            await self.complex_scene()
+            return
         self.scene_number += 1
         scene_number = self.scene_number
         with diagnostics.span(
@@ -198,6 +297,7 @@ class Production(troupe.Production):
                 attributes={"scene": scene_number, "queued_cues": 2},
             )
 
+        assert self.worker is not None
         probe_task = asyncio.create_task(
             self.worker.cue(
                 {
@@ -263,9 +363,56 @@ class Production(troupe.Production):
             },
         )
 
+    async def complex_scene(self) -> None:
+        self.scene_number += 1
+        scene_number = self.scene_number
+        with diagnostics.span(
+            "example.complex_scene",
+            attributes={"scene": scene_number},
+        ):
+            diagnostics.event(
+                "example.complex_scene_started",
+                attributes={"scene": scene_number, "queued_cues": 5},
+            )
+            # A short-lived handle is intentionally owned only by this Scene.
+            # Its lifetime should end after the Cue completes and its slot can
+            # be reused. Keep the Scene span around the actual work so it is a
+            # useful interval in History rather than a near-zero marker.
+            dynamic = self.cast_actor(
+                TelemetryActor,
+                name=f"dynamic-{scene_number}",
+                agent_profile=self.profile,
+                actor_args=("dynamic",),
+                actor_kwargs={},
+            )
+            ingest, review, publish = self.telemetry_actors
+            await asyncio.gather(
+                ingest.cue({"scene_number": scene_number, "phase": "ingest-primary"}),
+                ingest.cue({"scene_number": scene_number, "phase": "ingest-followup"}),
+                review.cue({"scene_number": scene_number, "phase": "review"}),
+                publish.cue({"scene_number": scene_number, "phase": "publish"}),
+                dynamic.cue({"scene_number": scene_number, "phase": "ephemeral"}),
+            )
+            del dynamic
+            self.completed_scenes += 1
+            diagnostics.event(
+                "example.complex_scene_completed",
+                attributes={
+                    "scene": scene_number,
+                    "persistent_actors": len(self.telemetry_actors),
+                    "dynamic_actor": f"dynamic-{scene_number}",
+                },
+            )
+        await asyncio.sleep(self.interval_seconds)
+
     async def stop(self) -> None:
+        event_name = (
+            "example.showcase_stopping"
+            if self.mode == "showcase"
+            else "example.complex_stopping"
+        )
         diagnostics.event(
-            "example.showcase_stopping",
+            event_name,
             attributes={
                 "started_scenes": self.scene_number,
                 "completed_scenes": self.completed_scenes,

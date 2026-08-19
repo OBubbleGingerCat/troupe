@@ -49,8 +49,8 @@ const QUEUE_DATA: TimelineData = {
     name: "Worker",
     role: "Persistent actor",
     start: 0,
-    end: 12,
-    outcome: "completed",
+    end: null,
+    outcome: null,
     liveSlot: 0,
   }],
   cues: [
@@ -89,18 +89,57 @@ const QUEUE_DATA: TimelineData = {
   liveNow: 12,
 };
 
+const LIVE_RETENTION_DATA: TimelineData = {
+  ...QUEUE_DATA,
+  scenes: [{ ...QUEUE_DATA.scenes[0]!, end: null }],
+  actors: [{
+    ...QUEUE_DATA.actors[0]!,
+    end: null,
+    lifetimeObserved: true,
+  }],
+  cues: [
+    {
+      ...QUEUE_DATA.cues[0]!,
+      id: "cue-old",
+      label: "Cue cue-old",
+      admitted: 1,
+      execution: 2,
+      end: 8,
+      lifecycleObserved: false,
+      lastObserved: 8,
+    },
+    {
+      ...QUEUE_DATA.cues[0]!,
+      id: "cue-current",
+      label: "Cue cue-current",
+      admitted: 95,
+      execution: 96,
+      end: 99,
+      lifecycleObserved: false,
+      lastObserved: 99,
+    },
+  ],
+  totalTime: 100,
+  liveNow: 100,
+};
+
 afterEach(cleanup);
 
 describe("Actor timeline lifecycle affordances", () => {
   it("labels even a short lifetime and exposes rail/start/end details on hover", () => {
     const view = render(
       <ActorTimeline
-        data={DATA}
+        data={{ ...DATA, actors: [] }}
+        historyData={DATA}
         livePaused={false}
         unseenCount={0n}
         onPauseToggle={() => undefined}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    fireEvent.input(screen.getByRole("slider", { name: "History playhead" }), {
+      target: { value: "10" },
+    });
     expect(screen.getByText("Worker Actor lifetime")).toBeInTheDocument();
 
     const lifetime = view.container.querySelector<SVGGElement>(".actor-lifetime-track");
@@ -186,5 +225,72 @@ describe("Actor timeline lifecycle affordances", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent("Cue wait");
     expect(screen.getByRole("tooltip")).toHaveTextContent("Cue cue-2");
     expect(screen.getByRole("tooltip")).toHaveTextContent("Queued behind act-1");
+  });
+
+  it("does not resurrect an event-only Cue outside the Live retention window", () => {
+    const view = render(
+      <ActorTimeline
+        data={LIVE_RETENTION_DATA}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+
+    expect(view.container.querySelector("[data-cue-id='cue-old']")).toBeNull();
+    expect(view.container.querySelector("[data-cue-id='cue-current']")).not.toBeNull();
+  });
+
+  it("removes a completed Actor from Live even when it is selected", () => {
+    const completedActor = {
+      ...QUEUE_DATA.actors[0]!,
+      end: 12,
+      outcome: "completed" as const,
+    };
+    const view = render(
+      <ActorTimeline
+        data={{ ...LIVE_RETENTION_DATA, actors: [completedActor] }}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+
+    expect(view.container.querySelector(".actor-visual[data-actor-id='actor-1']")).toBeNull();
+  });
+
+  it("clears a selected Actor when it leaves Live after a data update", () => {
+    const activeData: TimelineData = {
+      ...QUEUE_DATA,
+      actors: [{ ...QUEUE_DATA.actors[0]!, end: null }],
+      liveNow: 10,
+      totalTime: 10,
+    };
+    const view = render(
+      <ActorTimeline
+        data={activeData}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+    expect(view.container.querySelector(".actor-visual[data-actor-id='actor-1']")).not.toBeNull();
+
+    view.rerender(
+      <ActorTimeline
+        data={{
+          ...activeData,
+          actors: [{ ...activeData.actors[0]!, end: 10, outcome: "completed" }],
+          liveNow: 11,
+          totalTime: 11,
+        }}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+
+    expect(view.container.querySelector(".actor-visual[data-actor-id='actor-1']")).toBeNull();
+    expect(screen.getByText("No timeline selection")).toBeInTheDocument();
   });
 });

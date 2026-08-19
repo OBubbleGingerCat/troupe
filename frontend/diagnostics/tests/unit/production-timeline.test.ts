@@ -8,6 +8,7 @@ import {
   createDiagnosticState,
   reduceDiagnosticState,
 } from "../../src/state/reducer.ts";
+import { activateWindow, createEventWindow } from "../../src/state/windows.ts";
 import { liveActorVisible } from "../../src/timeline/actor_timeline_model.ts";
 import {
   selectCapturedTimelineData,
@@ -44,7 +45,7 @@ function event(
     schema_version: 1,
     run_id: RUN_ID,
     sequence: String(sequence),
-    elapsed_ns: String(elapsedSeconds * 1_000_000_000),
+    elapsed_ns: String(Math.round(elapsedSeconds * 1_000_000_000)),
     scope: eventScope,
     caused_by: [],
     ...fields,
@@ -271,6 +272,129 @@ describe("production Actor timeline projection", () => {
       id: "temporary-299",
       name: "Temporary 299",
       end: 599.5,
+    }));
+  });
+
+  it("marks event-only Cues when a long Live window outlasts the span projection", () => {
+    const captured: DiagnosticEvent[] = [];
+    let sequence = 1;
+    const actor = scope("scene-long", "actor-long");
+    const pushCueAdmission = (cueId: string, at: number): void => {
+      captured.push(event(sequence, at, { ...actor, cue_id: cueId }, {
+        kind: "instant_occurred",
+        instant_kind: "cue.admitted",
+        detail: {},
+        containing_span_id: null,
+      }));
+      sequence += 1;
+    };
+
+    const pushCompletedCue = (cueId: string, admitted: number): void => {
+      const cueScope = { ...actor, cue_id: cueId };
+      pushCueAdmission(cueId, admitted);
+      const waitStart = String(sequence);
+      captured.push(event(sequence, admitted + 0.01, cueScope, {
+        kind: "span_started",
+        span_kind: "cue.mailbox_wait",
+        detail: {},
+        parent_span_id: null,
+      }));
+      sequence += 1;
+      captured.push(event(sequence, admitted + 0.02, cueScope, {
+        kind: "span_finished",
+        span_id: waitStart,
+        outcome: "completed",
+        error_code: null,
+      }));
+      sequence += 1;
+      const executionStart = String(sequence);
+      captured.push(event(sequence, admitted + 0.03, cueScope, {
+        kind: "span_started",
+        span_kind: "cue.execution",
+        detail: {},
+        parent_span_id: null,
+      }));
+      sequence += 1;
+      captured.push(event(sequence, admitted + 0.04, cueScope, {
+        kind: "span_finished",
+        span_id: executionStart,
+        outcome: "completed",
+        error_code: null,
+      }));
+      sequence += 1;
+    };
+
+    pushCompletedCue("cue-1", 0.05);
+    pushCompletedCue("cue-2", 0.1);
+    for (let index = 3; index <= 60; index += 1) {
+      pushCueAdmission(`cue-${index}`, index);
+    }
+
+    let fillerSpans = 0;
+    while (sequence <= 3336) {
+      if (fillerSpans < 300 && sequence + 1 <= 3336) {
+        const fillerStart = String(sequence);
+        captured.push(event(sequence, sequence * 0.7, scope("scene-filler"), {
+          kind: "custom_span_started",
+          name: "example.filler_span",
+          parent_span_id: null,
+          attributes: {},
+        }));
+        sequence += 1;
+        captured.push(event(sequence, sequence * 0.7, scope("scene-filler"), {
+          kind: "custom_span_finished",
+          span_id: fillerStart,
+          outcome: "completed",
+        }));
+        sequence += 1;
+        fillerSpans += 1;
+      } else {
+        captured.push(event(sequence, sequence * 0.7, scope("scene-filler"), {
+          kind: "custom_instant_occurred",
+          name: "example.filler_event",
+          containing_span_id: null,
+          severity: "debug",
+          attributes: {},
+        }));
+        sequence += 1;
+      }
+    }
+    pushCueAdmission("cue-61", 2432.8);
+    pushCueAdmission("cue-62", 2432.866);
+    expect(sequence).toBe(3339);
+
+    const base = ingest(captured);
+    expect(base.live.projection.spans.items.some((span) => (
+      span.start?.scope.cue_id === "cue-1"
+    ))).toBe(false);
+    const state = {
+      ...base,
+      windows: activateWindow(base.windows, createEventWindow({
+        id: "long-run-prefix",
+        run_id: RUN_ID,
+        start_ns: decodeU64("0"),
+        end_ns: captured[captured.length - 1]!.elapsed_ns,
+        captured_through: decodeU64(String(captured.length)),
+        events: captured,
+      })),
+    };
+    const data = selectProductionTimelineData(
+      state,
+      { connection: "connected", outcome: "running" },
+    );
+
+    expect(data.cues).toHaveLength(62);
+    expect(data.cues.find((cue) => cue.id === "cue-1")).toEqual(expect.objectContaining({
+      admitted: 0.05,
+      lifecycleObserved: true,
+      lastObserved: 0.09,
+      execution: 0.08,
+      end: 0.09,
+    }));
+    expect(data.cues.find((cue) => cue.id === "cue-62")).toEqual(expect.objectContaining({
+      admitted: 2432.866,
+      lifecycleObserved: false,
+      lastObserved: 2432.866,
     }));
   });
 });
