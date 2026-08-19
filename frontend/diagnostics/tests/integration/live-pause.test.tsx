@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { decodeU64 } from "../../src/protocol/decimal.ts";
+import { LIVE_EDGE_EVENT_CAPACITY } from "../../src/state/model.ts";
 import { presentedLiveEdge } from "../../src/state/reducer.ts";
 import type { DiagnosticFetch } from "../../src/live/bootstrap.ts";
 import { startLiveDiagnostics } from "../../src/live/reconnect.ts";
@@ -172,21 +173,23 @@ describe("live diagnostics pause", () => {
     const frozen = presentedLiveEdge(controller.state.diagnostics!);
     const drawsBeforeEvents = scheduleDraw.mock.calls.length;
 
-    for (let sequence = 3; sequence <= 260; sequence += 1) {
+    const finalSequence = LIVE_EDGE_EVENT_CAPACITY + 4;
+    const receivedEvents = LIVE_EDGE_EVENT_CAPACITY + 2;
+    for (let sequence = 3; sequence <= finalSequence; sequence += 1) {
       source?.emit("diagnostic_event", eventAt(sequence), String(sequence));
     }
-    expect(scheduleDraw).toHaveBeenCalledTimes(drawsBeforeEvents + 258);
-    source?.emit("diagnostic_event", eventAt(260), "260");
-    expect(scheduleDraw).toHaveBeenCalledTimes(drawsBeforeEvents + 258);
+    expect(scheduleDraw).toHaveBeenCalledTimes(drawsBeforeEvents + receivedEvents);
+    source?.emit("diagnostic_event", eventAt(finalSequence), String(finalSequence));
+    expect(scheduleDraw).toHaveBeenCalledTimes(drawsBeforeEvents + receivedEvents);
 
     const paused = controller.state.diagnostics!;
     expect(paused.cursor).toEqual({
-      delivered_through: "260",
-      committed_watermark: "260",
+      delivered_through: String(finalSequence),
+      committed_watermark: String(finalSequence),
     });
-    expect(paused.pause.unseen_count).toBe(258n);
+    expect(paused.pause.unseen_count).toBe(BigInt(receivedEvents));
     expect(presentedLiveEdge(paused)).toBe(frozen);
-    expect(paused.live.events).toHaveLength(256);
+    expect(paused.live.events).toHaveLength(LIVE_EDGE_EVENT_CAPACITY);
     expect(paused.live.dropped_through).toBe("4");
     expect(paused.presentation).toMatchObject({
       selection: { kind: "event", id: "2" },
@@ -199,7 +202,7 @@ describe("live diagnostics pause", () => {
     expect(queryIntent).toEqual({
       kind: "server_range",
       after_sequence: "2",
-      through_sequence: "260",
+      through_sequence: String(finalSequence),
     });
     expect(controller.state.diagnostics?.pause).toMatchObject({
       paused: false,

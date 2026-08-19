@@ -13,6 +13,7 @@ process.env.no_proxy = LOOPBACK_NO_PROXY;
 
 const FIXTURE_SOURCE = String.raw`
 import { h, render } from "preact";
+import { App } from "/src/app.tsx";
 import { ActorTimeline } from "/src/timeline/actor_timeline.tsx";
 import { decodeU64 } from "/src/protocol/decimal.ts";
 import { createDiagnosticState, reduceDiagnosticState } from "/src/state/reducer.ts";
@@ -33,14 +34,95 @@ const data = selectProductionTimelineData(state, {
   connection: "connected",
   outcome: "running",
 });
-render(h(ActorTimeline, {
-  data,
-  historyData,
-  historyStatus: "ready",
-  livePaused: false,
-  unseenCount: 0n,
-  onPauseToggle: () => undefined,
-}), document.querySelector("#app"));
+
+if (new URL(location.href).searchParams.has("burst")) {
+  const bootstrap = {
+    document_url: location.href,
+    origin: location.origin,
+    api_base_url: new URL("/api/v1/", location.origin).href,
+    identity: { run_id: COMPLEX_EVENTS[0].run_id },
+    status: { source: "active" },
+    compatibility: { mode: "interactive", decisions: {}, missingBrowserCapabilities: [] },
+  };
+  class BurstController {
+    listeners = new Set();
+    state = {
+      phase: "live",
+      connection: "connected",
+      security: "trusted_network",
+      security_scope: "trusted_network",
+      outcome: "running",
+      bootstrap,
+      status: { source: "active" },
+      snapshot: null,
+      diagnostics: state,
+      terminal_reason: null,
+      error: null,
+    };
+    subscribe(listener) {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    async start() {}
+    stop() {}
+    dispatch() {}
+    publish(index) {
+      this.state = {
+        ...this.state,
+        diagnostics: {
+          ...state,
+          cursor: {
+            ...state.cursor,
+            committed_watermark: String(BigInt(COMPLEX_WATERMARK) + BigInt(index)),
+          },
+        },
+      };
+      for (const listener of this.listeners) listener(this.state);
+    }
+  }
+  const controller = new BurstController();
+  globalThis.__runTimelineBurst = async (count) => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const watermark = document.querySelector("[title='Run running']");
+    let mutations = 0;
+    const observer = new MutationObserver(() => { mutations += 1; });
+    observer.observe(watermark, { childList: true, characterData: true, subtree: true });
+    let maximumHeartbeatDelay = 0;
+    let expectedHeartbeat = performance.now() + 25;
+    const heartbeat = setInterval(() => {
+      const now = performance.now();
+      maximumHeartbeatDelay = Math.max(maximumHeartbeatDelay, now - expectedHeartbeat);
+      expectedHeartbeat = now + 25;
+    }, 25);
+    const started = performance.now();
+    for (let index = 1; index <= count; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      controller.publish(index);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    clearInterval(heartbeat);
+    observer.disconnect();
+    return {
+      elapsed: performance.now() - started,
+      maximumHeartbeatDelay,
+      mutations,
+      watermark: watermark?.textContent?.trim() ?? null,
+      expectedWatermark: String(BigInt(COMPLEX_WATERMARK) + BigInt(count)),
+      domNodes: document.getElementsByTagName("*").length,
+      cueTracks: document.querySelectorAll(".cue-track").length,
+    };
+  };
+  render(h(App, { liveController: controller }), document.querySelector("#app"));
+} else {
+  render(h(ActorTimeline, {
+    data,
+    historyData,
+    historyStatus: "ready",
+    livePaused: false,
+    unseenCount: 0n,
+    onPauseToggle: () => undefined,
+  }), document.querySelector("#app"));
+}
 `;
 
 function fixturePlugin(): Plugin {
@@ -230,6 +312,32 @@ test.describe("complex timeline geometry", () => {
     await expect(page.locator(".actor-visual[data-actor-id^='actor-dynamic-']")).toHaveCount(0);
     await expect(page.locator(".cue-track[data-cue-id='cue-1-ingest-primary']")).toHaveCount(0);
     await expect(page.locator(".cue-track[data-cue-id='cue-48-ingest-primary']")).toHaveCount(1);
+  });
+
+  test("coalesces a high-rate Live burst without blocking or growing the DOM", async ({ page }) => {
+    await page.goto(`${origin}/__timeline-geometry?burst=1`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "Troupe Timeline" })).toBeVisible();
+    const report = await page.evaluate(async () => {
+      const run = (globalThis as unknown as {
+        __runTimelineBurst: (count: number) => Promise<{
+          elapsed: number;
+          maximumHeartbeatDelay: number;
+          mutations: number;
+          watermark: string | null;
+          expectedWatermark: string;
+          domNodes: number;
+          cueTracks: number;
+        }>;
+      }).__runTimelineBurst;
+      return run(300);
+    });
+
+    expect(report.watermark).toBe(report.expectedWatermark);
+    expect(report.mutations).toBeLessThanOrEqual(10);
+    expect(report.maximumHeartbeatDelay).toBeLessThan(1_000);
+    expect(report.elapsed).toBeLessThan(5_000);
+    expect(report.domNodes).toBeLessThan(10_000);
+    expect(report.cueTracks).toBeGreaterThan(0);
   });
 
   test("shares row positions between labels and plot and separates overlapping Cue lanes", async ({ page }) => {

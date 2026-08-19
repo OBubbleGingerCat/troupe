@@ -139,6 +139,16 @@ export function intersects(
   return start <= range.end && (end ?? Number.POSITIVE_INFINITY) >= range.start;
 }
 
+/** Keep NOW at the right edge of a fixed-width rolling Live window. */
+export function liveTimelineRange(now: number, windowSeconds: number): TimelineRange {
+  const duration = Math.max(1, windowSeconds);
+  const cursor = Math.max(0, now);
+  return {
+    start: cursor - duration,
+    end: cursor,
+  };
+}
+
 export function liveActorVisible(
   actor: ActorRecord,
   now: number,

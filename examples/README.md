@@ -121,17 +121,19 @@ queued Cues on one Actor, and nested Python spans/events without making any
 provider turns:
 
 ```console
-troupe --production examples/diagnostics --diagnostic-bind-host 127.0.0.1 --diagnostic-port 43120 -- complex 0.25
+troupe --production examples/diagnostics --diagnostic-bind-host 127.0.0.1 --diagnostic-port 43120 -- complex
 ```
 
-This mode is intended for checking Live retention, dynamic Actor destruction,
-lane allocation, and deep Python span geometry. Each Cue deliberately pauses
-between nested stages so the bars and event markers remain readable when a
-Scene is selected in History. This provider-free mode covers Cue, Actor,
-Python span, and Python event tracks; the default diagnostics showcase remains
-the provider-backed example for inspecting Act, tool, and agent-message tracks.
-Switch to History after enough Scenes have accumulated to replay temporary
-Actors and inspect the full run.
+This mode uses a conservative five-second Scene interval so it can run for a
+long observation without exhausting the diagnostics ingress budget. It is
+intended for checking Live retention, the rolling time window, dynamic Actor
+destruction, lane allocation, and deep Python span geometry. Each Cue
+deliberately pauses between nested stages so the bars and event markers remain
+readable when a Scene is selected in History. This provider-free mode covers
+Cue, Actor, Python span, and Python event tracks; the default diagnostics
+showcase remains the provider-backed example for inspecting Act, tool, and
+agent-message tracks. A shorter explicit interval is useful as a brief stress
+test, but is not suitable for an unattended long run.
 
 While the Production is running, inspect the same Run from another terminal or
 export its currently committed prefix as a Perfetto trace:

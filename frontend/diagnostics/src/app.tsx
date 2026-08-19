@@ -42,6 +42,11 @@ const EMPTY_HISTORY: HistoryCaptureState = {
   error: null,
 };
 
+// The controller still reduces every canonical event. Coalesce only the
+// immutable snapshots published to Preact so bursts cannot trigger one full
+// SVG diff per SSE frame.
+const PRESENTATION_BATCH_MS = 250;
+
 function useLiveDiagnostics(
   provided: DiagnosticsLiveController | undefined,
 ): readonly [DiagnosticsLiveController, LiveDiagnosticsState] {
@@ -51,14 +56,40 @@ function useLiveDiagnostics(
   }
   const controller = controllerRef.current;
   const [state, setState] = useState<LiveDiagnosticsState>(controller.state);
+  const pendingStateRef = useRef<LiveDiagnosticsState | null>(null);
+  const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    let active = true;
+    const publish = (): void => {
+      timerRef.current = null;
+      if (!active) {
+        return;
+      }
+      const pending = pendingStateRef.current;
+      pendingStateRef.current = null;
+      if (pending !== null) {
+        setState(pending);
+      }
+    };
+    const onState = (next: LiveDiagnosticsState): void => {
+      pendingStateRef.current = next;
+      if (timerRef.current === null) {
+        timerRef.current = window.setTimeout(publish, PRESENTATION_BATCH_MS);
+      }
+    };
     setState(controller.state);
-    const unsubscribe = controller.subscribe(setState);
+    const unsubscribe = controller.subscribe(onState);
     void controller.start().catch(() => undefined);
     return () => {
+      active = false;
       unsubscribe();
       controller.stop();
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      pendingStateRef.current = null;
     };
   }, [controller]);
 

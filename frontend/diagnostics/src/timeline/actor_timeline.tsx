@@ -45,6 +45,7 @@ import {
   intersects,
   lifecycleState,
   liveActorVisible,
+  liveTimelineRange,
 } from "./actor_timeline_model.ts";
 
 
@@ -420,7 +421,7 @@ function actorRows(
 function timeTicks(range: TimelineRange): readonly number[] {
   const duration = range.end - range.start;
   const step = duration <= 40 ? 10 : duration <= 90 ? 15 : 30;
-  const first = Math.ceil(range.start / step) * step;
+  const first = Math.ceil(Math.max(0, range.start) / step) * step;
   const ticks: number[] = [];
   for (let value = first; value <= range.end; value += step) {
     ticks.push(value);
@@ -1890,7 +1891,7 @@ export function ActorTimeline({
   }, [historyPlaying, historyRange.end, historySpeed, mode]);
 
   const range = mode === "live"
-    ? { start: Math.max(0, timelineData.liveNow - liveWindow), end: timelineData.liveNow }
+    ? liveTimelineRange(timelineData.liveNow, liveWindow)
     : historyRange;
   const cursor = mode === "live" ? timelineData.liveNow : historyCursor;
   const rows = useMemo(

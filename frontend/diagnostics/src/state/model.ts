@@ -23,7 +23,7 @@ import type { FixedLru } from "./lru.ts";
 
 export const ADJACENT_WINDOW_CAPACITY = 4;
 export const VISIBLE_WINDOW_EVENT_CAPACITY = 4_096;
-export const LIVE_EDGE_EVENT_CAPACITY = 256;
+export const LIVE_EDGE_EVENT_CAPACITY = VISIBLE_WINDOW_EVENT_CAPACITY;
 export const SPAN_CAPACITY = 256;
 export const MESSAGE_CAPACITY = 128;
 export const MESSAGE_TEXT_CODE_UNIT_CAPACITY = 1_048_576;

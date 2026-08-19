@@ -1,5 +1,9 @@
 import { decodeU64 } from "../../src/protocol/decimal.ts";
-import { selectCapturedTimelineData } from "../../src/timeline/production_timeline.ts";
+import { createDiagnosticState, reduceDiagnosticState } from "../../src/state/reducer.ts";
+import {
+  selectCapturedTimelineData,
+  selectProductionTimelineData,
+} from "../../src/timeline/production_timeline.ts";
 import {
   COMPLEX_EVENTS,
   COMPLEX_RUN_ID,
@@ -30,5 +34,33 @@ describe("complex diagnostics timeline fixture", () => {
     expect(data.customSpans.some((span) => span.parentSpanId !== null)).toBe(true);
     expect(data.customEvents.some((event) => event.containingSpanId !== null)).toBe(true);
     expect(data.totalTime).toBeGreaterThan(700);
+  });
+
+  it("retains open Actor lifetimes and their creation-order slots after span pressure", () => {
+    let state = createDiagnosticState(COMPLEX_EVENTS[0]!.run_id, decodeU64("0"));
+    for (const event of COMPLEX_EVENTS) {
+      state = reduceDiagnosticState(state, { type: "event_received", event });
+    }
+    const openActorIds = state.live.projection.spans.items.flatMap((span) => (
+      span.start?.kind === "span_started"
+      && span.start.span_kind === "actor.handle_lifetime"
+      && span.finish === null
+        ? [span.start.scope.actor_id]
+        : []
+    ));
+    expect(openActorIds).toEqual(["actor-ingest", "actor-review", "actor-publish"]);
+
+    const live = selectProductionTimelineData(
+      state,
+      { connection: "connected", outcome: "running" },
+      { productionName: "Complex timeline fixture" },
+    );
+    expect(live.actors.filter((actor) => (
+      actor.lifetimeObserved === true && actor.end === null
+    )).map((actor) => actor.id)).toEqual([
+      "actor-ingest",
+      "actor-review",
+      "actor-publish",
+    ]);
   });
 });

@@ -126,6 +126,54 @@ const LIVE_RETENTION_DATA: TimelineData = {
 afterEach(cleanup);
 
 describe("Actor timeline lifecycle affordances", () => {
+  it("keeps the Live playhead fixed while startup work rolls left", () => {
+    const liveActor = {
+      ...QUEUE_DATA.actors[0]!,
+      end: null,
+    };
+    const view = render(
+      <ActorTimeline
+        data={{ ...QUEUE_DATA, actors: [liveActor], liveNow: 10, totalTime: 10 }}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:10");
+    const initial = Number(view.container.querySelector(".playhead")?.getAttribute("x1"));
+    const initialActorStart = Number(
+      view.container.querySelector(".actor-lifetime-track line")?.getAttribute("x1"),
+    );
+
+    view.rerender(
+      <ActorTimeline
+        data={{ ...QUEUE_DATA, actors: [liveActor], liveNow: 20, totalTime: 20 }}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:20");
+    const fixed = Number(view.container.querySelector(".playhead")?.getAttribute("x1"));
+    const advancedActorStart = Number(
+      view.container.querySelector(".actor-lifetime-track line")?.getAttribute("x1"),
+    );
+    expect(fixed).toBe(initial);
+    expect(advancedActorStart).toBeLessThan(initialActorStart);
+
+    view.rerender(
+      <ActorTimeline
+        data={{ ...QUEUE_DATA, actors: [liveActor], liveNow: 75, totalTime: 75 }}
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:15 - 1:15");
+  });
+
   it("labels even a short lifetime and exposes rail/start/end details on hover", () => {
     const view = render(
       <ActorTimeline
@@ -195,6 +243,10 @@ describe("Actor timeline lifecycle affordances", () => {
         onPauseToggle={() => undefined}
       />,
     );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Window" }), {
+      target: { value: "30" },
+    });
 
     expect(screen.getByText("Cue wait · cue-2")).toBeInTheDocument();
     const wait = view.container.querySelector<SVGGElement>(

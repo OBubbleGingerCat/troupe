@@ -142,7 +142,7 @@ describe("state invariants over long deterministic streams", () => {
   });
 
   it("never exceeds a released capacity and records projection loss", () => {
-    const total = 3_600;
+    const total = LIVE_EDGE_EVENT_CAPACITY + 512;
     let state = createDiagnosticState(RUN_ID, decodeU64("0"));
     for (let sequence = 1; sequence <= total; sequence += 1) {
       state = reduceDiagnosticState(state, {

@@ -57,11 +57,17 @@ class FakeController implements DiagnosticsLiveController {
   dispatch(_action: DiagnosticStateAction): void {
     for (const listener of this.listeners) listener(this.state);
   }
+
+  publish(state: LiveDiagnosticsState): void {
+    this.state = state;
+    for (const listener of this.listeners) listener(state);
+  }
 }
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("diagnostics application composition", () => {
@@ -97,6 +103,30 @@ describe("diagnostics application composition", () => {
     };
     render(<App liveController={controller} />);
     expect(screen.getByLabelText("Compatibility status")).toBeInTheDocument();
+  });
+
+  it("coalesces bursty controller notifications into one latest presentation update", async () => {
+    vi.useFakeTimers();
+    const controller = new FakeController();
+    render(<App liveController={controller} />);
+    await vi.advanceTimersByTimeAsync(0);
+
+    for (let sequence = 1; sequence <= 100; sequence += 1) {
+      controller.publish({
+        ...controller.state,
+        diagnostics: createDiagnosticState(
+          RUN_ID,
+          decodeU64(String(sequence)),
+          decodeU64(String(sequence * 1_000_000_000)),
+        ),
+      });
+    }
+
+    expect(screen.getByTitle("Run running")).toHaveTextContent("0");
+    await vi.advanceTimersByTimeAsync(249);
+    expect(screen.getByTitle("Run running")).toHaveTextContent("0");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(screen.getByTitle("Run running")).toHaveTextContent("100");
   });
 
   it("loads an exact frozen capture before enabling History playback", async () => {

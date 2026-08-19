@@ -5,11 +5,17 @@ import {
   type DiagnosticScope,
 } from "../../src/protocol/event.ts";
 import {
+  VISIBLE_WINDOW_EVENT_CAPACITY,
+} from "../../src/state/model.ts";
+import {
   createDiagnosticState,
   reduceDiagnosticState,
 } from "../../src/state/reducer.ts";
 import { activateWindow, createEventWindow } from "../../src/state/windows.ts";
-import { liveActorVisible } from "../../src/timeline/actor_timeline_model.ts";
+import {
+  liveActorVisible,
+  liveTimelineRange,
+} from "../../src/timeline/actor_timeline_model.ts";
 import {
   selectCapturedTimelineData,
   selectProductionTimelineData,
@@ -60,6 +66,66 @@ function ingest(events: readonly DiagnosticEvent[]) {
 }
 
 describe("production Actor timeline projection", () => {
+  it("clips the merged bootstrap and hot edges to one visible event capacity", () => {
+    const capacity = VISIBLE_WINDOW_EVENT_CAPACITY;
+    const oldEvents = Array.from({ length: capacity }, (_, index) => {
+      const sequence = index + 1;
+      return event(sequence, sequence, scope(`scene-${sequence}`), {
+        kind: "custom_instant_occurred",
+        name: "example.old_window",
+        containing_span_id: null,
+        severity: "debug",
+        attributes: {},
+      });
+    });
+    let state = createDiagnosticState(
+      RUN_ID,
+      decodeU64(String(capacity)),
+      oldEvents[oldEvents.length - 1]!.elapsed_ns,
+    );
+    for (let sequence = capacity + 1; sequence <= capacity * 2; sequence += 1) {
+      state = reduceDiagnosticState(state, {
+        type: "event_received",
+        event: event(sequence, sequence, scope(`scene-${sequence}`), {
+          kind: "custom_instant_occurred",
+          name: "example.hot_edge",
+          containing_span_id: null,
+          severity: "debug",
+          attributes: {},
+        }),
+      });
+    }
+    state = {
+      ...state,
+      windows: activateWindow(state.windows, createEventWindow({
+        id: "bootstrap-window",
+        run_id: RUN_ID,
+        start_ns: oldEvents[0]!.elapsed_ns,
+        end_ns: oldEvents[oldEvents.length - 1]!.elapsed_ns,
+        captured_through: decodeU64(String(capacity * 2)),
+        events: oldEvents,
+      })),
+    };
+
+    const data = selectProductionTimelineData(
+      state,
+      { connection: "connected", outcome: "running" },
+    );
+    expect(data.scenes).toHaveLength(capacity);
+    expect(data.scenes[0]?.id).toBe(`scene-${capacity + 1}`);
+    expect(data.scenes[data.scenes.length - 1]?.id).toBe(`scene-${capacity * 2}`);
+    expect(data.scenes.some((scene) => scene.id === `scene-${capacity}`)).toBe(false);
+  });
+
+  it("keeps a fixed-width Live scale before and after the window starts rolling", () => {
+    expect(liveTimelineRange(0, 60)).toEqual({ start: -60, end: 0 });
+    expect(liveTimelineRange(10, 60)).toEqual({ start: -50, end: 10 });
+    expect(liveTimelineRange(59.9, 60).start).toBeCloseTo(-0.1);
+    expect(liveTimelineRange(59.9, 60).end).toBe(59.9);
+    expect(liveTimelineRange(60, 60)).toEqual({ start: 0, end: 60 });
+    expect(liveTimelineRange(75, 60)).toEqual({ start: 15, end: 75 });
+  });
+
   it("places built-in lifecycles and Python diagnostics on one elapsed-time plane", () => {
     const scene = scope("scene-1");
     const actor = scope("scene-1", "actor-1");

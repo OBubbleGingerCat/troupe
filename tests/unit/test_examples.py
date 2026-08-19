@@ -227,6 +227,24 @@ def test_examples_are_documented_public_production_packages() -> None:
         assert f"troupe --production examples/{name}" in examples_readme
 
 
+def test_diagnostics_complex_example_uses_a_sustainable_default_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(ROOT))
+    from examples.diagnostics.production import (
+        DEFAULT_COMPLEX_INTERVAL_SECONDS,
+        DEFAULT_INTERVAL_SECONDS,
+        parse_interval_seconds,
+    )
+
+    assert parse_interval_seconds(
+        [],
+        default=DEFAULT_COMPLEX_INTERVAL_SECONDS,
+    ) == 5.0
+    assert parse_interval_seconds([], default=DEFAULT_INTERVAL_SECONDS) == 30.0
+    assert "-- complex\n" in (EXAMPLES / "README.md").read_text(encoding="utf-8")
+
+
 def test_mixed_repository_repair_live_example_and_oracle_are_wired() -> None:
     production = EXAMPLES / "live_agents" / "mixed_repository_repair"
     runner = ROOT / "scripts" / "test_live_mixed_agents.sh"

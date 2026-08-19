@@ -4,9 +4,10 @@ import type {
   SpanStartedEvent,
 } from "../protocol/event.ts";
 import type { U64String } from "../protocol/decimal.ts";
-import type {
-  DiagnosticState,
-  ProjectedSpan,
+import {
+  VISIBLE_WINDOW_EVENT_CAPACITY,
+  type DiagnosticState,
+  type ProjectedSpan,
 } from "../state/model.ts";
 import { presentedLiveEdge } from "../state/reducer.ts";
 import type { LiveDiagnosticsState } from "../live/reconnect.ts";
@@ -146,11 +147,12 @@ function unionEvents(state: DiagnosticState): readonly DiagnosticEvent[] {
   for (const event of edge.events) {
     bySequence.set(event.sequence, event);
   }
-  return [...bySequence.values()].sort((left, right) => {
+  const ordered = [...bySequence.values()].sort((left, right) => {
     const a = BigInt(left.sequence);
     const b = BigInt(right.sequence);
     return a < b ? -1 : a > b ? 1 : 0;
   });
+  return ordered.slice(-VISIBLE_WINDOW_EVENT_CAPACITY);
 }
 
 function scopeId(scope: DiagnosticScope, field: "scene_id" | "actor_id" | "cue_id" | "act_id"): string | null {
@@ -320,7 +322,11 @@ function buildActors(
     });
   }
   return [...byId.values()]
-    .sort((left, right) => left.start - right.start || left.id.localeCompare(right.id))
+    .sort((left, right) => (
+      left.start - right.start
+      || left.liveSlot - right.liveSlot
+      || left.id.localeCompare(right.id)
+    ))
     .map((actor, index) => ({ ...actor, liveSlot: index % 6 }));
 }
 

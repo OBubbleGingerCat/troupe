@@ -162,6 +162,7 @@ function upsertBounded<T>(
   keyOf: (candidate: T) => string,
   sequenceOf: (candidate: T) => U64String,
   touch = false,
+  dropIndexOf: ((candidates: readonly T[]) => number) | null = null,
 ): ProjectionBucket<T> {
   const key = keyOf(item);
   const existing = bucket.items.findIndex((candidate) => keyOf(candidate) === key);
@@ -179,7 +180,11 @@ function upsertBounded<T>(
   let droppedThrough = bucket.dropped_through;
   let needsServerRefresh = bucket.needs_server_refresh;
   while (items.length > capacity) {
-    const dropped = items.shift();
+    const requestedIndex = dropIndexOf?.(items) ?? 0;
+    const dropIndex = requestedIndex >= 0 && requestedIndex < items.length
+      ? requestedIndex
+      : 0;
+    const [dropped] = items.splice(dropIndex, 1);
     if (dropped !== undefined) {
       droppedThrough = later(droppedThrough, sequenceOf(dropped));
       needsServerRefresh = true;
@@ -191,6 +196,11 @@ function upsertBounded<T>(
     dropped_through: droppedThrough,
     needs_server_refresh: needsServerRefresh,
   };
+}
+
+function completedSpanIndex(spans: readonly ProjectedSpan[]): number {
+  const completed = spans.findIndex((span) => span.finish !== null);
+  return completed === -1 ? 0 : completed;
 }
 
 function markRefresh<T>(bucket: ProjectionBucket<T>): ProjectionBucket<T> {
@@ -263,7 +273,15 @@ function projectSpan(
       start: event,
       finish: existing?.finish ?? null,
     };
-    const updated = upsertBounded(bucket, next, SPAN_CAPACITY, (span) => span.span_id, spanSequence);
+    const updated = upsertBounded(
+      bucket,
+      next,
+      SPAN_CAPACITY,
+      (span) => span.span_id,
+      spanSequence,
+      false,
+      completedSpanIndex,
+    );
     return existing?.start === undefined || existing.start === null ? updated : markRefresh(updated);
   }
   if (event.kind !== "span_finished" && event.kind !== "custom_span_finished") {
@@ -278,7 +296,15 @@ function projectSpan(
     start: existing?.start ?? null,
     finish: event,
   };
-  const updated = upsertBounded(bucket, next, SPAN_CAPACITY, (span) => span.span_id, spanSequence);
+  const updated = upsertBounded(
+    bucket,
+    next,
+    SPAN_CAPACITY,
+    (span) => span.span_id,
+    spanSequence,
+    false,
+    completedSpanIndex,
+  );
   return existing === undefined || existing.finish !== null || familyMismatch
     ? markRefresh(updated)
     : updated;
@@ -933,6 +959,8 @@ function hydrateSnapshotSpans(
       SPAN_CAPACITY,
       (candidate) => candidate.span_id,
       spanSequence,
+      false,
+      completedSpanIndex,
     );
   }
 

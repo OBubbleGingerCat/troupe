@@ -14,15 +14,16 @@ from .sink import EvaluationSink, JsonValue
 
 
 DEFAULT_INTERVAL_SECONDS = 30.0
+DEFAULT_COMPLEX_INTERVAL_SECONDS = 5.0
 COMPLEX_STAGE_DELAY_SECONDS = 0.12
 PROBE_MARKER = "troupe-diagnostics-ready"
 
 
-def parse_interval_seconds(args: list[str]) -> float:
+def parse_interval_seconds(args: list[str], *, default: float) -> float:
     if len(args) > 1:
         raise ValueError("expected at most one argument: SCENE_INTERVAL_SECONDS")
     if not args:
-        return DEFAULT_INTERVAL_SECONDS
+        return default
     try:
         interval = float(args[0])
     except ValueError as error:
@@ -212,7 +213,14 @@ class Production(troupe.Production):
     def __init__(self, args: list[str]) -> None:
         self.mode = "complex" if args and args[0] == "complex" else "showcase"
         interval_args = args[1:] if self.mode == "complex" else args
-        self.interval_seconds = parse_interval_seconds(interval_args)
+        self.interval_seconds = parse_interval_seconds(
+            interval_args,
+            default=(
+                DEFAULT_COMPLEX_INTERVAL_SECONDS
+                if self.mode == "complex"
+                else DEFAULT_INTERVAL_SECONDS
+            ),
+        )
         self.scene_number = 0
         self.completed_scenes = 0
         self.profile = troupe.AgentProfile(
