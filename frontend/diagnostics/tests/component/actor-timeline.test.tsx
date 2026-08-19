@@ -129,6 +129,7 @@ describe("Actor timeline lifecycle affordances", () => {
   it("keeps the Live playhead fixed while startup work rolls left", () => {
     const liveActor = {
       ...QUEUE_DATA.actors[0]!,
+      start: 10,
       end: null,
     };
     const view = render(
@@ -140,7 +141,7 @@ describe("Actor timeline lifecycle affordances", () => {
       />,
     );
 
-    expect(screen.getByRole("combobox", { name: "Window" })).toHaveValue("30");
+    expect(screen.getByRole("combobox", { name: "Window" })).toHaveValue("10");
     expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:10");
     const initial = Number(view.container.querySelector(".playhead")?.getAttribute("x1"));
     const initialActorStart = Number(
@@ -156,7 +157,7 @@ describe("Actor timeline lifecycle affordances", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:20");
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:10 - 0:20");
     const fixed = Number(view.container.querySelector(".playhead")?.getAttribute("x1"));
     const advancedActorStart = Number(
       view.container.querySelector(".actor-lifetime-track line")?.getAttribute("x1"),
@@ -172,7 +173,7 @@ describe("Actor timeline lifecycle affordances", () => {
         onPauseToggle={() => undefined}
       />,
     );
-    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:45 - 1:15");
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("1:05 - 1:15");
   });
 
   it("labels even a short lifetime and exposes rail/start/end details on hover", () => {
