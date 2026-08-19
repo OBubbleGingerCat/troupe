@@ -232,6 +232,10 @@ test("active and archive content remains text under the exact response policy", 
     });
     expect(documentResponse).not.toBeNull();
     await expect(page.getByRole("heading", { name: "Troupe Timeline" })).toBeVisible();
+    const window = page.getByRole("combobox", { name: "Window" });
+    if (await window.count() > 0) {
+      await window.selectOption("60");
+    }
     const markers = page.locator(".event-marker[data-kind='message']");
     await expect(markers).toHaveCount(CONTENT.cases.length);
     for (let index = 0; index < CONTENT.cases.length; index += 1) {

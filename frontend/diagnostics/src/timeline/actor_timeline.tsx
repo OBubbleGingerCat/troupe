@@ -65,6 +65,9 @@ const CUE_LANE_STEP = 24;
 const ACT_BAR_HEIGHT = 14;
 const CUSTOM_SPAN_HEIGHT = 13;
 const HISTORY_MIN_RANGE = 12;
+const DEFAULT_LIVE_WINDOW_SECONDS = 30;
+const SCENE_LABEL_CHAR_WIDTH = 5.8;
+const SCENE_LABEL_GAP = 4;
 const SCENE_COLORS: Readonly<Record<SceneRecord["tone"], string>> = {
   green: "#18765d",
   blue: "#356b8c",
@@ -220,6 +223,85 @@ function stateOpacity(state: LifecycleState): number {
     case "cancelled":
       return 0.9;
   }
+}
+
+interface SceneLabelPlacement {
+  readonly text: string;
+  readonly x: number;
+  readonly width: number;
+}
+
+function sceneLabelCandidate(
+  label: string,
+  barWidth: number,
+): { readonly text: string; readonly width: number } | null {
+  const estimate = (text: string): number => text.length * SCENE_LABEL_CHAR_WIDTH + 10;
+  const fullWidth = estimate(label);
+  if (barWidth >= fullWidth + SCENE_LABEL_GAP * 2) {
+    return { text: label, width: fullWidth };
+  }
+  const shortLabel = label.replace(/^Scene\s+/i, "");
+  const shortWidth = estimate(shortLabel);
+  if (barWidth >= shortWidth + SCENE_LABEL_GAP * 2) {
+    return { text: shortLabel, width: shortWidth };
+  }
+  const normalizedId = shortLabel.replace(/^scene-/i, "");
+  const uuidPrefix = normalizedId.match(/^([0-9a-f]{8})[0-9a-f-]*$/i)?.[1];
+  if (uuidPrefix !== undefined) {
+    const compactLabel = `Scene ${uuidPrefix}`;
+    const compactWidth = estimate(compactLabel);
+    if (barWidth >= compactWidth + SCENE_LABEL_GAP * 2) {
+      return { text: compactLabel, width: compactWidth };
+    }
+    const suffixLabel = `…${normalizedId.slice(-4)}`;
+    const suffixWidth = estimate(suffixLabel);
+    if (barWidth >= suffixWidth + SCENE_LABEL_GAP * 2) {
+      return { text: suffixLabel, width: suffixWidth };
+    }
+  }
+  return null;
+}
+
+function sceneLabelPlacements(
+  scenes: readonly SceneRecord[],
+  x: (time: number) => number,
+  endAt: (scene: SceneRecord) => number,
+): ReadonlyMap<string, SceneLabelPlacement> {
+  const occupied: Array<{ readonly left: number; readonly right: number }> = [];
+  const placements = new Map<string, SceneLabelPlacement>();
+  for (const scene of scenes) {
+    const startX = x(scene.start);
+    const endX = x(endAt(scene));
+    const candidate = sceneLabelCandidate(scene.label, endX - startX);
+    if (candidate === null) {
+      continue;
+    }
+    const minimumLeft = startX + SCENE_LABEL_GAP;
+    const maximumLeft = endX - candidate.width - SCENE_LABEL_GAP;
+    if (maximumLeft < minimumLeft) {
+      continue;
+    }
+    const preferredLeft = (startX + endX - candidate.width) / 2;
+    const choices = [
+      preferredLeft,
+      minimumLeft,
+      maximumLeft,
+    ];
+    const left = choices.find((choice) => (
+      choice >= minimumLeft
+      && choice <= maximumLeft
+      && occupied.every((interval) => (
+        choice >= interval.right + SCENE_LABEL_GAP
+        || choice + candidate.width <= interval.left - SCENE_LABEL_GAP
+      ))
+    ));
+    if (left === undefined) {
+      continue;
+    }
+    occupied.push({ left, right: left + candidate.width });
+    placements.set(scene.id, { ...candidate, x: left });
+  }
+  return placements;
 }
 
 function eventKindLabel(kind: TimelineDatumKind): string {
@@ -621,6 +703,11 @@ function TimelinePlot({
   const scenes = data.scenes.filter((scene) => (
     intersects(scene.start, scene.end, range) && (mode === "history" || scene.start <= cursor)
   ));
+  const sceneLabelById = sceneLabelPlacements(
+    scenes,
+    x,
+    (scene) => Math.min(scene.end ?? (mode === "live" ? cursor : range.end), range.end),
+  );
   const visibleCueIds = new Set(cues.map((cue) => cue.id));
   const acts = data.acts.filter((act) => (
     visibleCueIds.has(act.cueId)
@@ -732,7 +819,12 @@ function TimelinePlot({
             cursor,
           );
           return (
-            <g key={scene.id} opacity={stateOpacity(sceneState)}>
+            <g
+              key={scene.id}
+              class="scene-band"
+              data-scene-id={scene.id}
+              opacity={stateOpacity(sceneState)}
+            >
               <rect
                 x={startX}
                 y={SCENE_AREA_HEIGHT - 12}
@@ -749,9 +841,14 @@ function TimelinePlot({
                 rx="2"
                 fill={color}
               />
-              {endX - startX > 66 ? (
-                <text x={startX + 5} y="33" fill={color} class="scene-label-svg">
-                  {scene.label}
+              {sceneLabelById.has(scene.id) ? (
+                <text
+                  x={sceneLabelById.get(scene.id)!.x}
+                  y="33"
+                  fill={color}
+                  class="scene-label-svg"
+                >
+                  {sceneLabelById.get(scene.id)!.text}
                 </text>
               ) : null}
               <title>{`${scene.label}: ${formatElapsed(scene.start)} to ${scene.end === null ? "open" : formatElapsed(scene.end)}`}</title>
@@ -1840,7 +1937,7 @@ export function ActorTimeline({
   const [mode, setMode] = useState<TimelineMode>("live");
   const timelineData = mode === "history" && historyData !== null ? historyData : data;
   const [followLive, setFollowLive] = useState(true);
-  const [liveWindow, setLiveWindow] = useState(60);
+  const [liveWindow, setLiveWindow] = useState(DEFAULT_LIVE_WINDOW_SECONDS);
   const [historyRange, setHistoryRange] = useState<TimelineRange>(() => ({
     start: Math.max(0, data.totalTime - 120),
     end: data.totalTime,
@@ -2003,6 +2100,7 @@ export function ActorTimeline({
             <label class="select-control">
               <span>Window</span>
               <select value={liveWindow} onChange={(event) => setLiveWindow(Number(event.currentTarget.value))}>
+                <option value="10">10 sec</option>
                 <option value="30">30 sec</option>
                 <option value="60">60 sec</option>
                 <option value="120">120 sec</option>

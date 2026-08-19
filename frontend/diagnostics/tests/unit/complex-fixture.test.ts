@@ -62,5 +62,16 @@ describe("complex diagnostics timeline fixture", () => {
       "actor-review",
       "actor-publish",
     ]);
+    expect(live.scenes.find((scene) => scene.id === "scene-12")).toMatchObject({
+      start: 166.4,
+      end: 177,
+    });
+    expect(live.scenes.filter((scene) => scene.end === null)).toEqual([]);
+    expect(live.cues.find((cue) => cue.id === "cue-12-ingest-primary")).toMatchObject({
+      admitted: 171,
+      execution: 171,
+      end: 171,
+      lifecycleObserved: false,
+    });
   });
 });

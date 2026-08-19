@@ -48,7 +48,7 @@ does not accumulate the whole paused raw stream in browser memory.
 ## Browser state
 
 Live does not mirror a whole long Run. The V1 release constants retain at most
-4,096 events in the visible window, four adjacent windows, and 256 live-edge events.
+4,096 events in the visible window, four adjacent windows, and 4,096 live-edge events.
 Derived Live collections are independently bounded, including 256 spans, 128 messages,
 256 tool facts, 256 result facts, 128 context samples, 256 final Act usage facts,
 128 gaps, and 64 query results. Eviction marks projections for a server refresh; it

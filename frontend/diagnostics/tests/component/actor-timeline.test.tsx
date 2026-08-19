@@ -140,6 +140,7 @@ describe("Actor timeline lifecycle affordances", () => {
       />,
     );
 
+    expect(screen.getByRole("combobox", { name: "Window" })).toHaveValue("30");
     expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:10");
     const initial = Number(view.container.querySelector(".playhead")?.getAttribute("x1"));
     const initialActorStart = Number(
@@ -171,7 +172,7 @@ describe("Actor timeline lifecycle affordances", () => {
         onPauseToggle={() => undefined}
       />,
     );
-    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:15 - 1:15");
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:45 - 1:15");
   });
 
   it("labels even a short lifetime and exposes rail/start/end details on hover", () => {

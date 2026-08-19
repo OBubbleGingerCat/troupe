@@ -314,6 +314,47 @@ test.describe("complex timeline geometry", () => {
     await expect(page.locator(".cue-track[data-cue-id='cue-48-ingest-primary']")).toHaveCount(1);
   });
 
+  test("keeps dense Scene labels readable and inside their Scene bars", async ({ page }) => {
+    await page.goto(`${origin}/__timeline-geometry`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "Troupe Timeline" })).toBeVisible();
+    const report = await page.evaluate(() => {
+      const labels = [...document.querySelectorAll<SVGGElement>(".scene-band")]
+        .flatMap((band) => {
+          const label = band.querySelector<SVGTextElement>(".scene-label-svg");
+          const bar = band.querySelectorAll<SVGRectElement>("rect")[1];
+          if (label === null || bar === undefined) {
+            return [];
+          }
+          const labelBox = label.getBoundingClientRect();
+          const barBox = bar.getBoundingClientRect();
+          return [{
+            id: band.dataset.sceneId,
+            left: labelBox.left,
+            right: labelBox.right,
+            barLeft: barBox.left,
+            barRight: barBox.right,
+          }];
+        });
+      const overlaps: unknown[] = [];
+      for (let leftIndex = 0; leftIndex < labels.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < labels.length; rightIndex += 1) {
+          const left = labels[leftIndex]!;
+          const right = labels[rightIndex]!;
+          if (left.left < right.right - 0.5 && right.left < left.right - 0.5) {
+            overlaps.push({ left: left.id, right: right.id });
+          }
+        }
+      }
+      return { labels, overlaps };
+    });
+
+    expect(report.labels.length).toBeGreaterThan(0);
+    expect(report.labels.every((label) => (
+      label.left >= label.barLeft - 0.5 && label.right <= label.barRight + 0.5
+    ))).toBe(true);
+    expect(report.overlaps, JSON.stringify(report.overlaps, null, 2)).toEqual([]);
+  });
+
   test("coalesces a high-rate Live burst without blocking or growing the DOM", async ({ page }) => {
     await page.goto(`${origin}/__timeline-geometry?burst=1`, { waitUntil: "networkidle" });
     await expect(page.getByRole("heading", { name: "Troupe Timeline" })).toBeVisible();

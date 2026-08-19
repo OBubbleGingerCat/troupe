@@ -196,13 +196,21 @@ function addFallbackScenes(
   events: readonly DiagnosticEvent[],
 ): readonly SceneRecord[] {
   const byId = new Map(scenes.map((scene) => [scene.id, scene]));
-  const starts = new Map<string, number>();
+  const observations = new Map<string, { start: number; end: number }>();
+  let latestSceneId: string | null = null;
+  let latestSceneAt = Number.NEGATIVE_INFINITY;
   const observe = (id: string | null, at: number): void => {
     if (id === null) {
       return;
     }
-    const previous = starts.get(id);
-    starts.set(id, previous === undefined ? at : Math.min(previous, at));
+    const previous = observations.get(id);
+    observations.set(id, previous === undefined
+      ? { start: at, end: at }
+      : { start: Math.min(previous.start, at), end: Math.max(previous.end, at) });
+    if (at >= latestSceneAt) {
+      latestSceneId = id;
+      latestSceneAt = at;
+    }
   };
   for (const cue of cues) {
     observe(cue.sceneId, cue.admitted);
@@ -210,19 +218,29 @@ function addFallbackScenes(
   for (const event of events) {
     observe(scopeId(event.scope, "scene_id"), elapsedSeconds(event.elapsed_ns));
   }
-  for (const [id, start] of starts) {
+  for (const [id, observation] of observations) {
     if (!byId.has(id)) {
       byId.set(id, {
         id,
         label: `Scene ${id}`,
-        start,
-        end: null,
+        start: observation.start,
+        // A missing lifecycle start is partial retained evidence, not proof
+        // that this old Scene remains open forever. Bound it by the last
+        // scoped event until an exact History capture supplies both ends.
+        end: observation.end,
         outcome: null,
         tone: SCENE_TONES[byId.size % SCENE_TONES.length]!,
       });
     }
   }
   return [...byId.values()]
+    .map((scene) => {
+      const observation = observations.get(scene.id);
+      if (scene.end === null && scene.id !== latestSceneId && observation !== undefined) {
+        return { ...scene, end: observation.end };
+      }
+      return scene;
+    })
     .sort((left, right) => left.start - right.start || left.id.localeCompare(right.id))
     .map((scene, index) => ({ ...scene, tone: SCENE_TONES[index % SCENE_TONES.length]! }));
 }
@@ -412,8 +430,11 @@ function buildCues(
     }
   }
   return [...byId.values()].map((cue) => {
-    const admitted = cue.admitted ?? cue.execution ?? liveNow;
-    const execution = cue.execution ?? (cue.end === null ? liveNow + 0.001 : admitted);
+    const lastObserved = cue.lastObserved ?? cue.admitted ?? cue.execution ?? liveNow;
+    const admitted = cue.admitted ?? cue.execution ?? lastObserved;
+    const execution = cue.execution ?? (
+      cue.lifecycleObserved && cue.end === null ? liveNow + 0.001 : lastObserved
+    );
     return {
       id: cue.id,
       label: `Cue ${cue.id}`,
@@ -421,11 +442,11 @@ function buildCues(
       actorId: cue.actorId,
       admitted,
       execution,
-      end: cue.end,
+      end: cue.lifecycleObserved ? cue.end : lastObserved,
       outcome: cue.outcome,
       events: [],
       lifecycleObserved: cue.lifecycleObserved,
-      lastObserved: cue.lastObserved ?? admitted,
+      lastObserved,
     };
   }).sort((left, right) => left.admitted - right.admitted);
 }
