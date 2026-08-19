@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import {
   type LiveDiagnosticsController,
@@ -149,7 +149,19 @@ export function App({
   }
 
   const name = timelineName(live, productionName);
-  const data = selectProductionTimelineData(state, live, { productionName: name });
+  const data = useMemo(
+    () => selectProductionTimelineData(state, live, { productionName: name }),
+    [
+      name,
+      live.connection,
+      live.outcome,
+      state.cursor.committed_watermark,
+      state.live,
+      state.pause.frozen_live,
+      state.pause.paused,
+      state.windows.visible,
+    ],
+  );
   const dispatch = (action: DiagnosticStateAction): void => controller.dispatch(action);
   const togglePause = (): void => {
     dispatch({ type: state.pause.paused ? "resume" : "pause" });

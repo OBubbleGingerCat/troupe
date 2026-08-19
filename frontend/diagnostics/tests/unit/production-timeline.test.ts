@@ -117,6 +117,43 @@ describe("production Actor timeline projection", () => {
     expect(data.scenes.some((scene) => scene.id === `scene-${capacity}`)).toBe(false);
   });
 
+  it("deduplicates overlapping bootstrap and hot event windows", () => {
+    const events = [1, 2, 3].map((sequence) => event(
+      sequence,
+      sequence,
+      scope(`scene-${sequence}`),
+      {
+        kind: "custom_instant_occurred",
+        name: "example.window_overlap",
+        containing_span_id: null,
+        severity: "debug",
+        attributes: {},
+      },
+    ));
+    let state = ingest(events);
+    state = {
+      ...state,
+      windows: activateWindow(state.windows, createEventWindow({
+        id: "overlapping-bootstrap-window",
+        run_id: RUN_ID,
+        start_ns: events[0]!.elapsed_ns,
+        end_ns: events[1]!.elapsed_ns,
+        captured_through: events[1]!.sequence,
+        events: events.slice(0, 2),
+      })),
+    };
+
+    const data = selectProductionTimelineData(
+      state,
+      { connection: "connected", outcome: "running" },
+    );
+    expect(data.scenes.map((scene) => scene.id)).toEqual([
+      "scene-1",
+      "scene-2",
+      "scene-3",
+    ]);
+  });
+
   it("keeps a fixed-width Live scale before and after the window starts rolling", () => {
     expect(liveTimelineRange(0, 60)).toEqual({ start: -60, end: 0 });
     expect(liveTimelineRange(10, 60)).toEqual({ start: -50, end: 10 });

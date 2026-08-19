@@ -14,8 +14,8 @@ pub struct GeneratedRepresentation {
     pub bytes: &'static [u8],
 }
 
-pub const BUILD_SHA256: &str = "ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92";
-pub const INDEX_HTML_SHA256: &str = "10ba8494c7f12070e96aaadcbbcd37dec6d8e89163af228d7172b23a2f97ebc3";
+pub const BUILD_SHA256: &str = "c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1";
+pub const INDEX_HTML_SHA256: &str = "d74cb9b3d7eecc8af49ed9e59913ebf95c668538ceb51246352eaeafb137f562";
 pub const INDEX_HTML_MIME: &str = "text/html; charset=utf-8";
 pub const INDEX_HTML_CACHE_CONTROL: &str = "no-cache";
 pub static INDEX_HTML: &[u8] = include_bytes!("index.html");
@@ -25,44 +25,44 @@ pub static THIRD_PARTY_NOTICES: &[u8] = include_bytes!("third-party-notices.txt"
 
 pub static REPRESENTATIONS: &[GeneratedRepresentation] = &[
     GeneratedRepresentation {
-        file_name: "diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js.raw",
-        url: "./assets/diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js",
+        file_name: "diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js.raw",
+        url: "./assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js",
         kind: "js",
         encoding: "raw",
         content_encoding: None,
         mime: "text/javascript; charset=utf-8",
         cache_control: "public, max-age=31536000, immutable",
-        sha256: "22b430ebd90899656a72f79a98b17fdcbcf7e6b7908ba3e383cd4edf012d2230",
-        bytes_len: 148323,
-        bytes: include_bytes!("diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js.raw"),
+        sha256: "b2a04c369f800b2725ef54685893475872078b15e454c5debf463376bd3bac33",
+        bytes_len: 148636,
+        bytes: include_bytes!("diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js.raw"),
     },
     GeneratedRepresentation {
-        file_name: "diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js.gz",
-        url: "./assets/diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js",
+        file_name: "diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js.gz",
+        url: "./assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js",
         kind: "js",
         encoding: "gzip",
         content_encoding: Some("gzip"),
         mime: "text/javascript; charset=utf-8",
         cache_control: "public, max-age=31536000, immutable",
-        sha256: "526d465adf22a2a87cafe16479a1d71ebf765b2e600408508bd1ec995b76e920",
-        bytes_len: 42974,
-        bytes: include_bytes!("diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js.gz"),
+        sha256: "6997acebca05cb98f9a0de3958847e052a6cab57be378516672b7853e511082b",
+        bytes_len: 43115,
+        bytes: include_bytes!("diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js.gz"),
     },
     GeneratedRepresentation {
-        file_name: "diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js.br",
-        url: "./assets/diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js",
+        file_name: "diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js.br",
+        url: "./assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js",
         kind: "js",
         encoding: "br",
         content_encoding: Some("br"),
         mime: "text/javascript; charset=utf-8",
         cache_control: "public, max-age=31536000, immutable",
-        sha256: "971a7d8274c35915d3b3e5090d7a3bd4c2b90eda50628c471e55f35a1f7ba843",
-        bytes_len: 37721,
-        bytes: include_bytes!("diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.js.br"),
+        sha256: "da862d418dea628762be20f43578ca10d148dc3fb54f910fa49bf3f36325e81b",
+        bytes_len: 37813,
+        bytes: include_bytes!("diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js.br"),
     },
     GeneratedRepresentation {
-        file_name: "diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css.raw",
-        url: "./assets/diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css",
+        file_name: "diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css.raw",
+        url: "./assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css",
         kind: "css",
         encoding: "raw",
         content_encoding: None,
@@ -70,11 +70,11 @@ pub static REPRESENTATIONS: &[GeneratedRepresentation] = &[
         cache_control: "public, max-age=31536000, immutable",
         sha256: "c42aef5b7f3dcfce64996ec31b6f51c0a94ba0e70f9f1eb85bc35938acb9ceaf",
         bytes_len: 16712,
-        bytes: include_bytes!("diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css.raw"),
+        bytes: include_bytes!("diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css.raw"),
     },
     GeneratedRepresentation {
-        file_name: "diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css.gz",
-        url: "./assets/diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css",
+        file_name: "diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css.gz",
+        url: "./assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css",
         kind: "css",
         encoding: "gzip",
         content_encoding: Some("gzip"),
@@ -82,11 +82,11 @@ pub static REPRESENTATIONS: &[GeneratedRepresentation] = &[
         cache_control: "public, max-age=31536000, immutable",
         sha256: "e62ff76f5f0c37690c8da2e35c1551d8ebe882539795268006ec230da97ce249",
         bytes_len: 4237,
-        bytes: include_bytes!("diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css.gz"),
+        bytes: include_bytes!("diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css.gz"),
     },
     GeneratedRepresentation {
-        file_name: "diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css.br",
-        url: "./assets/diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css",
+        file_name: "diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css.br",
+        url: "./assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css",
         kind: "css",
         encoding: "br",
         content_encoding: Some("br"),
@@ -94,6 +94,6 @@ pub static REPRESENTATIONS: &[GeneratedRepresentation] = &[
         cache_control: "public, max-age=31536000, immutable",
         sha256: "be87d1cf5762610ab4e358880e4e8f9d3a56a26577373c0ca2e386ee5b1d3673",
         bytes_len: 3741,
-        bytes: include_bytes!("diagnostics-ad28bf5dd07946107f05a45193731b4e9354e8ce79dea0c94376669de3ef3f92.css.br"),
+        bytes: include_bytes!("diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css.br"),
     },
 ];

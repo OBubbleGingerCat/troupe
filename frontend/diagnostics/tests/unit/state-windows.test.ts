@@ -102,6 +102,8 @@ describe("bounded diagnostic windows", () => {
     expect(state.pause.paused).toBe(true);
     expect(state.pause.unseen_count).toBe(BigInt(LIVE_EDGE_EVENT_CAPACITY + 5));
     expect(state.live.events).toHaveLength(LIVE_EDGE_EVENT_CAPACITY);
+    expect(state.live.events[0]?.sequence).toBe("6");
+    expect(state.live.events.at(-1)?.sequence).toBe(String(LIVE_EDGE_EVENT_CAPACITY + 5));
     expect(state.live.dropped_through).toBe("5");
 
     const resumed = reduceDiagnosticState(state, { type: "resume" });

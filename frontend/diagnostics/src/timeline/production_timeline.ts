@@ -3,7 +3,7 @@ import type {
   DiagnosticScope,
   SpanStartedEvent,
 } from "../protocol/event.ts";
-import type { U64String } from "../protocol/decimal.ts";
+import { compareU64, type U64String } from "../protocol/decimal.ts";
 import {
   VISIBLE_WINDOW_EVENT_CAPACITY,
   type DiagnosticState,
@@ -140,19 +140,52 @@ function mergeTimelineSpans(
 
 function unionEvents(state: DiagnosticState): readonly DiagnosticEvent[] {
   const edge = presentedLiveEdge(state);
-  const bySequence = new Map<string, DiagnosticEvent>();
-  for (const event of state.windows.visible?.events ?? []) {
-    bySequence.set(event.sequence, event);
+  const visible = state.windows.visible?.events ?? [];
+  const hot = edge.events;
+  if (visible.length === 0) {
+    return hot.length <= VISIBLE_WINDOW_EVENT_CAPACITY
+      ? hot
+      : hot.slice(-VISIBLE_WINDOW_EVENT_CAPACITY);
   }
-  for (const event of edge.events) {
-    bySequence.set(event.sequence, event);
+  if (hot.length === 0) {
+    return visible.length <= VISIBLE_WINDOW_EVENT_CAPACITY
+      ? visible
+      : visible.slice(-VISIBLE_WINDOW_EVENT_CAPACITY);
   }
-  const ordered = [...bySequence.values()].sort((left, right) => {
-    const a = BigInt(left.sequence);
-    const b = BigInt(right.sequence);
-    return a < b ? -1 : a > b ? 1 : 0;
-  });
-  return ordered.slice(-VISIBLE_WINDOW_EVENT_CAPACITY);
+
+  // Both sources are sequence ordered. Merge them directly instead of
+  // allocating a Map and sorting up to 8,192 events on every presentation.
+  const ordered: DiagnosticEvent[] = [];
+  let visibleIndex = 0;
+  let hotIndex = 0;
+  while (visibleIndex < visible.length || hotIndex < hot.length) {
+    const fromVisible = visible[visibleIndex];
+    const fromHot = hot[hotIndex];
+    if (fromVisible === undefined) {
+      ordered.push(fromHot!);
+      hotIndex += 1;
+    } else if (fromHot === undefined) {
+      ordered.push(fromVisible);
+      visibleIndex += 1;
+    } else {
+      const order = compareU64(fromVisible.sequence, fromHot.sequence);
+      if (order < 0) {
+        ordered.push(fromVisible);
+        visibleIndex += 1;
+      } else {
+        // The hot edge is authoritative for a sequence present in both
+        // windows because it contains the current projection context.
+        ordered.push(fromHot);
+        hotIndex += 1;
+        if (order === 0) {
+          visibleIndex += 1;
+        }
+      }
+    }
+  }
+  return ordered.length <= VISIBLE_WINDOW_EVENT_CAPACITY
+    ? ordered
+    : ordered.slice(-VISIBLE_WINDOW_EVENT_CAPACITY);
 }
 
 function scopeId(scope: DiagnosticScope, field: "scene_id" | "actor_id" | "cue_id" | "act_id"): string | null {
@@ -520,6 +553,7 @@ function buildCustomEvents(events: readonly DiagnosticEvent[]): readonly CustomE
 
 function buildSystemEvents(
   state: DiagnosticState,
+  events: readonly DiagnosticEvent[],
   cues: readonly CueRecord[],
 ): ReadonlyMap<string, readonly SystemEventRecord[]> {
   const edge = presentedLiveEdge(state);
@@ -561,7 +595,7 @@ function buildSystemEvents(
       outcome: message.completion === null ? null : "completed",
     });
   }
-  for (const event of unionEvents(state)) {
+  for (const event of events) {
     if (event.kind !== "instant_occurred" || !event.instant_kind.startsWith("result.")) {
       continue;
     }
@@ -792,6 +826,6 @@ export function selectProductionTimelineData(
       connectionLabel: live.connection === "archive" ? "Archive" : live.connection,
       outcomeLabel: live.outcome ?? "running",
     },
-    (cues) => buildSystemEvents(state, cues),
+    (cues) => buildSystemEvents(state, events, cues),
   );
 }

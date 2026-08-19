@@ -84,13 +84,16 @@ export function appendLiveEvent(
   event: DiagnosticEvent,
   projection: LiveEdgeState["projection"],
 ): LiveEdgeState {
-  const events = [...state.events, event];
   let droppedThrough = state.dropped_through;
-  while (events.length > LIVE_EDGE_EVENT_CAPACITY) {
-    const dropped = events.shift();
-    if (dropped !== undefined) {
-      droppedThrough = dropped.sequence;
-    }
+  let events: DiagnosticEvent[];
+  if (state.events.length >= LIVE_EDGE_EVENT_CAPACITY) {
+    // Keep the immutable edge bounded with one copy. Repeated shift() calls
+    // turn every high-rate event into an O(capacity) series of moves.
+    droppedThrough = state.events[0]?.sequence ?? droppedThrough;
+    events = state.events.slice(1);
+    events.push(event);
+  } else {
+    events = [...state.events, event];
   }
   return {
     ...state,
