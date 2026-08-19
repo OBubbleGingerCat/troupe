@@ -144,24 +144,20 @@ export function App({
     setHistory(EMPTY_HISTORY);
   }, [runId]);
 
-  if (state === null || live.security_scope !== "trusted_network" || live.outcome === null) {
-    return <StaticSurface live={live} />;
-  }
-
   const name = timelineName(live, productionName);
   const data = useMemo(
-    () => selectProductionTimelineData(state, live, { productionName: name }),
+    () => state === null ? null : selectProductionTimelineData(state, live, { productionName: name }),
     [
       name,
       live.connection,
       live.outcome,
-      state.cursor.committed_watermark,
-      state.live,
-      state.pause.frozen_live,
-      state.pause.paused,
-      state.windows.visible,
+      state,
     ],
   );
+
+  if (state === null || data === null || live.security_scope !== "trusted_network" || live.outcome === null) {
+    return <StaticSurface live={live} />;
+  }
   const dispatch = (action: DiagnosticStateAction): void => controller.dispatch(action);
   const togglePause = (): void => {
     dispatch({ type: state.pause.paused ? "resume" : "pause" });

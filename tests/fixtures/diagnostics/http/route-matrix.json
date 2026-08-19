@@ -11,8 +11,8 @@
         {"path": "/api/v1/identity", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/snapshot", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/status", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js", "methods": ["GET", "HEAD"]}
+        {"path": "/assets/diagnostics-aba00e4dad96e131639cec3d0ea0f13bbf5ef32e10cccdef72f021053523cb67.css", "methods": ["GET", "HEAD"]},
+        {"path": "/assets/diagnostics-aba00e4dad96e131639cec3d0ea0f13bbf5ef32e10cccdef72f021053523cb67.js", "methods": ["GET", "HEAD"]}
       ]
     },
     {
@@ -25,8 +25,8 @@
         {"path": "/api/v1/identity", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/snapshot", "methods": ["GET", "HEAD"]},
         {"path": "/api/v1/status", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.css", "methods": ["GET", "HEAD"]},
-        {"path": "/assets/diagnostics-c13d3ec1761dd4ba645ebd06f7aa0ca9189dbf8cee8060cbc2db89597c68f6b1.js", "methods": ["GET", "HEAD"]}
+        {"path": "/assets/diagnostics-aba00e4dad96e131639cec3d0ea0f13bbf5ef32e10cccdef72f021053523cb67.css", "methods": ["GET", "HEAD"]},
+        {"path": "/assets/diagnostics-aba00e4dad96e131639cec3d0ea0f13bbf5ef32e10cccdef72f021053523cb67.js", "methods": ["GET", "HEAD"]}
       ]
     }
   ],
