@@ -1,0 +1,12 @@
+[package]
+name = "troupe-diagnostics-perfetto"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+futures = "=0.3.33"
+prost = { version = "=0.14.4" }
+tokio = { version = "=1.53.1", features = ["fs", "io-util"] }
+troupe-diagnostics-core = { path = "../troupe-diagnostics-core" }
+troupe-diagnostics-runtime = { path = "../troupe-diagnostics-runtime" }

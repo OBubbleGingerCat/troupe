@@ -1,0 +1,79 @@
+production: /srv/troupe/production
+policy: max_total_bytes
+policy_value: 350
+policy_satisfied: true
+operation_error: null
+run_count: 5
+total_bytes: 750
+selected_bytes: 500
+remaining_bytes: 250
+
+run 1:
+  run_id: 00000000-0000-4000-8000-000000000001
+  path: /srv/troupe/production/.troupe/diagnostics/runs/00000000-0000-4000-8000-000000000001
+  archive_state: completed
+  bytes: 300
+  started_at: 2026-08-10T00:00:00Z
+  ended_at: 2026-08-11T00:00:00Z
+  clean_shutdown: true
+  selected: true
+  selection_reason: total_bytes_over_budget
+  protected_reason: null
+  skipped_reason: null
+  detail: null
+
+run 2:
+  run_id: 00000000-0000-4000-8000-000000000002
+  path: /srv/troupe/production/.troupe/diagnostics/runs/00000000-0000-4000-8000-000000000002
+  archive_state: completed
+  bytes: 200
+  started_at: 2026-08-11T00:00:00Z
+  ended_at: 2026-08-12T00:00:00Z
+  clean_shutdown: true
+  selected: true
+  selection_reason: total_bytes_over_budget
+  protected_reason: null
+  skipped_reason: null
+  detail: null
+
+run 3:
+  run_id: 00000000-0000-4000-8000-000000000003
+  path: /srv/troupe/production/.troupe/diagnostics/runs/00000000-0000-4000-8000-000000000003
+  archive_state: completed
+  bytes: 100
+  started_at: 2026-08-12T00:00:00Z
+  ended_at: 2026-08-13T00:00:00Z
+  clean_shutdown: true
+  selected: false
+  selection_reason: null
+  protected_reason: null
+  skipped_reason: within_total_byte_budget
+  detail: null
+
+run 4:
+  run_id: 00000000-0000-4000-8000-000000000004
+  path: /srv/troupe/production/.troupe/diagnostics/runs/00000000-0000-4000-8000-000000000004
+  archive_state: incomplete
+  bytes: 50
+  started_at: 2026-08-14T00:00:00Z
+  ended_at: null
+  clean_shutdown: false
+  selected: false
+  selection_reason: null
+  protected_reason: null
+  skipped_reason: incomplete_archive
+  detail: null
+
+run 5:
+  run_id: 00000000-0000-4000-8000-000000000005
+  path: /srv/troupe/production/.troupe/diagnostics/runs/00000000-0000-4000-8000-000000000005
+  archive_state: unknown
+  bytes: 100
+  started_at: null
+  ended_at: null
+  clean_shutdown: null
+  selected: false
+  selection_reason: null
+  protected_reason: active
+  skipped_reason: null
+  detail: null

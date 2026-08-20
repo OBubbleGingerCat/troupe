@@ -6,6 +6,7 @@ import gc
 import importlib
 import traceback
 import weakref
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -56,6 +57,33 @@ def _assert_failure(error: BaseException, phases: tuple[str, ...]) -> tuple[Any,
     assert tuple(failure.phase for failure in failures) == phases
     assert all(type(failure) is native.PhaseFailure for failure in failures)
     return failures
+
+
+def test_constructor_failure_remains_a_load_failure_before_lifecycle(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "constructor_failure_production"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "production.py").write_text(
+        "from troupe import Production as BaseProduction\n"
+        "class ConstructorBoom(Exception):\n"
+        "    pass\n"
+        "class Production(BaseProduction):\n"
+        "    def __init__(self, args):\n"
+        "        raise ConstructorBoom('constructor failed')\n",
+        encoding="utf-8",
+    )
+
+    native = _native()
+    with pytest.raises(native.ProductionLoadError) as captured:
+        native._load_production(str(package), [])
+
+    error = captured.value
+    assert error.reason == "construction-failed"
+    assert not isinstance(error, native.ProductionFailed)
+    assert type(error.__cause__).__name__ == "ConstructorBoom"
+    assert str(error.__cause__) == "constructor failed"
 
 
 def test_start_failure_is_the_only_phase_and_skips_stop() -> None:

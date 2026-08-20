@@ -6,6 +6,7 @@ import os
 import re
 import selectors
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = ROOT / "examples"
 TIMEOUT = 5.0
+READY_PREFIX = b"troupe: diagnostic ready "
 EXAMPLE_NAMES = (
     "hello_actor",
     "repeating_scenes",
@@ -102,7 +104,33 @@ def _collect_output(
     return bytes(buffers[stdout_fd]).decode().splitlines(), bytes(buffers[stderr_fd])
 
 
+def _without_ready(stderr: bytes, package: Path) -> bytes:
+    ready, separator, remaining = stderr.partition(b"\n")
+    assert separator == b"\n"
+    assert ready.startswith(READY_PREFIX)
+    assert READY_PREFIX not in remaining
+    locator = json.loads(ready.removeprefix(READY_PREFIX))
+    assert set(locator) == {
+        "locator_schema_version",
+        "run_id",
+        "local_url",
+        "advertise_url",
+        "archive_directory",
+        "security_scope",
+    }
+    assert locator["locator_schema_version"] == 1
+    assert type(locator["run_id"]) is str and locator["run_id"]
+    assert locator["local_url"].startswith("http://127.0.0.1:")
+    assert locator["advertise_url"] is None
+    archive = Path(locator["archive_directory"])
+    assert archive.is_absolute()
+    assert archive.is_relative_to((package / ".troupe").resolve())
+    assert locator["security_scope"] == "trusted_network"
+    return remaining
+
+
 def _run_example(
+    tmp_path: Path,
     example: str,
     *,
     readiness_lines: int = 1,
@@ -120,10 +148,17 @@ def _run_example(
         if command[:3] == ["troupe", "--production", f"examples/{example}"]
     ]
     assert len(matching) == 1
+    package = tmp_path / "examples" / example
+    package.parent.mkdir()
+    shutil.copytree(
+        EXAMPLES / example,
+        package,
+        ignore=shutil.ignore_patterns(".troupe", "__pycache__"),
+    )
     command = [str(console), *matching[0][1:]]
     process = subprocess.Popen(
         command,
-        cwd=ROOT,
+        cwd=tmp_path,
         env=_environment(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -136,7 +171,7 @@ def _run_example(
             readiness_lines=readiness_lines,
         )
         assert process.returncode == 0, stderr.decode(errors="replace")
-        assert stderr == b""
+        assert _without_ready(stderr, package) == b""
         return lines
     finally:
         if process.poll() is None:
@@ -190,6 +225,26 @@ def test_examples_are_documented_public_production_packages() -> None:
         assert (package / "__init__.py").read_bytes() == b""
         assert (package / "production.py").is_file()
         assert f"troupe --production examples/{name}" in examples_readme
+
+
+def test_diagnostics_complex_example_uses_a_sustainable_default_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.syspath_prepend(str(ROOT))
+    from examples.diagnostics.production import (
+        DEFAULT_COMPLEX_INTERVAL_SECONDS,
+        DEFAULT_INTERVAL_SECONDS,
+        parse_interval_seconds,
+    )
+
+    assert parse_interval_seconds(
+        [],
+        default=DEFAULT_COMPLEX_INTERVAL_SECONDS,
+    ) == 30.0
+    assert parse_interval_seconds([], default=DEFAULT_INTERVAL_SECONDS) == 30.0
+    examples_readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
+    assert "-- complex\n" in examples_readme
+    assert "30-second Scene interval" in examples_readme
 
 
 def test_mixed_repository_repair_live_example_and_oracle_are_wired() -> None:
@@ -337,19 +392,19 @@ def test_mixed_oracle_cleans_descendants_before_reporting_settings_drift(
             os.kill(pid, signal.SIGKILL)
 
 
-def test_hello_actor_runs_through_the_literal_console() -> None:
-    assert _run_example("hello_actor") == ["Hello, Ada!"]
+def test_hello_actor_runs_through_the_literal_console(tmp_path: Path) -> None:
+    assert _run_example(tmp_path, "hello_actor") == ["Hello, Ada!"]
 
 
-def test_repeating_scenes_run_as_distinct_scene_calls() -> None:
-    lines = _run_example("repeating_scenes", readiness_lines=3)
+def test_repeating_scenes_run_as_distinct_scene_calls(tmp_path: Path) -> None:
+    lines = _run_example(tmp_path, "repeating_scenes", readiness_lines=3)
 
     assert len(lines) >= 3
     assert lines == [f"scene:{number}" for number in range(1, len(lines) + 1)]
 
 
-def test_actor_pipeline_reports_query_and_provenance() -> None:
-    lines = _run_example("actor_pipeline")
+def test_actor_pipeline_reports_query_and_provenance(tmp_path: Path) -> None:
+    lines = _run_example(tmp_path, "actor_pipeline")
     assert len(lines) == 1
     payload = json.loads(lines[0])
 
@@ -361,8 +416,8 @@ def test_actor_pipeline_reports_query_and_provenance() -> None:
     }
 
 
-def test_cooperative_workers_show_cross_actor_progress_and_fifo() -> None:
-    lines = _run_example("cooperative_workers")
+def test_cooperative_workers_show_cross_actor_progress_and_fifo(tmp_path: Path) -> None:
+    lines = _run_example(tmp_path, "cooperative_workers")
     assert len(lines) == 1
     assert json.loads(lines[0]) == {
         "submitted": ["left:2", "left:3"],
@@ -379,8 +434,8 @@ def test_cooperative_workers_show_cross_actor_progress_and_fifo() -> None:
     }
 
 
-def test_cancellation_cleanup_finishes_before_stop() -> None:
-    assert _run_example("cancellation_cleanup") == [
+def test_cancellation_cleanup_finishes_before_stop(tmp_path: Path) -> None:
+    assert _run_example(tmp_path, "cancellation_cleanup") == [
         "worker:start",
         "worker:cleanup",
         "scene:cleanup",

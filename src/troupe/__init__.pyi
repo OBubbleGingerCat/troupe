@@ -8,6 +8,7 @@ from typing import Any, Literal, NoReturn, TypeVar, final, overload
 from typing_extensions import disjoint_base
 
 from . import act_schema as act_schema
+from . import diagnostics as diagnostics
 
 _EffectT = TypeVar("_EffectT", bound="Effect")
 _JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]
@@ -72,6 +73,7 @@ class Actor:
         *,
         script: str,
         output_schema: dict[str, act_schema.FieldSpec],
+        diagnostic_sink: diagnostics.DiagnosticSink | None = None,
     ) -> dict[str, _JsonValue]:
         """Return one validated JSON object from this Actor's persistent agent session."""
     async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...
@@ -143,4 +145,5 @@ __all__ = [
     "EffectContextError",
     "Production",
     "act_schema",
+    "diagnostics",
 ]

@@ -1,0 +1,640 @@
+from __future__ import annotations
+
+from abc import ABC as _ABC, abstractmethod as _abstractmethod
+from collections.abc import Awaitable as _Awaitable, Mapping as _Mapping
+from contextlib import AbstractContextManager as _AbstractContextManager
+from dataclasses import dataclass as _dataclass
+from decimal import Decimal as _Decimal
+from typing import ClassVar as _ClassVar, Literal as _Literal, TypeAlias as _TypeAlias, final as _final
+from uuid import UUID as _UUID
+
+_SpanKind: _TypeAlias = _Literal[
+    "run.lifecycle",
+    "production.path_resolution",
+    "production.load",
+    "production.construct",
+    "production.start",
+    "production.stop",
+    "production.shutdown",
+    "scene.lifecycle",
+    "scene.drain",
+    "scene.cleanup",
+    "actor.handle_lifetime",
+    "cue.mailbox_wait",
+    "cue.execution",
+    "effect.lifecycle",
+    "agent.session.opening",
+    "agent.session.lifecycle",
+    "agent.session.closing",
+    "act.lifecycle",
+    "act.caller",
+    "agent.turn",
+    "agent.thinking",
+    "tool.call",
+]
+_InstantKind: _TypeAlias = _Literal[
+    "actor.cast",
+    "cue.admitted",
+    "cue.enqueued",
+    "cue.dispatched",
+    "cue.cancel_requested",
+    "effect.created",
+    "effect.returned",
+    "effect.consumed",
+    "agent.session.ready",
+    "agent.session.broken",
+    "act.admitted",
+    "act.waiting_ready",
+    "act.prompt_submitted",
+    "act.cancel_requested",
+    "act.supervisor_handoff",
+    "agent.turn.activity",
+    "agent.turn.terminal",
+    "agent.turn.settled",
+    "tool.updated",
+    "result.submitted",
+    "result.rejected",
+    "result.repair_requested",
+    "result.accepted",
+    "result.missing",
+    "diagnostic.component_failed",
+]
+_CounterKind: _TypeAlias = _Literal[
+    "actor.mailbox_depth",
+    "cue.active",
+    "agent.turn.active",
+    "result.validation_rejections",
+    "diagnostic.dropped_events",
+]
+_EventKind: _TypeAlias = _Literal[
+    "span_started",
+    "span_finished",
+    "instant_occurred",
+    "counter_sampled",
+    "agent_message_delta",
+    "agent_message_completed",
+    "agent_plan_snapshot",
+    "context_usage_sampled",
+    "act_token_usage_finalized",
+    "observation_gap",
+    "custom_span_started",
+    "custom_span_finished",
+    "custom_instant_occurred",
+    "custom_counter_sampled",
+]
+_SpanOutcome: _TypeAlias = _Literal["completed", "cancelled", "failed"]
+_CustomSeverity: _TypeAlias = _Literal["debug", "info", "warning", "error"]
+_CausalRelation: _TypeAlias = _Literal[
+    "dispatch", "return", "handoff", "retry", "follows_from"
+]
+_PlanPriority: _TypeAlias = _Literal["high", "medium", "low"]
+_PlanStatus: _TypeAlias = _Literal["pending", "in_progress", "completed"]
+_SampleOrigin: _TypeAlias = _Literal["provider", "carried_forward"]
+_UsageAvailability: _TypeAlias = _Literal["available", "partial", "unavailable"]
+_UsageSource: _TypeAlias = _Literal["acp.prompt_response.usage"]
+_UsageUnavailableReason: _TypeAlias = _Literal[
+    "prompt_not_submitted",
+    "source_unsupported",
+    "usage_not_reported",
+    "turn_settlement_unknown",
+]
+_ToolKind: _TypeAlias = _Literal[
+    "read",
+    "edit",
+    "delete",
+    "move",
+    "search",
+    "execute",
+    "think",
+    "fetch",
+    "switch_mode",
+    "other",
+]
+_ToolStatus: _TypeAlias = _Literal["pending", "in_progress", "completed", "failed"]
+_SinkState: _TypeAlias = _Literal["UNBOUND", "BOUND", "SEALED", "CLOSED"]
+_SinkStateErrorCode: _TypeAlias = _Literal["uninitialized", "unbound", "already_bound"]
+_CallbackFailureKind: _TypeAlias = _Literal["raised", "invalid_return"]
+_SinkCloseReason: _TypeAlias = _Literal[
+    "act_finished", "callback_failed", "delivery_overflow", "runtime_shutdown"
+]
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class FrozenJsonArray:
+    items: tuple[FrozenJsonValue, ...]
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class FrozenJsonObject:
+    entries: tuple[tuple[str, FrozenJsonValue], ...]
+    def __post_init__(self) -> None: ...
+
+FrozenJsonValue: _TypeAlias = (
+    None | bool | int | _Decimal | str | FrozenJsonArray | FrozenJsonObject
+)
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticToolLocation:
+    path: str
+    line: int | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticToolInput:
+    raw_input: FrozenJsonValue | None
+    truncated: bool
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticToolOutput:
+    raw_output: FrozenJsonValue | None
+    content: tuple[FrozenJsonValue, ...]
+    locations: tuple[DiagnosticToolLocation, ...]
+    truncated: bool
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticScope:
+    scene_id: str | None = None
+    actor_id: str | None = None
+    cue_id: str | None = None
+    effect_id: str | None = None
+    act_id: str | None = None
+    tool_call_id: str | None = None
+    session_generation: int | None = None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class CausalLink:
+    source_sequence: int
+    relation: _CausalRelation
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class EmptyDetail: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ProductionPathResolutionDetail:
+    production_root: str
+    package: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ProductionLoadDetail:
+    package: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ProductionConstructDetail:
+    package: str
+    class_name: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ActorDetail:
+    display_name: str
+    actor_type: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class EffectDetail:
+    effect_type: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSessionDetail:
+    provider: str
+    effective_model: str | None
+    effective_effort: str | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSessionBrokenDetail:
+    provider: str
+    effective_model: str | None
+    effective_effort: str | None
+    error_code: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class AgentTurnTerminalDetail:
+    error_code: str | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallDetail:
+    title: str
+    tool_kind: _ToolKind
+    status: _ToolStatus
+    error_code: str | None
+    captured_input: DiagnosticToolInput | None = None
+    captured_output: DiagnosticToolOutput | None = None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ResultIssue:
+    code: str
+    path: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class ResultTransitionDetail:
+    issue: ResultIssue | None
+    error_code: str | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticComponentFailedDetail:
+    component: _Literal["sink"]
+    component_id: str
+    stage: _Literal["enqueue", "callback"]
+    error_code: _Literal[
+        "delivery_queue_unavailable", "callback_raised", "callback_invalid_return"
+    ]
+    related_event_sequence: int | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class PlanEntry:
+    content: str
+    priority: _PlanPriority
+    status: _PlanStatus
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class AffectedElapsedInterval:
+    start_ns: int
+    end_ns: int
+    def __post_init__(self) -> None: ...
+
+SpanStartDetail: _TypeAlias = (
+    EmptyDetail
+    | ProductionPathResolutionDetail
+    | ProductionLoadDetail
+    | ProductionConstructDetail
+    | ActorDetail
+    | EffectDetail
+    | AgentSessionDetail
+    | ToolCallDetail
+)
+InstantDetail: _TypeAlias = (
+    EmptyDetail
+    | ActorDetail
+    | EffectDetail
+    | AgentSessionDetail
+    | AgentSessionBrokenDetail
+    | AgentTurnTerminalDetail
+    | ToolCallDetail
+    | ResultTransitionDetail
+    | DiagnosticComponentFailedDetail
+)
+DiagnosticScalar: _TypeAlias = None | bool | int | float | _Decimal | str
+DiagnosticAttributeValue: _TypeAlias = (
+    DiagnosticScalar | list[DiagnosticScalar] | tuple[DiagnosticScalar, ...]
+)
+DiagnosticDimension: _TypeAlias = bool | int | float | _Decimal | str
+_ProjectedDiagnosticScalar: _TypeAlias = None | bool | int | _Decimal | str
+_ProjectedDiagnosticAttributeValue: _TypeAlias = (
+    _ProjectedDiagnosticScalar | tuple[_ProjectedDiagnosticScalar, ...]
+)
+DiagnosticAttributes: _TypeAlias = tuple[tuple[str, _ProjectedDiagnosticAttributeValue], ...]
+DiagnosticDimensions: _TypeAlias = tuple[tuple[str, bool | int | _Decimal | str], ...]
+
+@_dataclass(frozen=True, kw_only=True)
+class _EventBase:
+    schema_version: _Literal[1]
+    run_id: _UUID
+    sequence: int
+    elapsed_ns: int
+    scope: DiagnosticScope
+    caused_by: tuple[CausalLink, ...]
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class SpanStarted(_EventBase):
+    kind: _ClassVar[_Literal["span_started"]]
+    span_kind: _SpanKind
+    detail: SpanStartDetail
+    parent_span_id: int | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class SpanFinished(_EventBase):
+    kind: _ClassVar[_Literal["span_finished"]]
+    span_id: int
+    outcome: _SpanOutcome
+    error_code: str | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class InstantOccurred(_EventBase):
+    kind: _ClassVar[_Literal["instant_occurred"]]
+    instant_kind: _InstantKind
+    detail: InstantDetail
+    containing_span_id: int | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class CounterSampled(_EventBase):
+    kind: _ClassVar[_Literal["counter_sampled"]]
+    counter_kind: _CounterKind
+    value: int
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class AgentMessageDelta(_EventBase):
+    kind: _ClassVar[_Literal["agent_message_delta"]]
+    message_id: str
+    source_message_id: str | None
+    text_delta: str
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class AgentMessageCompleted(_EventBase):
+    kind: _ClassVar[_Literal["agent_message_completed"]]
+    message_id: str
+    utf8_bytes: int
+    unicode_scalar_count: int
+    truncated: bool
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class AgentPlanSnapshot(_EventBase):
+    kind: _ClassVar[_Literal["agent_plan_snapshot"]]
+    entries: tuple[PlanEntry, ...]
+    truncated: bool
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class ContextUsageSampled(_EventBase):
+    kind: _ClassVar[_Literal["context_usage_sampled"]]
+    context_used_tokens: int | None
+    context_window_tokens: int | None
+    cumulative_cost_amount: _Decimal | None
+    cumulative_cost_currency: str | None
+    sample_origin: _SampleOrigin
+    observed_elapsed_ns: int | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class ActTokenUsageFinalized(_EventBase):
+    kind: _ClassVar[_Literal["act_token_usage_finalized"]]
+    availability: _UsageAvailability
+    source: _UsageSource | None
+    unavailable_reason: _UsageUnavailableReason | None
+    provider_total_tokens: int | None
+    input_tokens: int | None
+    output_tokens: int | None
+    thought_tokens: int | None
+    cached_read_tokens: int | None
+    cached_write_tokens: int | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class ObservationGap(_EventBase):
+    kind: _ClassVar[_Literal["observation_gap"]]
+    producer: str
+    component: str | None
+    reason: str
+    dropped_count: int | None
+    affected_elapsed: AffectedElapsedInterval | None
+    affected_kind: _EventKind | None
+    affected_scope: DiagnosticScope | None
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class CustomSpanStarted(_EventBase):
+    kind: _ClassVar[_Literal["custom_span_started"]]
+    name: str
+    parent_span_id: int | None
+    attributes: DiagnosticAttributes
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class CustomSpanFinished(_EventBase):
+    kind: _ClassVar[_Literal["custom_span_finished"]]
+    span_id: int
+    outcome: _SpanOutcome
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class CustomInstantOccurred(_EventBase):
+    kind: _ClassVar[_Literal["custom_instant_occurred"]]
+    name: str
+    containing_span_id: int | None
+    severity: _CustomSeverity | None
+    attributes: DiagnosticAttributes
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, kw_only=True)
+class CustomCounterSampled(_EventBase):
+    kind: _ClassVar[_Literal["custom_counter_sampled"]]
+    name: str
+    value: int | _Decimal
+    unit: str | None
+    dimensions: DiagnosticDimensions
+    def __post_init__(self) -> None: ...
+
+DiagnosticEvent: _TypeAlias = (
+    SpanStarted
+    | SpanFinished
+    | InstantOccurred
+    | CounterSampled
+    | AgentMessageDelta
+    | AgentMessageCompleted
+    | AgentPlanSnapshot
+    | ContextUsageSampled
+    | ActTokenUsageFinalized
+    | ObservationGap
+    | CustomSpanStarted
+    | CustomSpanFinished
+    | CustomInstantOccurred
+    | CustomCounterSampled
+)
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticCapture:
+    agent_messages: bool = True
+    plans: bool = True
+    tool_calls: bool = True
+    result_validation: bool = True
+    usage: bool = True
+    custom_events: bool = True
+    tool_inputs: bool = False
+    tool_outputs: bool = False
+    def __post_init__(self) -> None: ...
+
+@_final
+class DiagnosticSinkStateError(RuntimeError):
+    def __init__(self, *, code: _SinkStateErrorCode) -> None: ...
+    @property
+    def code(self) -> _SinkStateErrorCode: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticCallbackFailure:
+    kind: _CallbackFailureKind
+    event_sequence: int
+    exception_type: str | None
+    message: str | None
+    message_truncated: bool
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticDropCount:
+    event_kind: _EventKind
+    events: int
+    encoded_bytes: int
+    def __post_init__(self) -> None: ...
+
+@_final
+@_dataclass(frozen=True, slots=True, kw_only=True)
+class DiagnosticSinkSummary:
+    run_id: _UUID
+    act_id: str
+    act_outcome: _SpanOutcome | None
+    close_reason: _SinkCloseReason
+    complete: bool
+    delivered_events: int
+    first_delivered_sequence: int | None
+    last_delivered_sequence: int | None
+    dropped_events: int
+    dropped_bytes: int
+    dropped_by_kind: tuple[DiagnosticDropCount, ...]
+    source_gaps: int
+    truncated_payloads: int
+    callback_failure: DiagnosticCallbackFailure | None
+    callback_abandoned: bool
+    def __post_init__(self) -> None: ...
+
+class DiagnosticSink(_ABC):
+    """Observer base accepted by Actor.act(diagnostic_sink=...)."""
+    def __init__(self, *, capture: DiagnosticCapture | None = None) -> None: ...
+    @property
+    def capture(self) -> DiagnosticCapture: ...
+    @property
+    def state(self) -> _SinkState: ...
+    @_abstractmethod
+    def on_event(self, event: DiagnosticEvent, /) -> None | _Awaitable[None]: ...
+    async def wait_closed(self) -> DiagnosticSinkSummary: ...
+
+@_final
+class DiagnosticContextError(RuntimeError): ...
+
+def event(
+    name: str,
+    /,
+    *,
+    severity: _CustomSeverity = "info",
+    attributes: _Mapping[str, DiagnosticAttributeValue] | None = None,
+) -> None: ...
+
+def counter(
+    name: str,
+    value: int | float | _Decimal,
+    /,
+    *,
+    unit: str | None = None,
+    dimensions: _Mapping[str, DiagnosticDimension] | None = None,
+) -> None: ...
+
+def span(
+    name: str,
+    /,
+    *,
+    attributes: _Mapping[str, DiagnosticAttributeValue] | None = None,
+) -> _AbstractContextManager[None]: ...
+
+__all__ = [
+    "ActTokenUsageFinalized",
+    "ActorDetail",
+    "AffectedElapsedInterval",
+    "AgentMessageCompleted",
+    "AgentMessageDelta",
+    "AgentPlanSnapshot",
+    "AgentSessionBrokenDetail",
+    "AgentSessionDetail",
+    "AgentTurnTerminalDetail",
+    "CausalLink",
+    "ContextUsageSampled",
+    "CounterSampled",
+    "CustomCounterSampled",
+    "CustomInstantOccurred",
+    "CustomSpanFinished",
+    "CustomSpanStarted",
+    "DiagnosticAttributeValue",
+    "DiagnosticAttributes",
+    "DiagnosticCallbackFailure",
+    "DiagnosticCapture",
+    "DiagnosticComponentFailedDetail",
+    "DiagnosticContextError",
+    "DiagnosticDimension",
+    "DiagnosticDimensions",
+    "DiagnosticDropCount",
+    "DiagnosticEvent",
+    "DiagnosticScalar",
+    "DiagnosticScope",
+    "DiagnosticSink",
+    "DiagnosticSinkStateError",
+    "DiagnosticSinkSummary",
+    "DiagnosticToolInput",
+    "DiagnosticToolLocation",
+    "DiagnosticToolOutput",
+    "EffectDetail",
+    "EmptyDetail",
+    "FrozenJsonArray",
+    "FrozenJsonObject",
+    "FrozenJsonValue",
+    "InstantDetail",
+    "InstantOccurred",
+    "ObservationGap",
+    "PlanEntry",
+    "ProductionConstructDetail",
+    "ProductionLoadDetail",
+    "ProductionPathResolutionDetail",
+    "ResultIssue",
+    "ResultTransitionDetail",
+    "SpanFinished",
+    "SpanStartDetail",
+    "SpanStarted",
+    "ToolCallDetail",
+    "counter",
+    "event",
+    "span",
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "hello"},
+    "messageId": "provider-message-a"
+  },
+  {
+    "sessionUpdate": "user_message_chunk",
+    "content": {"type": "text", "text": "USER PROMPT MUST NOT APPEAR"}
+  },
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": " "},
+    "messageId": "provider-message-a"
+  },
+  {
+    "sessionUpdate": "agent_thought_chunk",
+    "content": {"type": "text", "text": "THOUGHT TEXT MUST NOT APPEAR"},
+    "messageId": "provider-thought-a"
+  },
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "world"},
+    "messageId": "provider-message-a"
+  }
+]

@@ -1007,6 +1007,7 @@ def main() -> int:
             os._exit(0)
     if args.scenario == "spawn_short_lived_orphan":
         orphan_pid_file = args.events.with_name(f"{args.events.name}.orphan-pid")
+        orphan_pid_file.unlink(missing_ok=True)
         launcher = subprocess.Popen(
             [
                 sys.executable,
@@ -1015,7 +1016,10 @@ def main() -> int:
                     "import os, pathlib, sys, time; "
                     "pid = os.fork(); "
                     "(os._exit(0) if pid else None); "
-                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii'); "
+                    "path = pathlib.Path(sys.argv[1]); "
+                    "temporary = path.with_name(f'{path.name}.{os.getpid()}.tmp'); "
+                    "temporary.write_text(str(os.getpid()), encoding='ascii'); "
+                    "os.replace(temporary, path); "
                     "time.sleep(0.05); os._exit(0)"
                 ),
                 str(orphan_pid_file),

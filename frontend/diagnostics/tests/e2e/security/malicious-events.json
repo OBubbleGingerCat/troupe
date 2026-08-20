@@ -1,0 +1,25 @@
+{
+  "schema": "troupe.diagnostics.browser-security-content.v1",
+  "cases": [
+    {
+      "id": "html",
+      "text": "<img src=https://attacker.invalid/pixel onerror=window.__v13Executed=true>"
+    },
+    {
+      "id": "script",
+      "text": "<script>window.__v13Executed=true</script>"
+    },
+    {
+      "id": "url",
+      "text": "javascript:window.__v13Executed=true https://attacker.invalid/download"
+    },
+    {
+      "id": "malformed",
+      "text": "{\"kind\":<broken>&quot;'\\u0000-looking-text"
+    },
+    {
+      "id": "long",
+      "text": "LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789-LONG-CANONICAL-CONTENT-0123456789"
+    }
+  ]
+}

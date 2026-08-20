@@ -1,0 +1,431 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  SUPPORTED_SCHEMA_VERSIONS,
+  evaluateProtocolCompatibility,
+} from "../../src/protocol/compatibility.ts";
+import {
+  decodeU64,
+  viewportDeltaToNumber,
+} from "../../src/protocol/decimal.ts";
+import {
+  decodeEventsResponse,
+  decodeSnapshotResponse,
+} from "../../src/protocol/http.ts";
+import {
+  SSE_CONTROL_NAMES,
+  decodeSseFrame,
+} from "../../src/protocol/sse.ts";
+import {
+  loadAllValidEventFixtures,
+  loadHttpFixture,
+  readProtocolSource,
+} from "../support/diagnostic-fixtures.ts";
+
+
+const runId = "12345678-1234-4234-9234-123456789abc";
+
+function loadSnapshotFixture(): unknown {
+  const fixture = structuredClone(loadHttpFixture("snapshot-v1.json")) as {
+    state: { usage: Record<string, unknown> };
+  };
+  if (!Object.prototype.hasOwnProperty.call(fixture.state.usage, "contexts")) {
+    fixture.state.usage.contexts = [];
+  }
+  return fixture;
+}
+
+function loadMaterializedSnapshotFixture(): unknown {
+  const fixture = loadSnapshotFixture() as Record<string, unknown>;
+  const state = fixture.state as Record<string, unknown>;
+  fixture.watermark_sequence = "9";
+  state.through_sequence = "9";
+  state.through_elapsed_ns = "90";
+  for (const name of ["spans", "messages", "plans", "counters", "usage"]) {
+    const child = state[name] as Record<string, unknown>;
+    child.through_sequence = "9";
+    child.through_elapsed_ns = "90";
+  }
+  const usage = state.usage as Record<string, unknown>;
+  const terminalUsage = (usage.usages as Record<string, unknown>[])[0]!;
+  const scope = terminalUsage.scope as Record<string, unknown>;
+  usage.contexts = [{
+    schema_version: 1,
+    run_id: runId,
+    scope,
+    sequence: "2",
+    elapsed_ns: "20",
+    caused_by: [],
+    context_used_tokens: "500",
+    context_window_tokens: "1000",
+    cumulative_cost_amount: "0.25",
+    cumulative_cost_currency: "USD",
+    sample_origin: "provider",
+    observed_elapsed_ns: null,
+  }];
+  (state.spans as Record<string, unknown>).spans = [{
+    run_id: runId,
+    span_id: "3",
+    started_at_ns: "30",
+    scope: { ...scope, tool_call_id: "tool-1" },
+    parent_span_id: null,
+    started_caused_by: [],
+    definition: {
+      family: "built_in",
+      detail: {
+        span_kind: "tool.call",
+        detail: {
+          title: "Read source",
+          tool_kind: "read",
+          status: "in_progress",
+          error_code: null,
+        },
+      },
+    },
+    completion: {
+      finish_sequence: "4",
+      finished_at_ns: "40",
+      outcome: "completed",
+      error_code: null,
+      caused_by: [{ source_sequence: "3", relation: "follows_from" }],
+    },
+  }];
+  (state.messages as Record<string, unknown>).messages = [{
+    run_id: runId,
+    message_id: "message-1",
+    scope,
+    first_sequence: "5",
+    first_elapsed_ns: "50",
+    latest_sequence: "6",
+    latest_elapsed_ns: "60",
+    source_message_id: "provider-message-1",
+    text: "hello",
+    completion: {
+      sequence: "6",
+      elapsed_ns: "60",
+      utf8_bytes: "5",
+      unicode_scalar_count: "5",
+      truncated: true,
+      caused_by: [{ source_sequence: "5", relation: "follows_from" }],
+    },
+  }];
+  (state.plans as Record<string, unknown>).plans = [{
+    run_id: runId,
+    scope,
+    sequence: "7",
+    elapsed_ns: "70",
+    entries: [{ content: "Inspect source", priority: "high", status: "in_progress" }],
+    truncated: true,
+    caused_by: [],
+  }];
+  const counter = ((state.counters as Record<string, unknown>).series as Record<string, unknown>[])[0]!;
+  counter.sequence = "8";
+  counter.elapsed_ns = "80";
+  state.gaps = [{
+    schema_version: 1,
+    run_id: runId,
+    sequence: "9",
+    elapsed_ns: "90",
+    scope,
+    caused_by: [],
+    producer: "acp-normalizer",
+    component: "message-stream",
+    reason: "provider_sequence_gap",
+    dropped_count: "2",
+    affected_elapsed: { start_ns: "50", end_ns: "60" },
+    affected_kind: "agent_message_delta",
+    affected_scope: scope,
+  }];
+  state.truncations = [
+    { source: "agent_message", sequence: "6", scope, message_id: "message-1" },
+    { source: "agent_plan", sequence: "7", scope },
+  ];
+  return fixture;
+}
+
+describe("transport controls and compatibility", () => {
+  it("decodes the closed no-id control union without producing a cursor", () => {
+    const payloads = {
+      stream_ready: {
+        control_schema_version: 1,
+        run_id: runId,
+        resume_after: "1042",
+        replay_through: "1050",
+      },
+      heartbeat: {
+        control_schema_version: 1,
+        run_id: runId,
+        committed_watermark: "1050",
+      },
+      delivery_gap: {
+        control_schema_version: 1,
+        run_id: runId,
+        reason: "subscriber_buffer_overflow",
+        last_delivered_sequence: "1047",
+        committed_watermark: "1050",
+      },
+      resync_required: {
+        control_schema_version: 1,
+        run_id: runId,
+        reason: "cursor_unavailable",
+        committed_watermark: "1050",
+        earliest_available_sequence: "1",
+      },
+      stream_closed: {
+        control_schema_version: 1,
+        run_id: runId,
+        reason: "production_finished",
+        committed_watermark: "1050",
+      },
+    } as const;
+
+    expect(SSE_CONTROL_NAMES).toEqual(Object.keys(payloads));
+    for (const name of SSE_CONTROL_NAMES) {
+      const frame = decodeSseFrame({ event: name, id: null, data: payloads[name] });
+      expect(frame.frame_type).toBe("control");
+      expect(frame.id).toBeNull();
+      expect(frame.name).toBe(name);
+    }
+  });
+
+  it("requires canonical matching IDs only for diagnostic event frames", () => {
+    const raw = loadAllValidEventFixtures()[0]!;
+    const sequence = (raw as { sequence: string }).sequence;
+    const frame = decodeSseFrame({ event: "diagnostic_event", id: sequence, data: raw });
+    expect(frame.frame_type).toBe("event");
+    expect(frame.id).toBe(sequence);
+
+    expect(() => decodeSseFrame({ event: "diagnostic_event", id: "0", data: raw })).toThrow();
+    expect(() => decodeSseFrame({
+      event: "heartbeat",
+      id: "1050",
+      data: {
+        control_schema_version: 1,
+        run_id: runId,
+        committed_watermark: "1050",
+      },
+    })).toThrow();
+    expect(() => decodeSseFrame({ event: "future_control", id: null, data: {} })).toThrow();
+  });
+
+  it("checks event, API, control and UI versions independently", () => {
+    const result = evaluateProtocolCompatibility({
+      event: 1,
+      api: 2,
+      control: 1,
+      ui: 1,
+    });
+
+    expect(SUPPORTED_SCHEMA_VERSIONS).toEqual({ event: 1, api: 1, control: 1, ui: 1 });
+    expect(result.mode).toBe("static");
+    expect(result.decisions.api.status).toBe("incompatible");
+    expect(result.decisions.event.status).toBe("compatible");
+    expect(result.decisions.control.status).toBe("compatible");
+    expect(result.decisions.ui.status).toBe("compatible");
+  });
+
+  it("only converts a bounded viewport-relative delta to number", () => {
+    const origin = decodeU64("18446744073709550000");
+    const elapsed = decodeU64("18446744073709551615");
+    expect(viewportDeltaToNumber(elapsed, origin, 2_000)).toBe(1_615);
+    expect(() => viewportDeltaToNumber(elapsed, decodeU64("0"), 2_000)).toThrow();
+  });
+
+  it("decodes snapshot and finite events without changing cursor identity", () => {
+    const rawEvent = loadAllValidEventFixtures()[0]!;
+    const snapshot = decodeSnapshotResponse(loadSnapshotFixture());
+    expect(snapshot.watermark_sequence).toBe("2");
+    expect(snapshot.state.usage.usages[0]?.event.provider_total_tokens).toBe(
+      "1234567890123456789012345678901234567890",
+    );
+    expect(snapshot.state.usage.aggregate.finalized_acts).toBe("1");
+    expect(snapshot.state.counters.series[0]?.identity.family).toBe("built_in");
+    expect(snapshot.state.counters.series[0]?.value).toEqual({
+      type: "unsigned",
+      value: "18446744073709551615",
+    });
+    expect(snapshot.state.usage.scoped_aggregates.map((item) => (
+      [item.scope.scene_id, item.scope.actor_id]
+    ))).toEqual([
+      ["scene-1", null],
+      ["scene-1", "actor-1"],
+    ]);
+
+    const events = decodeEventsResponse({
+      api_schema_version: 1,
+      run_id: runId,
+      captured_watermark: (rawEvent as { sequence: string }).sequence,
+      events: [rawEvent],
+      next_after: null,
+    });
+    expect(events.events[0]!.sequence).toBe((rawEvent as { sequence: string }).sequence);
+  });
+
+  it("rejects malformed or ambiguous usage snapshot facts", () => {
+    const fixture = loadSnapshotFixture();
+    const malformed = structuredClone(fixture) as {
+      state: { usage: { scoped_aggregates: { scope: { actor_id: string | null } }[] } };
+    };
+    malformed.state.usage.scoped_aggregates[0]!.scope.actor_id = "actor-1";
+    expect(() => decodeSnapshotResponse(malformed)).toThrow(/scoped aggregate/);
+
+    const coverage = structuredClone(fixture) as {
+      state: { usage: { aggregate: { finalized_acts: string } } };
+    };
+    coverage.state.usage.aggregate.finalized_acts = "2";
+    expect(() => decodeSnapshotResponse(coverage)).toThrow(/availability counts/);
+
+    const wrongSum = structuredClone(fixture) as {
+      state: { usage: { aggregate: { input_tokens: { known_sum: string } } } };
+    };
+    wrongSum.state.usage.aggregate.input_tokens.known_sum = "41";
+    expect(() => decodeSnapshotResponse(wrongSum)).toThrow(/does not match terminal usage facts/);
+
+    const reordered = structuredClone(fixture) as {
+      state: { usage: { scoped_aggregates: unknown[] } };
+    };
+    reordered.state.usage.scoped_aggregates.reverse();
+    expect(() => decodeSnapshotResponse(reordered)).toThrow(/order or value/);
+
+    const invalidActId = structuredClone(loadSnapshotFixture()) as {
+      state: { usage: { usages: { act_id: string }[] } };
+    };
+    invalidActId.state.usage.usages[0]!.act_id = "";
+    expect(() => decodeSnapshotResponse(invalidActId)).toThrow(/run_local_id.*act_id/);
+
+    const sequenceCollision = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { usage: { contexts: { sequence: string; elapsed_ns: string }[] } };
+    };
+    sequenceCollision.state.usage.contexts[0]!.sequence = "1";
+    sequenceCollision.state.usage.contexts[0]!.elapsed_ns = "10";
+    expect(() => decodeSnapshotResponse(sequenceCollision)).toThrow(/unique ordered prefix/);
+
+    const contextOrder = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { usage: { contexts: Record<string, unknown>[] } };
+    };
+    const laterContext = structuredClone(contextOrder.state.usage.contexts[0]!) as Record<string, unknown>;
+    laterContext.sequence = "1";
+    laterContext.elapsed_ns = "10";
+    laterContext.scope = {
+      ...(laterContext.scope as Record<string, unknown>),
+      cue_id: "cue-other",
+    };
+    contextOrder.state.usage.contexts.push(laterContext);
+    expect(() => decodeSnapshotResponse(contextOrder)).toThrow(/unique captured projection/);
+  });
+
+  it("strictly binds every materialized snapshot envelope", () => {
+    const fixture = loadSnapshotFixture();
+    const unknownState = structuredClone(fixture) as { state: Record<string, unknown> };
+    unknownState.state.unknown = true;
+    expect(() => decodeSnapshotResponse(unknownState)).toThrow(/extra=.*unknown/);
+
+    const wrongChildWatermark = structuredClone(fixture) as {
+      state: { counters: { through_sequence: string } };
+    };
+    wrongChildWatermark.state.counters.through_sequence = "1";
+    expect(() => decodeSnapshotResponse(wrongChildWatermark)).toThrow(/materialized model differs/);
+
+    const wrongUsageElapsed = structuredClone(fixture) as {
+      state: { usage: { through_elapsed_ns: string } };
+    };
+    wrongUsageElapsed.state.usage.through_elapsed_ns = "19";
+    expect(() => decodeSnapshotResponse(wrongUsageElapsed)).toThrow(/usage snapshot differs/);
+
+    const malformedTruncation = structuredClone(fixture) as {
+      state: { usage: { usages: { scope: unknown }[] }; truncations: unknown[] };
+    };
+    malformedTruncation.state.truncations = [{
+      source: "agent_message",
+      sequence: "1",
+      scope: malformedTruncation.state.usage.usages[0]!.scope,
+      message_id: "",
+    }];
+    expect(() => decodeSnapshotResponse(malformedTruncation)).toThrow(/run_local_id/);
+
+    const reorderedTruncations = structuredClone(fixture) as {
+      state: { usage: { usages: { scope: unknown }[] }; truncations: unknown[] };
+    };
+    const truncationScope = reorderedTruncations.state.usage.usages[0]!.scope;
+    reorderedTruncations.state.truncations = [
+      { source: "agent_plan", sequence: "2", scope: truncationScope },
+      {
+        source: "agent_message",
+        sequence: "1",
+        scope: truncationScope,
+        message_id: "message-1",
+      },
+    ];
+    expect(() => decodeSnapshotResponse(reorderedTruncations)).toThrow(/canonical snapshot order/);
+  });
+
+  it("strictly decodes typed materialized rows and their truncation inventory", () => {
+    const snapshot = decodeSnapshotResponse(loadMaterializedSnapshotFixture());
+
+    expect(snapshot.state.spans.spans[0]).toMatchObject({
+      span_id: "3",
+      definition: { family: "built_in", detail: { span_kind: "tool.call" } },
+      completion: { finish_sequence: "4", outcome: "completed" },
+    });
+    expect(snapshot.state.messages.messages[0]).toMatchObject({
+      message_id: "message-1",
+      text: "hello",
+      completion: { sequence: "6", truncated: true },
+    });
+    expect(snapshot.state.plans.plans[0]).toMatchObject({
+      sequence: "7",
+      entries: [{ content: "Inspect source", status: "in_progress" }],
+    });
+    expect(snapshot.state.counters.series[0]?.sequence).toBe("8");
+    expect(snapshot.state.usage.contexts[0]).toMatchObject({
+      kind: "context_usage_sampled",
+      sequence: "2",
+      context_used_tokens: "500",
+    });
+    expect(snapshot.state.truncations.map((item) => item.source)).toEqual([
+      "agent_message",
+      "agent_plan",
+    ]);
+
+    const extraSpanField = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { spans: { spans: Record<string, unknown>[] } };
+    };
+    extraSpanField.state.spans.spans[0]!.unknown = true;
+    expect(() => decodeSnapshotResponse(extraSpanField)).toThrow(/extra=.*unknown/);
+
+    const wrongCounterKey = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { counters: { series: { series_key: string }[] } };
+    };
+    wrongCounterKey.state.counters.series[0]!.series_key = "not-canonical";
+    expect(() => decodeSnapshotResponse(wrongCounterKey)).toThrow(/series key is not canonical/);
+
+    const wrongCounterTag = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { counters: { series: { value: { type: string } }[] } };
+    };
+    wrongCounterTag.state.counters.series[0]!.value.type = "integer";
+    expect(() => decodeSnapshotResponse(wrongCounterTag)).toThrow(/requires unsigned/);
+
+    const missingContexts = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { usage: Record<string, unknown> };
+    };
+    delete missingContexts.state.usage.contexts;
+    expect(() => decodeSnapshotResponse(missingContexts)).toThrow(/missing=.*contexts/);
+
+    const contradictoryTruncation = structuredClone(loadMaterializedSnapshotFixture()) as {
+      state: { truncations: unknown[] };
+    };
+    contradictoryTruncation.state.truncations.pop();
+    expect(() => decodeSnapshotResponse(contradictoryTruncation)).toThrow(
+      /do not match materialized message and plan facts/,
+    );
+  });
+
+  it("keeps protocol modules independent from rendering and network globals", () => {
+    for (const file of ["decimal.ts", "event.ts", "http.ts", "sse.ts", "compatibility.ts"]) {
+      const source = readProtocolSource(file);
+      expect(source).not.toMatch(/from\s+["'](?:preact|@preact\/signals)/);
+      expect(source).not.toMatch(/\b(?:document|window|EventSource)\s*[.(]/);
+      expect(source).not.toMatch(/\bfetch\s*\(/);
+    }
+  });
+});

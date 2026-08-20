@@ -5,6 +5,7 @@ use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString};
 
+use crate::diagnostic_runtime::cue_producer::{self, CueCallerOutcome, CueHook};
 use crate::orchestration::actor::ActorCapability;
 use crate::orchestration::cue::{Cue, CueContextError};
 use crate::orchestration::mailbox::CueOperation;
@@ -91,7 +92,12 @@ impl CueCall {
         self.operation = None;
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, outcome: CueCallerOutcome) {
+        if self.phase != CueCallPhase::Done
+            && let Some(operation) = &self.operation
+        {
+            cue_producer::observe(operation, CueHook::CallerFinished(outcome));
+        }
         self.phase = CueCallPhase::Done;
         self.clear();
     }
@@ -161,9 +167,17 @@ impl CueCall {
         )?;
         let loop_ = binding.event_loop(py);
         let signal = loop_.bind(py).call_method0("create_future")?.unbind();
-        let operation =
-            CueOperation::new_runtime(&scene, &target, &binding, cued, cue, signal.clone_ref(py));
         let waiter = Self::fresh_waiter(py, &signal)?;
+        let diagnostic_capture = cue_producer::admission_started(&binding, &scene);
+        let operation = CueOperation::new_runtime(
+            &scene,
+            &target,
+            &binding,
+            cued,
+            cue,
+            signal.clone_ref(py),
+            diagnostic_capture,
+        );
         prepared.commit(operation.clone())?;
         Ok((signal, waiter, operation))
     }
@@ -180,7 +194,7 @@ impl CueCall {
                 self.finish_from_operation(py)
             }
             Err(error) => {
-                self.finish();
+                self.finish(CueCallerOutcome::Abandoned);
                 Err(error)
             }
         }
@@ -198,7 +212,7 @@ impl CueCall {
                 self.finish_from_operation(py)
             }
             Err(error) => {
-                self.finish();
+                self.finish(CueCallerOutcome::Abandoned);
                 Err(error)
             }
         }
@@ -210,7 +224,12 @@ impl CueCall {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err(REUSE_ERROR))?
             .result_for_caller(py, self.cancellation.as_ref());
-        self.finish();
+        let outcome = if result.is_ok() {
+            CueCallerOutcome::Consumed
+        } else {
+            CueCallerOutcome::Abandoned
+        };
+        self.finish(outcome);
         match result {
             Ok(value) => Err(PyStopIteration::new_err((value,))),
             Err(error) => Err(error),
@@ -242,7 +261,7 @@ impl CueCall {
         match self.phase {
             CueCallPhase::Created => {
                 if !value.is_none() {
-                    self.finish();
+                    self.finish(CueCallerOutcome::Abandoned);
                     return Err(PyTypeError::new_err(
                         "can't send non-None value to a just-started coroutine",
                     ));
@@ -250,7 +269,7 @@ impl CueCall {
                 let (signal, waiter, operation) = match self.admit(py) {
                     Ok(admission) => admission,
                     Err(error) => {
-                        self.finish();
+                        self.finish(CueCallerOutcome::Abandoned);
                         return Err(error);
                     }
                 };
@@ -269,7 +288,7 @@ impl CueCall {
     fn throw(&mut self, py: Python<'_>, exc: Py<PyAny>) -> PyResult<Py<PyAny>> {
         match self.phase {
             CueCallPhase::Created => {
-                self.finish();
+                self.finish(CueCallerOutcome::Abandoned);
                 Err(PyErr::from_value(exc.into_bound(py)))
             }
             CueCallPhase::Waiting if Self::is_cancelled_error(py, exc.bind(py))? => {
@@ -307,7 +326,7 @@ impl CueCall {
         if let Some(operation) = &self.operation {
             operation.request_cancel();
         }
-        self.finish();
+        self.finish(CueCallerOutcome::Abandoned);
     }
 
     fn __await__(self_: Py<Self>) -> Py<Self> {
@@ -339,8 +358,7 @@ impl CueCall {
         if let Some(operation) = &self.operation {
             operation.request_cancel();
         }
-        self.phase = CueCallPhase::Done;
-        self.clear();
+        self.finish(CueCallerOutcome::Abandoned);
     }
 }
 

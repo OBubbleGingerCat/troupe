@@ -21,6 +21,7 @@ README = ROOT / "README.md"
 EXAMPLE_START = "<!-- BEGIN README PRODUCTION -->"
 EXAMPLE_END = "<!-- END README PRODUCTION -->"
 TIMEOUT = 5.0
+READY_PREFIX = b"troupe: diagnostic ready "
 
 
 def _readme() -> str:
@@ -39,6 +40,23 @@ def _production_source() -> str:
     )
     assert match is not None
     return match.group("source")
+
+
+def _without_ready(stderr: bytes, package: Path) -> bytes:
+    ready, separator, remaining = stderr.partition(b"\n")
+    assert separator == b"\n"
+    assert ready.startswith(READY_PREFIX)
+    assert READY_PREFIX not in remaining
+    locator = json.loads(ready.removeprefix(READY_PREFIX))
+    assert locator["locator_schema_version"] == 1
+    assert type(locator["run_id"]) is str and locator["run_id"]
+    assert locator["local_url"].startswith("http://127.0.0.1:")
+    assert locator["advertise_url"] is None
+    archive = Path(locator["archive_directory"])
+    assert archive.is_absolute()
+    assert archive.is_relative_to((package / ".troupe").resolve())
+    assert locator["security_scope"] == "trusted_network"
+    return remaining
 
 
 def test_readme_documents_installation_direct_command_and_ownership() -> None:
@@ -337,7 +355,7 @@ def test_readme_example_runs_through_literal_console_and_stops_on_sigint(
         process.send_signal(signal.SIGINT)
         stdout, stderr = process.communicate(timeout=TIMEOUT)
         assert process.returncode == 0, stdout.decode() + stderr.decode()
-        assert b"troupe:" not in stderr
+        assert _without_ready(stderr, package) == b""
     finally:
         os.close(read_fd)
         if process.poll() is None:

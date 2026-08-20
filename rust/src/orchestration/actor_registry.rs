@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -7,9 +7,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 
 use crate::agent::{
-    AgentCastPermit, AgentSessionSlot, AgentStartupFailure, AgentSupervisor, ResolvedAgentProfile,
-    ResolvedLaunch,
+    AgentCastPermit, AgentDiagnosticObserver, AgentDiagnosticObserverInstallError,
+    AgentSessionSlot, AgentStartupFailure, AgentSupervisor, ResolvedAgentProfile, ResolvedLaunch,
 };
+use crate::diagnostic_runtime::actor_producer::{self, ActorHook};
 use crate::orchestration::actor::{ActorCapability, ActorIdentity};
 use crate::orchestration::cue::CueContextError;
 use crate::orchestration::scene_context::RunBinding;
@@ -202,6 +203,7 @@ impl<T> RegistryReservation<T> {
 
     pub(crate) fn commit(mut self, capability: &Arc<T>) {
         lock(&self.registry).commit(&self.key, &self.identity, capability);
+        actor_producer::observe_identity(None, &self.identity, None, ActorHook::RegistryCommitted);
         self.committed = true;
     }
 }
@@ -217,6 +219,7 @@ impl<T> Drop for RegistryReservation<T> {
 pub(crate) struct ProductionState {
     registry: Arc<Mutex<ActorRegistry<ActorCapability>>>,
     agent_supervisor: AgentSupervisor,
+    agent_diagnostics_active: AtomicBool,
     pub(crate) active: Mutex<Weak<RunBinding>>,
     pub(crate) owner_pid: AtomicU32,
 }
@@ -226,6 +229,7 @@ impl ProductionState {
         Self {
             registry: Arc::new(Mutex::new(ActorRegistry::default())),
             agent_supervisor: AgentSupervisor::new(),
+            agent_diagnostics_active: AtomicBool::new(false),
             active: Mutex::new(Weak::new()),
             owner_pid: AtomicU32::new(std::process::id()),
         }
@@ -245,7 +249,15 @@ impl ProductionState {
 
         match RegistryReservation::reserve(Arc::clone(&self.registry), key, Arc::new(ActorIdentity))
         {
-            Ok(reservation) => Ok(reservation),
+            Ok(reservation) => {
+                actor_producer::observe_identity(
+                    Some(self),
+                    reservation.identity(),
+                    Some(name),
+                    ActorHook::RegistryReserved,
+                );
+                Ok(reservation)
+            }
             Err(()) => {
                 let name_repr = python_str_repr(name)?;
                 Err(PyValueError::new_err(format!(
@@ -265,6 +277,7 @@ impl ProductionState {
 
     pub(crate) fn detach(&self, key: &NameKey, identity: &Arc<ActorIdentity>) {
         lock(&self.registry).detach(key, identity);
+        actor_producer::observe_identity(Some(self), identity, None, ActorHook::RegistryDetached);
     }
 
     pub(crate) fn resolve_agent_launch(
@@ -290,8 +303,32 @@ impl ProductionState {
         permit: &AgentCastPermit,
         profile: Arc<ResolvedAgentProfile>,
         launch: ResolvedLaunch,
-    ) -> Arc<AgentSessionSlot> {
-        self.agent_supervisor.start(permit, profile, launch)
+        identity: &ActorIdentity,
+    ) -> Result<Arc<AgentSessionSlot>, AgentStartupFailure> {
+        if !self.agent_diagnostics_active.load(Ordering::Acquire) {
+            return Ok(self.agent_supervisor.start(permit, profile, launch));
+        }
+        let context = actor_producer::agent_session_context(identity).ok_or_else(|| {
+            AgentStartupFailure::start(
+                "preparation_failed",
+                "diagnostics",
+                "Production diagnostics did not allocate an Actor session identity",
+            )
+        })?;
+        Ok(self
+            .agent_supervisor
+            .start_with_diagnostic_context(permit, profile, launch, context))
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn install_agent_diagnostic_observer(
+        &self,
+        observer: AgentDiagnosticObserver,
+    ) -> Result<(), AgentDiagnosticObserverInstallError> {
+        self.agent_supervisor
+            .install_diagnostic_observer(observer)?;
+        self.agent_diagnostics_active.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub(crate) async fn shutdown_agent_sessions(&self) {

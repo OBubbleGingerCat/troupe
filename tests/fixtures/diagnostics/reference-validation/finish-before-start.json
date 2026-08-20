@@ -1,0 +1,25 @@
+{
+  "expected_code": "finish_before_start",
+  "events": [
+    {
+      "schema_version": 1,
+      "run_id": "12345678-1234-4234-9234-123456789abc",
+      "sequence": "1",
+      "elapsed_ns": "10",
+      "scope": {
+        "scene_id": null,
+        "actor_id": null,
+        "cue_id": null,
+        "effect_id": null,
+        "act_id": null,
+        "tool_call_id": null,
+        "session_generation": null
+      },
+      "caused_by": [],
+      "kind": "span_finished",
+      "span_id": "2",
+      "outcome": "completed",
+      "error_code": null
+    }
+  ]
+}

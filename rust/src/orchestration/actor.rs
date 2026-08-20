@@ -7,8 +7,10 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType, PyWeakrefReference};
 
-use crate::act_call::ActCall;
+use crate::act_call::{ActCall, preflight_diagnostic_sink};
 use crate::agent::{AgentSessionSlot, compile_act_schema, extract_script};
+use crate::diagnostic_runtime::actor_producer::{self, ActorHook};
+use crate::diagnostic_runtime::cue_producer::{self, CueMailboxHook};
 use crate::orchestration::actor_registry::{NameKey, ProductionState};
 use crate::orchestration::cue::{Cue, CueContextError};
 use crate::orchestration::effect::{Effect, EffectContextError, construct_effect};
@@ -59,6 +61,21 @@ impl ActorConstruction {
 
     pub(crate) fn matches(&self, actor: &Bound<'_, Actor>) -> bool {
         Arc::ptr_eq(&self.identity, &actor.borrow().identity)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_identity(&self) -> &Arc<ActorIdentity> {
+        &self.identity
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_name(&self, py: Python<'_>) -> Py<PyString> {
+        self.name.clone_ref(py)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_production(&self, py: Python<'_>) -> Py<PyAny> {
+        self.production.clone_ref(py)
     }
 }
 
@@ -113,6 +130,12 @@ fn consume_actor_permit(cls: &Bound<'_, PyType>) -> PyResult<Actor> {
         return Err(PyTypeError::new_err(ACTOR_DIRECT_ERROR));
     }
 
+    actor_producer::observe_identity(
+        None,
+        &construction.identity,
+        Some(construction.name.bind(cls.py())),
+        ActorHook::Constructed,
+    );
     Ok(Actor {
         name: construction.name.clone_ref(cls.py()),
         production: Mutex::new(Some(construction.production.clone_ref(cls.py()))),
@@ -143,6 +166,9 @@ impl Actor {
     fn clear_runtime_edges(&self) {
         let production = lock(&self.production).take();
         *lock(&self.capability) = Weak::new();
+        if production.is_some() {
+            actor_producer::cleared(self, production.as_ref());
+        }
         drop(production);
     }
 
@@ -195,15 +221,17 @@ impl Actor {
             .ok_or_else(|| PyRuntimeError::new_err("Actor is no longer attached"))
     }
 
-    #[pyo3(signature = (*, script, output_schema))]
+    #[pyo3(signature = (*, script, output_schema, diagnostic_sink=None))]
     fn act(
         &self,
         py: Python<'_>,
         script: &Bound<'_, PyAny>,
         output_schema: &Bound<'_, PyAny>,
+        diagnostic_sink: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<ActCall>> {
         const CONTEXT_ERROR: &str =
             "Actor.act() must be called on the current actor within its active cued context";
+        let diagnostics = preflight_diagnostic_sink(py, diagnostic_sink)?;
         let context_error = || CueContextError::new_err(CONTEXT_ERROR);
         let authority = self.current_cued_authority(py).ok_or_else(context_error)?;
         let session = authority
@@ -216,7 +244,14 @@ impl Actor {
         let prompt = schema.render_prompt(&script)?;
         Py::new(
             py,
-            ActCall::new(session, prompt, schema, &authority.binding, &authority.cued),
+            ActCall::new(
+                session,
+                prompt,
+                schema,
+                &authority.binding,
+                &authority.cued,
+                diagnostics,
+            ),
         )
     }
 
@@ -249,6 +284,7 @@ impl Actor {
             effect_kwargs,
             id,
             authority.cued.source(effect_type.py()),
+            &authority.cued,
         )
     }
 
@@ -350,6 +386,11 @@ impl ActorCapability {
         Arc::as_ptr(&self.identity) as usize
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn identity(&self) -> &Arc<ActorIdentity> {
+        &self.identity
+    }
+
     pub(crate) fn source_name_snapshot(&self, py: Python<'_>) -> PyResult<Py<PyString>> {
         let length = unsafe { pyo3::ffi::PyUnicode_GetLength(self.name.as_ptr()) };
         if length < 0 {
@@ -366,11 +407,14 @@ impl ActorCapability {
     }
 
     pub(crate) fn enqueue_operation(&self, operation: CueOperation) -> PyResult<()> {
-        let start = {
+        let observed = operation.clone();
+        let (start, queued, running) = {
             let mut mailbox = lock(&self.mailbox);
             mailbox.enqueue(operation);
-            mailbox.claim_next_if_idle()
+            let start = mailbox.claim_next_if_idle();
+            (start, mailbox.queue.len(), mailbox.running.is_some())
         };
+        cue_producer::mailbox_changed(&observed, CueMailboxHook::Enqueued, queued, running);
         if let Some(operation) = start {
             self.drain_from(operation);
         }
@@ -397,7 +441,13 @@ impl ActorCapability {
         &self,
         operation: &CueOperation,
     ) -> MailboxTerminalTransition {
-        lock(&self.mailbox).terminal_transition(operation)
+        let (transition, queued, running) = {
+            let mut mailbox = lock(&self.mailbox);
+            let transition = mailbox.terminal_transition(operation);
+            (transition, mailbox.queue.len(), mailbox.running.is_some())
+        };
+        cue_producer::mailbox_changed(operation, CueMailboxHook::Retired, queued, running);
+        transition
     }
 
     pub(crate) fn finish_terminal_action(
@@ -621,6 +671,22 @@ mod tests {
     }
 
     #[test]
+    fn actor_act_exposes_keyword_only_optional_diagnostic_sink() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        Python::attach(|py| {
+            let signature = py
+                .import("inspect")?
+                .call_method1("signature", (py.get_type::<Actor>().getattr("act")?,))?;
+            assert_eq!(
+                signature.str()?.to_str()?,
+                "(self, /, *, script, output_schema, diagnostic_sink=None)"
+            );
+            Ok::<_, PyErr>(())
+        })
+        .expect("Actor.act signature must expose the diagnostic sink contract");
+    }
+
+    #[test]
     fn permit_stack_is_lifo_exact_and_single_use() {
         let _python_test_guard = crate::initialize_python_for_test();
         Python::attach(|py| {
@@ -793,8 +859,15 @@ mod tests {
                 capability.identity_address(),
                 PyString::new(py, "scene-cycle-cue0").unbind(),
             )?;
-            let operation =
-                CueOperation::new_runtime(&scene, &capability, &binding, cued, cue, py.None());
+            let operation = CueOperation::new_runtime(
+                &scene,
+                &capability,
+                &binding,
+                cued,
+                cue,
+                py.None(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
+            );
             lock(&capability.mailbox).enqueue(operation.clone());
 
             drop((operation, scene, binding, capability, state));
@@ -1049,6 +1122,7 @@ mod tests {
                 Arc::clone(&current_cued),
                 current_cue,
                 current_signal.clone().unbind(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
             );
             *lock(&current_slot) = Some(current.downgrade_for_test());
             current_prepared.commit(current.clone())?;
@@ -1090,6 +1164,7 @@ mod tests {
                 successor_cued,
                 successor_cue,
                 successor_signal.clone().unbind(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
             );
             *lock(&successor_slot) = Some(successor.downgrade_for_test());
             successor_prepared.commit(successor.clone())?;
@@ -1234,6 +1309,7 @@ mod tests {
                             cued,
                             cue,
                             signal.unbind(),
+                            crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
                         );
                         prepared.commit(operation)?;
                         lock(&caller_admissions).push((label, id));
@@ -1406,6 +1482,7 @@ mod tests {
                     Arc::clone(&first_cued),
                     first_cue,
                     first_signal.clone().unbind(),
+                    crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
                 );
                 first.force_callback_attachment_error_for_test(attachment_boom.clone_ref(py));
 
@@ -1436,6 +1513,7 @@ mod tests {
                     second_cued,
                     second_cue,
                     second_signal.clone().unbind(),
+                    crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
                 );
 
                 let trigger_prepared = Arc::new(Mutex::new(Some(prepared)));

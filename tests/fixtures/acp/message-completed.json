@@ -1,0 +1,12 @@
+[
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "first"},
+    "messageId": "provider-message-a"
+  },
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "second"},
+    "messageId": "provider-message-b"
+  }
+]

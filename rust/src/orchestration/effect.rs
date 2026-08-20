@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use pyo3::class::gc::{PyTraverseError, PyVisit};
 use pyo3::create_exception;
@@ -8,19 +8,23 @@ use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString, PyTuple, PyType};
 
+use crate::diagnostic_runtime::effect_producer::{self, EffectHook};
+use crate::orchestration::scene_context::CuedScope;
+
 create_exception!(troupe, EffectContextError, PyRuntimeError);
 
 const EFFECT_DIRECT_ERROR: &str = "Effect instances can only be created by Actor.make_effect()";
 const EFFECT_RESULT_ERROR: &str = "effect_type did not construct the requested Effect instance";
 
 #[derive(Debug)]
-struct EffectIdentity;
+pub(crate) struct EffectIdentity;
 
-struct EffectConstruction {
+pub(crate) struct EffectConstruction {
     effect_type: Py<PyType>,
     id: Py<PyString>,
     owner: Py<PyString>,
     identity: Arc<EffectIdentity>,
+    cued: Weak<CuedScope>,
     pid: u32,
     consumed: Cell<bool>,
 }
@@ -31,12 +35,14 @@ impl EffectConstruction {
         id: Py<PyString>,
         owner: Py<PyString>,
         identity: Arc<EffectIdentity>,
+        cued: Weak<CuedScope>,
     ) -> Self {
         Self {
             effect_type,
             id,
             owner,
             identity,
+            cued,
             pid: std::process::id(),
             consumed: Cell::new(false),
         }
@@ -48,6 +54,31 @@ impl EffectConstruction {
 
     fn matches(&self, effect: &Bound<'_, Effect>) -> bool {
         Arc::ptr_eq(&self.identity, &effect.borrow().identity)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn effect_type(&self, py: Python<'_>) -> Py<PyType> {
+        self.effect_type.clone_ref(py)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn id(&self, py: Python<'_>) -> Py<PyString> {
+        self.id.clone_ref(py)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn owner(&self, py: Python<'_>) -> Py<PyString> {
+        self.owner.clone_ref(py)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn identity(&self) -> &Arc<EffectIdentity> {
+        &self.identity
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_cued(&self) -> Option<Arc<CuedScope>> {
+        self.cued.upgrade()
     }
 }
 
@@ -78,12 +109,14 @@ fn enter_effect_permit(
     effect_type: &Bound<'_, PyType>,
     id: &Bound<'_, PyString>,
     owner: &Bound<'_, PyString>,
+    cued: Weak<CuedScope>,
 ) -> (Rc<EffectConstruction>, EffectPermitGuard) {
     let construction = Rc::new(EffectConstruction::new(
         effect_type.clone().unbind(),
         id.clone().unbind(),
         owner.clone().unbind(),
         Arc::new(EffectIdentity),
+        cued,
     ));
     EFFECT_PERMITS.with(|permits| permits.borrow_mut().push(Rc::clone(&construction)));
     let guard = EffectPermitGuard {
@@ -104,11 +137,14 @@ fn consume_effect_permit(cls: &Bound<'_, PyType>) -> PyResult<Effect> {
         return Err(PyTypeError::new_err(EFFECT_DIRECT_ERROR));
     }
 
-    Ok(Effect {
+    let effect = Effect {
         id: Mutex::new(Some(construction.id.clone_ref(cls.py()))),
         owner: Mutex::new(Some(construction.owner.clone_ref(cls.py()))),
         identity: Arc::clone(&construction.identity),
-    })
+        cued: construction.cued.clone(),
+    };
+    effect_producer::observe(&effect, EffectHook::Created);
+    Ok(effect)
 }
 
 pub(crate) fn construct_effect(
@@ -117,22 +153,44 @@ pub(crate) fn construct_effect(
     kwargs: &Bound<'_, PyDict>,
     id: Py<PyString>,
     owner: Py<PyString>,
+    cued: &Arc<CuedScope>,
 ) -> PyResult<Py<PyAny>> {
     let py = effect_type.py();
-    let (construction, guard) = enter_effect_permit(effect_type, id.bind(py), owner.bind(py));
-    let result = effect_type.call(args, Some(kwargs));
-    drop(guard);
-    let result = result?;
-    if !construction.was_consumed() {
-        return Err(PyTypeError::new_err(EFFECT_RESULT_ERROR));
+    let (construction, guard) = enter_effect_permit(
+        effect_type,
+        id.bind(py),
+        owner.bind(py),
+        Arc::downgrade(cued),
+    );
+    effect_producer::construction_started(&construction);
+    let result = (|| {
+        let result = effect_type.call(args, Some(kwargs));
+        drop(guard);
+        let result = result?;
+        if !construction.was_consumed() {
+            return Err(PyTypeError::new_err(EFFECT_RESULT_ERROR));
+        }
+        let effect = result
+            .cast::<Effect>()
+            .map_err(|_| PyTypeError::new_err(EFFECT_RESULT_ERROR))?;
+        if !construction.matches(effect) {
+            return Err(PyTypeError::new_err(EFFECT_RESULT_ERROR));
+        }
+        Ok(result.unbind())
+    })();
+    match &result {
+        Ok(value) => {
+            let effect = value
+                .bind(py)
+                .cast::<Effect>()
+                .expect("validated effect construction result");
+            effect_producer::construction_finished(&construction, Ok(effect));
+        }
+        Err(error) => {
+            effect_producer::construction_finished(&construction, Err(error));
+        }
     }
-    let effect = result
-        .cast::<Effect>()
-        .map_err(|_| PyTypeError::new_err(EFFECT_RESULT_ERROR))?;
-    if !construction.matches(effect) {
-        return Err(PyTypeError::new_err(EFFECT_RESULT_ERROR));
-    }
-    Ok(result.unbind())
+    result
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -146,6 +204,29 @@ pub struct Effect {
     id: Mutex<Option<Py<PyString>>>,
     owner: Mutex<Option<Py<PyString>>>,
     identity: Arc<EffectIdentity>,
+    cued: Weak<CuedScope>,
+}
+
+impl Effect {
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_id(&self, py: Python<'_>) -> Option<Py<PyString>> {
+        lock(&self.id).as_ref().map(|id| id.clone_ref(py))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_owner(&self, py: Python<'_>) -> Option<Py<PyString>> {
+        lock(&self.owner).as_ref().map(|owner| owner.clone_ref(py))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_identity(&self) -> &Arc<EffectIdentity> {
+        &self.identity
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn diagnostic_cued(&self) -> Option<Arc<CuedScope>> {
+        self.cued.upgrade()
+    }
 }
 
 #[pymethods]
@@ -186,13 +267,16 @@ impl Effect {
     fn __clear__(&self) {
         let id = lock(&self.id).take();
         let owner = lock(&self.owner).take();
+        if id.is_some() || owner.is_some() {
+            effect_producer::cleared(self, id.as_ref(), owner.as_ref());
+        }
         drop((id, owner));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{sync::Weak, thread};
 
     use pyo3::prelude::*;
     use pyo3::types::{PyString, PyType};
@@ -217,8 +301,8 @@ mod tests {
             let outer_id = PyString::new(py, "scene-cue0-effect0");
             let inner_id = PyString::new(py, "scene-cue0-effect1");
             let owner = PyString::new(py, "actor");
-            let (_, outer_guard) = enter_effect_permit(&outer_type, &outer_id, &owner);
-            let (_, inner_guard) = enter_effect_permit(&inner_type, &inner_id, &owner);
+            let (_, outer_guard) = enter_effect_permit(&outer_type, &outer_id, &owner, Weak::new());
+            let (_, inner_guard) = enter_effect_permit(&inner_type, &inner_id, &owner, Weak::new());
 
             let mismatch = match consume_effect_permit(&outer_type) {
                 Ok(_) => panic!("the top permit must require its exact class"),

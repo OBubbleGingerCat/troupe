@@ -1,0 +1,13 @@
+{
+  "content_type": "application/x-protobuf",
+  "run_id": "12345678-1234-4234-9234-123456789abc",
+  "captured_watermark": "2",
+  "exported_through": "1",
+  "api_schema_version": "1",
+  "event_schema_version": "1",
+  "exporter_schema_version": "1",
+  "troupe_version": "0.1.0",
+  "production_outcome": "failed",
+  "clean_shutdown": "true",
+  "content_warning": "trace may contain sensitive diagnostic metadata and user-provided attributes"
+}

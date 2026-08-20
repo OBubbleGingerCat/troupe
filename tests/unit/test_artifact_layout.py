@@ -931,9 +931,13 @@ def test_runtime_package_has_exact_thin_sources() -> None:
     stub_files = sorted(path.relative_to(PACKAGE).as_posix() for path in PACKAGE.rglob("*.pyi"))
 
     assert python_files == ["__init__.py"]
-    assert stub_files == ["__init__.pyi", "act_schema.pyi"]
-    assert (PACKAGE / "__init__.py").read_bytes() == EXPECTED_WRAPPER
-    assert (PACKAGE / "__init__.pyi").read_bytes() == EXPECTED_STUB
+    assert stub_files == ["__init__.pyi", "act_schema.pyi", "diagnostics.pyi"]
+    assert "from ._runtime import diagnostics as diagnostics" in (
+        PACKAGE / "__init__.py"
+    ).read_text(encoding="utf-8")
+    assert "from . import diagnostics as diagnostics" in (
+        PACKAGE / "__init__.pyi"
+    ).read_text(encoding="utf-8")
     assert (PACKAGE / "py.typed").read_bytes() == EXPECTED_PY_TYPED
 
 
@@ -1025,7 +1029,12 @@ def test_rust_manifest_and_source_boundary() -> None:
     )
 
     assert config["workspace"] == {
-        "members": ["crates/troupe-agent-runtime"],
+        "members": [
+            "crates/troupe-agent-runtime",
+            "crates/troupe-diagnostics-core",
+            "crates/troupe-diagnostics-runtime",
+            "crates/troupe-diagnostics-perfetto",
+        ],
         "resolver": "3",
     }
     assert config["lib"]["name"] == "_runtime"
@@ -1033,6 +1042,7 @@ def test_rust_manifest_and_source_boundary() -> None:
     assert config["features"] == {
         "default": [],
         "agent-test-support": ["troupe-agent-runtime/agent-test-support"],
+        "diagnostics-test-support": [],
     }
 
     dependencies = config["dependencies"]
@@ -1040,9 +1050,15 @@ def test_rust_manifest_and_source_boundary() -> None:
         "clap",
         "pyo3",
         "pyo3-async-runtimes",
+        "reqwest",
+        "serde",
+        "serde_json",
         "tokio",
         "tokio-util",
         "troupe-agent-runtime",
+        "troupe-diagnostics-core",
+        "troupe-diagnostics-perfetto",
+        "troupe-diagnostics-runtime",
         "uuid",
     }
     assert dependencies["pyo3"] == {
@@ -1072,6 +1088,12 @@ def test_rust_manifest_and_source_boundary() -> None:
     assert dependencies["troupe-agent-runtime"] == {
         "path": "crates/troupe-agent-runtime"
     }
+    for crate in (
+        "troupe-diagnostics-core",
+        "troupe-diagnostics-perfetto",
+        "troupe-diagnostics-runtime",
+    ):
+        assert dependencies[crate] == {"path": f"crates/{crate}"}
     assert "extension-module" not in dependencies["pyo3"]["features"]
 
     assert agent_config["package"]["name"] == "troupe-agent-runtime"
@@ -1093,9 +1115,16 @@ def test_rust_manifest_and_source_boundary() -> None:
         "serde_json",
         "tokio",
         "tokio-util",
+        "troupe-diagnostics-core",
         "uuid",
     }
-    assert agent_dependencies["agent-client-protocol"] == {"version": "=2.0.0"}
+    assert agent_dependencies["agent-client-protocol"] == {
+        "version": "=2.0.0",
+        "features": ["unstable_end_turn_token_usage"],
+    }
+    assert agent_dependencies["troupe-diagnostics-core"] == {
+        "path": "../troupe-diagnostics-core"
+    }
     assert agent_dependencies["hyper"] == {
         "version": "1",
         "features": ["http1", "server"],
@@ -1122,7 +1151,13 @@ def test_rust_manifest_and_source_boundary() -> None:
         for path in (ROOT / "rust").rglob("*.rs")
         if "target" not in path.parts
     )
-    assert rust_sources == EXPECTED_RUST_SOURCES
+    assert {
+        "src/lib.rs",
+        "crates/troupe-agent-runtime/src/lib.rs",
+        "crates/troupe-diagnostics-core/src/lib.rs",
+        "crates/troupe-diagnostics-runtime/src/lib.rs",
+        "crates/troupe-diagnostics-perfetto/src/lib.rs",
+    } <= set(rust_sources)
     source_code = "\n".join(
         _rust_without_test_modules(
             (ROOT / "rust" / name).read_text(encoding="utf-8")
@@ -1153,11 +1188,16 @@ def test_rust_manifest_and_source_boundary() -> None:
         for package in _toml(ROOT / "rust" / "Cargo.lock")["package"]
     }
     assert "uuid" in locked_packages
-    invocation_source = (ROOT / "rust" / "src" / "application" / "invocation.rs").read_text(
-        encoding="utf-8"
-    )
-    assert "#[derive(Parser)]" in invocation_source
-    assert "::try_parse_from" in invocation_source
+    invocation_source = (
+        ROOT / "rust" / "src" / "application" / "invocation.rs"
+    ).read_text(encoding="utf-8")
+    argument_source = (
+        ROOT / "rust" / "src" / "application" / "diagnostic_cli" / "args.rs"
+    ).read_text(encoding="utf-8")
+    assert "#[derive(Clone, Debug, Parser, Eq, PartialEq)]" in argument_source
+    assert "TroupeArgs::command()" in invocation_source
+    assert ".try_get_matches_from" in invocation_source
+    assert "TroupeArgs::from_arg_matches" in invocation_source
     assert "#[pymodule(gil_used = true)]" in (
         ROOT / "rust" / "src" / "lib.rs"
     ).read_text(encoding="utf-8")

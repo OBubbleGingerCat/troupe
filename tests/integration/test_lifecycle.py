@@ -84,6 +84,7 @@ def test_runtime_is_a_private_native_surface() -> None:
         "EffectContextError",
         "Production",
         "act_schema",
+        "diagnostics",
     ]
 
 

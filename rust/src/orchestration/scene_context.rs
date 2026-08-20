@@ -14,6 +14,10 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::agent::AgentTurnControl;
+use crate::diagnostic_runtime::cue_producer::{self, CueHook};
+use crate::diagnostic_runtime::scene_drain_producer::{self, SceneDrainHook, SceneDriverExit};
+use crate::diagnostic_runtime::scene_producer::{self, SceneHook};
+use crate::orchestration::DiagnosticAdmissionSlot;
 use crate::orchestration::actor_registry::ProductionState;
 use crate::orchestration::mailbox::CueOperation;
 use crate::orchestration::python_task::{
@@ -178,6 +182,11 @@ pub(crate) struct SceneScope {
 }
 
 impl SceneScope {
+    fn observe_closed(&self) {
+        scene_drain_producer::observe(self, SceneDrainHook::CleanupFinished);
+        scene_producer::observe_scene(self, SceneHook::SceneFinished);
+    }
+
     fn new(name: Py<PyString>, counter: Py<PyInt>, binding: Weak<RunBinding>) -> Arc<Self> {
         Arc::new(Self {
             name,
@@ -198,11 +207,13 @@ impl SceneScope {
         binding: &Arc<RunBinding>,
     ) -> PyResult<Arc<Self>> {
         let zero = 0_i64.into_pyobject(py)?.cast_into::<PyInt>()?.unbind();
-        Ok(Self::new(
+        let scene = Self::new(
             PyString::new(py, name).unbind(),
             zero,
             Arc::downgrade(binding),
-        ))
+        );
+        scene_producer::observe_scene(&scene, SceneHook::SceneCreated);
+        Ok(scene)
     }
 
     #[cfg(test)]
@@ -265,26 +276,43 @@ impl SceneScope {
         if let Some(binding) = self.binding() {
             Python::attach(|py| binding.ensure_wrapper_for_drain(py));
         }
-        let operations = {
+        enum CloseAction {
+            Closed,
+            Pending,
+            Cancel(Vec<CueOperation>),
+        }
+        let action = {
             let mut state = lock(&self.state);
             match state.phase {
                 ScenePhase::Open => {
                     if state.operations.is_empty() {
                         state.phase = ScenePhase::Closed;
-                        self.closed.notify_waiters();
-                        return;
+                        CloseAction::Closed
+                    } else {
+                        state.phase = ScenePhase::Closing;
+                        CloseAction::Cancel(state.operations.clone())
                     }
-                    state.phase = ScenePhase::Closing;
-                    state.operations.clone()
                 }
                 ScenePhase::Admitting(token) => {
                     state.phase = ScenePhase::ClosePending(token);
-                    return;
+                    CloseAction::Pending
                 }
                 ScenePhase::ClosePending(_) | ScenePhase::Closing | ScenePhase::Closed => return,
             }
         };
-        self.cancel_operations(operations);
+        scene_drain_producer::observe(self, SceneDrainHook::AdmissionClosed);
+        scene_drain_producer::observe(self, SceneDrainHook::CleanupStarted);
+        match action {
+            CloseAction::Closed => {
+                self.observe_closed();
+                self.closed.notify_waiters();
+            }
+            CloseAction::Pending => {}
+            CloseAction::Cancel(operations) => {
+                scene_drain_producer::observe(self, SceneDrainHook::CancellationStarted);
+                self.cancel_operations(operations);
+            }
+        }
     }
 
     fn cancel_operations(&self, operations: Vec<CueOperation>) {
@@ -330,6 +358,7 @@ impl SceneScope {
             (removed, closed)
         };
         if closed {
+            self.observe_closed();
             self.closed.notify_waiters();
         }
         removed
@@ -338,14 +367,19 @@ impl SceneScope {
     pub(crate) async fn wait_closed(&self) {
         loop {
             let notified = self.closed.notified();
-            let closed = {
+            let (closed, transitioned) = {
                 let mut state = lock(&self.state);
                 if matches!(state.phase, ScenePhase::Closing) && state.operations.is_empty() {
                     state.phase = ScenePhase::Closed;
+                    (true, true)
+                } else {
+                    (matches!(state.phase, ScenePhase::Closed), false)
                 }
-                matches!(state.phase, ScenePhase::Closed)
             };
             if closed {
+                if transitioned {
+                    self.observe_closed();
+                }
                 return;
             }
             notified.await;
@@ -362,18 +396,23 @@ impl SceneScope {
             match state.phase {
                 ScenePhase::Admitting(current) if current == token => {
                     state.phase = ScenePhase::Open;
-                    Vec::new()
+                    None
                 }
                 ScenePhase::ClosePending(current) if current == token => {
                     state.phase = ScenePhase::Closing;
-                    state.operations.clone()
+                    Some(state.operations.clone())
                 }
                 _ => return,
             }
         };
         #[cfg(test)]
         record_admission_metric_for_test(AdmissionMetric::Rollback);
-        self.cancel_operations(operations);
+        if let Some(operations) = operations {
+            if !operations.is_empty() {
+                scene_drain_producer::observe(self, SceneDrainHook::CancellationStarted);
+            }
+            self.cancel_operations(operations);
+        }
     }
 
     #[cfg(test)]
@@ -500,7 +539,11 @@ impl PreparedAdmission {
             (old, operations_to_cancel)
         };
         drop(old);
+        cue_producer::observe(&operation, CueHook::Admitted);
         if let Some(operations) = operations_to_cancel {
+            if !operations.is_empty() {
+                scene_drain_producer::observe(&self.scope, SceneDrainHook::CancellationStarted);
+            }
             self.scope.cancel_operations(operations);
         }
         operation.enqueue()?;
@@ -633,6 +676,11 @@ impl CuedScope {
         self.source.clone_ref(py)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn cue_id(&self, py: Python<'_>) -> Py<PyString> {
+        self.cue_id.clone_ref(py)
+    }
+
     pub(crate) fn actor_identity(&self) -> usize {
         self.actor_identity
     }
@@ -697,6 +745,7 @@ pub(crate) struct RunBinding {
     original_factory: Py<PyAny>,
     wrapper: Mutex<Option<Py<TaskFactoryWrapper>>>,
     factory_replaced: AtomicBool,
+    diagnostic_admission: DiagnosticAdmissionSlot,
 }
 
 impl RunBinding {
@@ -720,7 +769,9 @@ impl RunBinding {
             original_factory,
             wrapper: Mutex::new(None),
             factory_replaced: AtomicBool::new(false),
+            diagnostic_admission: DiagnosticAdmissionSlot::new(),
         });
+        scene_producer::binding_created(&binding);
         let wrapper = Py::new(py, TaskFactoryWrapper::new(Arc::downgrade(&binding)))?;
         *lock(&binding.wrapper) = Some(wrapper);
         Ok(binding)
@@ -730,6 +781,17 @@ impl RunBinding {
         self.event_loop.clone_ref(py)
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn production(&self) -> Option<Arc<ProductionState>> {
+        self.production.upgrade()
+    }
+
+    // Unit tests replace the production sink binding with a direct Act hook.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn diagnostic_admission(&self) -> &DiagnosticAdmissionSlot {
+        &self.diagnostic_admission
+    }
+
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.event_loop)?;
         visit.call(&self.current_task_lookup)?;
@@ -737,7 +799,8 @@ impl RunBinding {
         visit.call(&self.original_factory)?;
         visit.call(&*lock(&self.wrapper))?;
         lock(&self.tasks).traverse(visit)?;
-        self.permits.traverse(visit)
+        self.permits.traverse(visit)?;
+        self.diagnostic_admission.traverse(visit)
     }
 
     pub(crate) fn production_matches(&self, production: &Arc<ProductionState>) -> bool {
@@ -835,7 +898,7 @@ impl RunBinding {
         self.factory_replaced.store(true, Ordering::Release);
     }
 
-    fn current_task<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    pub(crate) fn current_task<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("loop", self.event_loop.bind(py))?;
         let task = self.current_task_lookup.bind(py).call((), Some(&kwargs))?;
@@ -915,6 +978,16 @@ impl RunBinding {
         lock(&self.tasks).register(task, lineage)
     }
 
+    #[cfg(not(test))]
+    pub(crate) fn replace_task_lineage_if(
+        &self,
+        task: &Bound<'_, PyAny>,
+        expected_authority_generation: Option<u64>,
+        lineage: TaskLineage,
+    ) -> bool {
+        lock(&self.tasks).replace_if(task, expected_authority_generation, lineage)
+    }
+
     fn unregister_task(&self, task: &Bound<'_, PyAny>) {
         lock(&self.tasks).unregister(task);
     }
@@ -954,7 +1027,10 @@ impl RunBinding {
         let exact_lineage = self.permits.consume_exact(coroutine);
         let lineage = match exact_lineage {
             Some(lineage) => Some(lineage),
-            None => self.current_lineage(py)?.filter(TaskLineage::is_active),
+            None => self
+                .current_lineage(py)?
+                .filter(TaskLineage::is_active)
+                .map(|lineage| lineage.for_registered_child()),
         };
         let delegate_permit = lineage
             .as_ref()
@@ -1024,6 +1100,7 @@ impl RunBinding {
             original_factory: py.None(),
             wrapper: Mutex::new(None),
             factory_replaced: AtomicBool::new(false),
+            diagnostic_admission: DiagnosticAdmissionSlot::new(),
         })
     }
 }
@@ -1037,6 +1114,7 @@ enum ScopeOwner {
 pub(crate) struct ScopeDriver {
     owner: ScopeOwner,
     inner: Mutex<Option<Py<PyAny>>>,
+    owner_closed: AtomicBool,
 }
 
 impl ScopeDriver {
@@ -1044,6 +1122,7 @@ impl ScopeDriver {
         Self {
             owner: ScopeOwner::Scene(scene),
             inner: Mutex::new(Some(inner)),
+            owner_closed: AtomicBool::new(false),
         }
     }
 
@@ -1051,12 +1130,19 @@ impl ScopeDriver {
         Self {
             owner: ScopeOwner::Cued(cued),
             inner: Mutex::new(Some(inner)),
+            owner_closed: AtomicBool::new(false),
         }
     }
 
-    fn close_owner(&self) {
+    fn close_owner(&self, exit: SceneDriverExit, error: Option<&PyErr>) {
+        if self.owner_closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         match &self.owner {
-            ScopeOwner::Scene(scene) => scene.close(),
+            ScopeOwner::Scene(scene) => {
+                scene_drain_producer::driver_exited(scene, exit, error);
+                scene.close();
+            }
             ScopeOwner::Cued(cued) => cued.close_inline(),
         }
     }
@@ -1071,7 +1157,7 @@ impl ScopeDriver {
             Err(error) => {
                 let inner = lock(&self.inner).take();
                 drop(inner);
-                self.close_owner();
+                self.close_owner(SceneDriverExit::Returned, Some(&error));
                 Err(error)
             }
         }
@@ -1082,6 +1168,7 @@ impl ScopeDriver {
         Self {
             owner: ScopeOwner::Scene(scene),
             inner: Mutex::new(None),
+            owner_closed: AtomicBool::new(false),
         }
     }
 
@@ -1090,6 +1177,7 @@ impl ScopeDriver {
         Self {
             owner: ScopeOwner::Cued(cued),
             inner: Mutex::new(None),
+            owner_closed: AtomicBool::new(false),
         }
     }
 }
@@ -1110,7 +1198,7 @@ impl ScopeDriver {
             Some(inner) => inner.bind(py).call_method0("close").map(|_| ()),
             None => Ok(()),
         };
-        self.close_owner();
+        self.close_owner(SceneDriverExit::Closed, result.as_ref().err());
         result
     }
 
@@ -1137,7 +1225,7 @@ impl ScopeDriver {
     fn __clear__(&self) {
         let inner = lock(&self.inner).take();
         drop(inner);
-        self.close_owner();
+        self.close_owner(SceneDriverExit::Cleared, None);
     }
 }
 
@@ -1746,6 +1834,7 @@ mod tests {
                 cued,
                 cue,
                 event_loop.call_method0("create_future")?.unbind(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
             );
             let signal = operation.signal_for_test(py);
 

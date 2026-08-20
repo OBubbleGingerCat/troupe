@@ -33,3 +33,9 @@ __pycache__/
 *.py[cod]
 src/troupe/_runtime*.so
 wheel-artifact/
+.troupe/
+/.troupe-test/
+
+# Local frontend dependencies and build output
+frontend/diagnostics/node_modules/
+frontend/diagnostics/dist/

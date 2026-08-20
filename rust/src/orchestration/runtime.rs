@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -10,8 +10,11 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::application::failure::lifecycle_result;
+use crate::diagnostic_runtime::runtime_producer::{self, RuntimeHook};
 use crate::orchestration::production::Production;
-use crate::orchestration::python_task::{apply_task_factory_action, await_hook, create_scene_task};
+use crate::orchestration::python_task::{
+    RuntimeTaskPhase, apply_task_factory_action, await_hook, create_scene_task,
+};
 use crate::orchestration::scene_context::{FACTORY_REPLACED_ERROR, RunBinding, TaskFactoryAction};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,6 +28,7 @@ enum RunState {
 pub(crate) struct RuntimeCore {
     state: AtomicU8,
     shutdown: CancellationToken,
+    shutdown_observed: AtomicBool,
 }
 
 impl RuntimeCore {
@@ -32,6 +36,7 @@ impl RuntimeCore {
         Self {
             state: AtomicU8::new(RunState::New as u8),
             shutdown: CancellationToken::new(),
+            shutdown_observed: AtomicBool::new(false),
         }
     }
 
@@ -51,10 +56,17 @@ impl RuntimeCore {
 
     pub(crate) fn request_shutdown(&self) {
         self.shutdown.cancel();
+        if !self.shutdown_observed.swap(true, Ordering::AcqRel) {
+            runtime_producer::observe_core(self, RuntimeHook::ShutdownRequested);
+        }
     }
 
-    fn shutdown_requested(&self) -> bool {
+    pub(crate) fn shutdown_requested(&self) -> bool {
         self.shutdown.is_cancelled()
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     #[cfg(test)]
@@ -85,6 +97,7 @@ impl Drop for RunPermit {
         self.core
             .state
             .store(RunState::Finished as u8, Ordering::Release);
+        runtime_producer::observe_core(&self.core, RuntimeHook::RunFinished);
     }
 }
 
@@ -112,9 +125,30 @@ pub(crate) async fn run_lifecycle(
     binding: Arc<RunBinding>,
 ) -> PyResult<()> {
     let mut failures = Vec::with_capacity(2);
-    if let Err(error) = await_hook(&locals, &production, "start").await {
+    runtime_producer::observe_binding(&binding, RuntimeHook::ProductionStartEntered, None);
+    let start_result = await_hook(
+        &locals,
+        &production,
+        Arc::clone(&binding),
+        RuntimeTaskPhase::Start,
+        "start",
+        Some(permit.core.shutdown_token()),
+    )
+    .await;
+    runtime_producer::observe_binding(
+        &binding,
+        RuntimeHook::ProductionStartReturned,
+        start_result.as_ref().err(),
+    );
+    if let Err(error) = start_result {
         failures.push(("start", error));
-        return lifecycle_result(failures);
+        let result = lifecycle_result(failures);
+        runtime_producer::observe_binding(
+            &binding,
+            RuntimeHook::RunLifecycleReturned,
+            result.as_ref().err(),
+        );
+        return result;
     }
 
     if let Err(error) =
@@ -124,6 +158,7 @@ pub(crate) async fn run_lifecycle(
     }
 
     while failures.is_empty() && !permit.core.shutdown_requested() {
+        runtime_producer::observe_binding(&binding, RuntimeHook::SceneEntered, None);
         let scene_result = async {
             let task = create_scene_task(&locals, &production, Arc::clone(&binding))
                 .await
@@ -158,6 +193,14 @@ pub(crate) async fn run_lifecycle(
         }
         .await;
 
+        let scene_error = match &scene_result {
+            Ok(()) => None,
+            Err(SceneFailure::Completion(error) | SceneFailure::CancellationDispatch(error)) => {
+                Some(error)
+            }
+        };
+        runtime_producer::observe_binding(&binding, RuntimeHook::SceneReturned, scene_error);
+
         let replacement = binding.factory_replaced();
         match scene_result {
             Ok(()) if replacement => {
@@ -188,10 +231,31 @@ pub(crate) async fn run_lifecycle(
         _ => {}
     }
 
-    if let Err(error) = await_hook(&locals, &production, "stop").await {
+    runtime_producer::observe_binding(&binding, RuntimeHook::ProductionStopEntered, None);
+    let stop_result = await_hook(
+        &locals,
+        &production,
+        Arc::clone(&binding),
+        RuntimeTaskPhase::Stop,
+        "stop",
+        None,
+    )
+    .await;
+    runtime_producer::observe_binding(
+        &binding,
+        RuntimeHook::ProductionStopReturned,
+        stop_result.as_ref().err(),
+    );
+    if let Err(error) = stop_result {
         failures.push(("stop", error));
     }
-    lifecycle_result(failures)
+    let result = lifecycle_result(failures);
+    runtime_producer::observe_binding(
+        &binding,
+        RuntimeHook::RunLifecycleReturned,
+        result.as_ref().err(),
+    );
+    result
 }
 
 struct OuterRunGuard {
@@ -244,6 +308,13 @@ impl Runtime {
         let event_loop = locals.event_loop(py);
         let binding = RunBinding::new(py, &production_state, &event_loop)?;
         production_state.bind(&binding)?;
+        crate::diagnostic_runtime::activation::bind_run(
+            py,
+            &self.core,
+            &production_state,
+            &binding,
+        )?;
+        runtime_producer::run_started(&self.core, &binding);
         let (sender, receiver) = oneshot::channel();
         let core = Arc::clone(&self.core);
         pyo3_async_runtimes::tokio::get_runtime().spawn(async move {

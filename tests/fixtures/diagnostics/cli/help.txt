@@ -1,0 +1,35 @@
+Run a Production or inspect its diagnostics
+
+Usage: troupe [OPTIONS] --production <PACKAGE_DIR> [-- <PRODUCTION_ARGS>...]
+       troupe <COMMAND>
+
+Commands:
+  diagnostic  Inspect active and archived Production diagnostics
+
+Arguments:
+  [PRODUCTION_ARGS]...  Arguments passed unchanged to the Production after `--`
+
+Options:
+      --production <PACKAGE_DIR>
+          Python package directory containing the Production
+      --diagnostic-bind-host <HOST>
+          Diagnostic server bind host [default: 0.0.0.0]
+      --diagnostic-port <PORT>
+          Diagnostic server bind port; zero selects an available port [default: 0]
+      --diagnostic-advertise-url <BASE_URL>
+          Externally advertised diagnostic base URL
+      --diagnostic-max-run-bytes <SIZE>
+          Maximum retained bytes for one diagnostic Run
+      --diagnostic-writer-stall-timeout <DURATION>
+          Maximum diagnostic writer progress stall [default: 10s]
+      --diagnostic-shutdown-timeout <DURATION>
+          Maximum diagnostic shutdown drain time [default: 30s]
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+
+Run a Production:
+  troupe --production <PACKAGE_DIR> [RUNTIME_OPTIONS] [-- <PRODUCTION_ARGS>...]
+
+Production arguments begin only after the first exact `--`; no `troupe run` subcommand is required.

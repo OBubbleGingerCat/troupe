@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/troupe-agent-runtime"]
+members = [
+    "crates/troupe-agent-runtime",
+    "crates/troupe-diagnostics-core",
+    "crates/troupe-diagnostics-runtime",
+    "crates/troupe-diagnostics-perfetto",
+]
 resolver = "3"
 
 [package]
@@ -14,12 +19,19 @@ crate-type = ["cdylib"]
 [features]
 default = []
 agent-test-support = ["troupe-agent-runtime/agent-test-support"]
+diagnostics-test-support = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 pyo3 = { version = "0.29.0", features = ["abi3-py310", "experimental-async"] }
 pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 troupe-agent-runtime = { path = "crates/troupe-agent-runtime" }
+troupe-diagnostics-core = { path = "crates/troupe-diagnostics-core" }
+troupe-diagnostics-perfetto = { path = "crates/troupe-diagnostics-perfetto" }
+troupe-diagnostics-runtime = { path = "crates/troupe-diagnostics-runtime" }
 uuid = { version = "1", features = ["v4"] }

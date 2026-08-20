@@ -8,8 +8,12 @@ publish = false
 default = []
 agent-test-support = []
 
+[[test]]
+name = "diagnostic_result"
+required-features = ["agent-test-support"]
+
 [dependencies]
-agent-client-protocol = { version = "=2.0.0" }
+agent-client-protocol = { version = "=2.0.0", features = ["unstable_end_turn_token_usage"] }
 base64 = "0.22"
 bytes = "1"
 futures = "0.3"
@@ -23,4 +27,5 @@ pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
+troupe-diagnostics-core = { path = "../troupe-diagnostics-core" }
 uuid = { version = "1", features = ["v4"] }

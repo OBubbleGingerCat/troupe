@@ -1,0 +1,17 @@
+[
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "generation-one"},
+    "messageId": "provider-message-reused"
+  },
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "boundary"},
+    "messageId": "provider-message-boundary"
+  },
+  {
+    "sessionUpdate": "agent_message_chunk",
+    "content": {"type": "text", "text": "generation-two"},
+    "messageId": "provider-message-reused"
+  }
+]
