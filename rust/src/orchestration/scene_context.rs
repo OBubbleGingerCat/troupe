@@ -1834,6 +1834,7 @@ mod tests {
                 cued,
                 cue,
                 event_loop.call_method0("create_future")?.unbind(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
             );
             let signal = operation.signal_for_test(py);
 

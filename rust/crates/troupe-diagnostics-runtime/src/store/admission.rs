@@ -9,13 +9,17 @@ use std::{
 
 use troupe_diagnostics_core::hub::{
     AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
-    MandatoryDurableReserver,
+    CueCaptureDecision, MandatoryDurableReserver,
 };
 
 use super::watermark::{CommitNotification, CommitObserver};
 
 pub const MAX_UNCOMMITTED_EVENTS: usize = 32_768;
 pub const MAX_UNCOMMITTED_CANONICAL_BYTES: usize = 64 * 1024 * 1024;
+pub const CUE_CAPTURE_PAUSE_EVENTS: usize = MAX_UNCOMMITTED_EVENTS * 3 / 4;
+pub const CUE_CAPTURE_PAUSE_CANONICAL_BYTES: usize = MAX_UNCOMMITTED_CANONICAL_BYTES * 3 / 4;
+pub const CUE_CAPTURE_RESUME_EVENTS: usize = MAX_UNCOMMITTED_EVENTS / 4;
+pub const CUE_CAPTURE_RESUME_CANONICAL_BYTES: usize = MAX_UNCOMMITTED_CANONICAL_BYTES / 4;
 
 #[derive(Clone)]
 pub struct MandatoryIngress {
@@ -36,6 +40,8 @@ struct IngressState {
     committed_sequence: u64,
     run_id: Option<troupe_diagnostics_core::id::CanonicalUuid>,
     normal_ingress_sealed: bool,
+    cue_capture_paused: bool,
+    suppressed_cues: u64,
     fatal_admission_authorized: bool,
     failure: Option<IngressCoreFailure>,
     fatal_state: FatalAdmissionState,
@@ -99,6 +105,59 @@ impl MandatoryIngress {
         };
         tracked.phase = DeliveryPhase::InFlight;
         Ok(Some(tracked.event.clone()))
+    }
+
+    pub fn begin_cue_capture(&self) -> Result<CueCaptureDecision, IngressStateError> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| IngressStateError::StatePoisoned)?;
+        if state.normal_ingress_sealed {
+            return Ok(CueCaptureDecision::Capture);
+        }
+
+        let current_events = state
+            .reserved_events
+            .saturating_add(state.outstanding.len());
+        let current_bytes = state
+            .reserved_canonical_bytes
+            .saturating_add(state.outstanding_canonical_bytes);
+        if state.cue_capture_paused {
+            if current_events <= CUE_CAPTURE_RESUME_EVENTS
+                && current_bytes <= CUE_CAPTURE_RESUME_CANONICAL_BYTES
+            {
+                state.cue_capture_paused = false;
+                let suppressed_cues = std::mem::take(&mut state.suppressed_cues);
+                return Ok(if suppressed_cues == 0 {
+                    CueCaptureDecision::Capture
+                } else {
+                    CueCaptureDecision::Resume { suppressed_cues }
+                });
+            }
+            state.suppressed_cues = state.suppressed_cues.saturating_add(1);
+            return Ok(CueCaptureDecision::Suppress);
+        }
+
+        if current_events >= CUE_CAPTURE_PAUSE_EVENTS
+            || current_bytes >= CUE_CAPTURE_PAUSE_CANONICAL_BYTES
+        {
+            state.cue_capture_paused = true;
+            state.suppressed_cues = 1;
+            return Ok(CueCaptureDecision::Suppress);
+        }
+        Ok(CueCaptureDecision::Capture)
+    }
+
+    pub fn finish_cue_capture(&self) -> Result<Option<u64>, IngressStateError> {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .map_err(|_| IngressStateError::StatePoisoned)?;
+        state.cue_capture_paused = false;
+        let suppressed_cues = std::mem::take(&mut state.suppressed_cues);
+        Ok((suppressed_cues > 0).then_some(suppressed_cues))
     }
 
     pub fn retry_in_flight(&self) -> Result<Vec<AcceptedDiagnosticEvent>, IngressStateError> {
@@ -187,7 +246,7 @@ impl MandatoryIngress {
             .lock()
             .map_err(|_| IngressAdmissionError::StatePoisoned)?;
         match class {
-            ReservationClass::Normal => {
+            ReservationClass::Normal | ReservationClass::Cue => {
                 if state.normal_ingress_sealed {
                     return Err(IngressAdmissionError::Sealed(state.failure));
                 }
@@ -236,6 +295,13 @@ impl MandatoryIngress {
             return Err(IngressAdmissionError::BudgetExhausted(failure));
         }
 
+        if class == ReservationClass::Cue
+            && (candidate_events.is_some_and(|value| value >= CUE_CAPTURE_PAUSE_EVENTS)
+                || candidate_bytes.is_some_and(|value| value >= CUE_CAPTURE_PAUSE_CANONICAL_BYTES))
+        {
+            state.cue_capture_paused = true;
+        }
+
         state.reserved_events = state
             .reserved_events
             .checked_add(size.event_count())
@@ -271,7 +337,19 @@ impl AdmissionReserver for MandatoryIngress {
     }
 }
 
-impl MandatoryDurableReserver for MandatoryIngress {}
+impl MandatoryDurableReserver for MandatoryIngress {
+    fn try_reserve_cue(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
+        self.reserve(size, ReservationClass::Cue)
+    }
+
+    fn begin_cue_capture(&self) -> Result<CueCaptureDecision, Self::Error> {
+        MandatoryIngress::begin_cue_capture(self).map_err(|_| IngressAdmissionError::StatePoisoned)
+    }
+
+    fn finish_cue_capture(&self) -> Result<Option<u64>, Self::Error> {
+        MandatoryIngress::finish_cue_capture(self).map_err(|_| IngressAdmissionError::StatePoisoned)
+    }
+}
 
 impl CommitObserver for MandatoryIngress {
     fn committed(&mut self, notification: CommitNotification) {
@@ -289,6 +367,7 @@ pub struct IngressReservation {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ReservationClass {
     Normal,
+    Cue,
     Fatal,
 }
 
@@ -458,6 +537,7 @@ pub struct IngressStatus {
     in_flight_events: usize,
     committed_sequence: u64,
     normal_ingress_sealed: bool,
+    cue_capture_paused: bool,
     failure: Option<IngressCoreFailure>,
 }
 
@@ -477,6 +557,7 @@ impl IngressStatus {
             in_flight_events,
             committed_sequence: state.committed_sequence,
             normal_ingress_sealed: state.normal_ingress_sealed,
+            cue_capture_paused: state.cue_capture_paused,
             failure: state.failure,
         }
     }
@@ -511,6 +592,10 @@ impl IngressStatus {
 
     pub const fn normal_ingress_sealed(&self) -> bool {
         self.normal_ingress_sealed
+    }
+
+    pub const fn cue_capture_paused(&self) -> bool {
+        self.cue_capture_paused
     }
 
     pub const fn failure(&self) -> Option<IngressCoreFailure> {

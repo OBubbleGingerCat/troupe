@@ -16,6 +16,12 @@ use crate::orchestration::scene_context::CuedScope;
 use crate::orchestration::scene_context::{RunBinding, SceneScope};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CueCaptureMode {
+    Capture,
+    Suppress,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CueHook {
     Admitted,
     Dispatched,
@@ -86,7 +92,15 @@ pub(crate) fn lineage_snapshot(cued: &Arc<CuedScope>) -> Option<CueLineageSnapsh
 pub(crate) fn created(_id: &Py<PyString>, _source: &Py<PyString>) {}
 
 #[inline]
-pub(crate) fn admission_started(_binding: &RunBinding, _scene: &SceneScope) {}
+pub(crate) fn admission_started(binding: &RunBinding, scene: &SceneScope) -> CueCaptureMode {
+    #[cfg(not(test))]
+    return active::admission_started(binding, scene);
+    #[cfg(test)]
+    {
+        let _ = (binding, scene);
+        CueCaptureMode::Capture
+    }
+}
 
 #[inline]
 pub(crate) fn observe(operation: &CueOperation, hook: CueHook) {
@@ -140,20 +154,22 @@ mod active {
         scalar::SchemaU64,
     };
 
-    use super::{CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation, CueTerminalOutcome};
+    use super::{
+        CueCaptureMode, CueHook, CueLineageSnapshot, CueMailboxHook, CueOperation,
+        CueTerminalOutcome,
+    };
     use crate::diagnostic_runtime::{
         actor_producer, effect_producer,
-        load_producer::{DiagnosticProducerError, DiagnosticRunContext},
+        load_producer::{CueDiagnosticCapture, DiagnosticProducerError, DiagnosticRunContext},
         runtime_producer::{self, RuntimeLifecycleProducer},
         scene_producer,
     };
-    use crate::orchestration::scene_context::CuedScope;
+    use crate::orchestration::scene_context::{CuedScope, RunBinding, SceneScope};
 
     const CUE_CANCELLED: &str = "cue-cancelled";
     const CUE_DISPATCH_FAILED: &str = "cue-dispatch-failed";
     const CUE_EXECUTION_FAILED: &str = "cue-execution-failed";
     const CUE_CLEANUP_FAILED: &str = "cue-cleanup-failed";
-
     static NEXT_CUE_ID: AtomicU64 = AtomicU64::new(1);
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,8 +247,20 @@ mod active {
             );
             let actor_scope =
                 DiagnosticScope::new(None, Some(actor_id), None, None, None, None, None);
+            let context = match runtime.context().for_cue(
+                scene_lineage.run_span_id(),
+                scene_lineage.scope().clone(),
+                scene_lineage.scene_span_id(),
+                operation.diagnostic_capture_mode() == CueCaptureMode::Suppress,
+            ) {
+                Ok(context) => context,
+                Err(error) => {
+                    runtime.latch_diagnostic_failure(error);
+                    return Err("cue.capture-context-failed");
+                }
+            };
             Ok(Some(Self {
-                context: runtime.context(),
+                context,
                 runtime,
                 cue_scope,
                 actor_scope,
@@ -549,6 +577,37 @@ mod active {
         fn fail_state(&self, state: &mut CueLifecycleState, code: &'static str) {
             state.producer_failed = true;
             self.runtime.latch_state_failure(code);
+        }
+    }
+
+    pub(super) fn admission_started(binding: &RunBinding, scene: &SceneScope) -> CueCaptureMode {
+        let Some(runtime) = runtime_producer::producer_for_binding(binding) else {
+            return CueCaptureMode::Capture;
+        };
+        let context = runtime.context();
+        match context.begin_cue_capture() {
+            Ok(CueDiagnosticCapture::Capture) => CueCaptureMode::Capture,
+            Ok(CueDiagnosticCapture::Suppress) => CueCaptureMode::Suppress,
+            Ok(CueDiagnosticCapture::Resume {
+                suppressed_cues,
+                affected_elapsed,
+            }) => {
+                let Some(scene_lineage) = scene_producer::snapshot_for_scene(scene) else {
+                    runtime.latch_state_failure("cue.capture-resume-scene-lineage-unavailable");
+                    return CueCaptureMode::Capture;
+                };
+                let scope = scene_lineage.scope().clone();
+                if let Err(error) =
+                    context.emit_cue_capture_gap(scope, suppressed_cues, affected_elapsed)
+                {
+                    runtime.latch_diagnostic_failure(error);
+                }
+                CueCaptureMode::Capture
+            }
+            Err(error) => {
+                runtime.latch_diagnostic_failure(error);
+                CueCaptureMode::Capture
+            }
         }
     }
 

@@ -51,6 +51,12 @@ observations are known to be missing. It names the producer and reason and may
 bound the affected count, event kind, scope, and elapsed interval. Unknown
 count remains unknown rather than becoming zero.
 
+The runtime's `cue-diagnostics-suppressed` gap is emitted after durable-ingress
+pressure causes whole Cue captures to be omitted. Its `dropped_count` counts
+suppressed Cues, its elapsed interval spans the first suppression through
+capture recovery (or Run finalization), and null affected kind/scope means the
+omission can include every diagnostic kind and scope produced by those Cues.
+
 Subscriber overflow, reconnect, and replay controls are delivery state, not
 Production facts. SSE control frames therefore consume no Run sequence and are
 not stored, delivered to a Python sink, or exported. A consumer-local loss must

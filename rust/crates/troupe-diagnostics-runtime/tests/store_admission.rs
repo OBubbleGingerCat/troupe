@@ -9,8 +9,8 @@ use troupe_diagnostics_core::{
         SpanFinished,
     },
     hub::{
-        DeliveryFailure, DiagnosticEventCandidate, EventIdentity, HubAdmissionError,
-        LiveEventNotifier, ProductionDiagnosticHub,
+        CueCaptureDecision, DeliveryFailure, DiagnosticEventCandidate, EventIdentity,
+        HubAdmissionError, LiveEventNotifier, ProductionDiagnosticHub,
     },
     id::{CanonicalUuid, RunLocalId},
     kinds::{CounterKind, SpanOutcome},
@@ -19,6 +19,7 @@ use troupe_diagnostics_core::{
 };
 use troupe_diagnostics_runtime::store::{
     admission::{
+        CUE_CAPTURE_PAUSE_CANONICAL_BYTES, CUE_CAPTURE_PAUSE_EVENTS, CUE_CAPTURE_RESUME_EVENTS,
         IngressAdmissionError, MAX_UNCOMMITTED_CANONICAL_BYTES, MAX_UNCOMMITTED_EVENTS,
         MandatoryIngress,
     },
@@ -221,6 +222,198 @@ fn canonical_byte_budget_accepts_equality_and_rejects_one_more_byte() {
     let failure = failures.try_recv().unwrap();
     assert!(!failure.event_limit_exceeded());
     assert!(failure.byte_limit_exceeded());
+    assert!(failures.try_recv().is_none());
+}
+
+#[test]
+fn active_cue_can_use_byte_headroom_and_pauses_future_cues() {
+    let (ingress, failures) = MandatoryIngress::new();
+    let hub = hub(ingress.clone());
+    const EVENT_BYTES: usize = 1024 * 1024;
+    const EVENT_COUNT: usize = CUE_CAPTURE_PAUSE_CANONICAL_BYTES / EVENT_BYTES;
+
+    for _ in 0..EVENT_COUNT {
+        hub.admit_cue(exact_size_message_candidate(EVENT_BYTES), None)
+            .unwrap();
+    }
+    assert_eq!(
+        ingress
+            .status()
+            .unwrap()
+            .accepted_uncommitted_canonical_bytes(),
+        CUE_CAPTURE_PAUSE_CANONICAL_BYTES
+    );
+    assert!(ingress.status().unwrap().cue_capture_paused());
+    hub.admit_cue(exact_size_message_candidate(EVENT_BYTES), None)
+        .expect("the active Cue can use completion headroom");
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Suppress
+    );
+
+    hub.admit(exact_size_message_candidate(EVENT_BYTES), None)
+        .expect("normal structural admission retains the same hard budget");
+    assert!(!ingress.status().unwrap().normal_ingress_sealed());
+    assert!(failures.try_recv().is_none());
+}
+
+#[test]
+fn active_cue_uses_completion_headroom_while_future_cues_are_suppressed() {
+    let (ingress, failures) = MandatoryIngress::new();
+    let hub = hub(ingress.clone());
+
+    for elapsed in 1..=CUE_CAPTURE_PAUSE_EVENTS {
+        hub.admit_cue(counter_candidate(elapsed as u64), None)
+            .unwrap();
+    }
+
+    assert!(ingress.status().unwrap().cue_capture_paused());
+    let continued = hub
+        .admit_cue(counter_candidate(40_000), None)
+        .expect("the already-active Cue can use completion headroom");
+    assert_eq!(
+        continued.accepted().identity().sequence().get(),
+        (CUE_CAPTURE_PAUSE_EVENTS + 1) as u64
+    );
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Suppress
+    );
+    assert!(!ingress.status().unwrap().normal_ingress_sealed());
+    assert!(failures.try_recv().is_none());
+
+    let structural = hub.admit(counter_candidate(40_001), None).unwrap();
+    assert_eq!(
+        structural.accepted().identity().sequence().get(),
+        (CUE_CAPTURE_PAUSE_EVENTS + 2) as u64
+    );
+    assert_eq!(
+        ingress.status().unwrap().accepted_uncommitted_events(),
+        CUE_CAPTURE_PAUSE_EVENTS + 2
+    );
+    assert!(!ingress.status().unwrap().normal_ingress_sealed());
+    assert!(failures.try_recv().is_none());
+}
+
+#[test]
+fn active_cue_pressure_that_drains_before_the_next_cue_creates_no_gap() {
+    let (ingress, failures) = MandatoryIngress::new();
+    let hub = hub(ingress.clone());
+
+    for elapsed in 1..=CUE_CAPTURE_PAUSE_EVENTS {
+        hub.admit_cue(counter_candidate(elapsed as u64), None)
+            .unwrap();
+    }
+    assert!(ingress.status().unwrap().cue_capture_paused());
+
+    let release_count = CUE_CAPTURE_PAUSE_EVENTS - CUE_CAPTURE_RESUME_EVENTS;
+    let released = (0..release_count)
+        .map(|_| ingress.try_dequeue().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    let batch = EventBatch::new(released).unwrap();
+    let notification = CommittedWatermark::fresh(run_id())
+        .candidate(&batch)
+        .unwrap();
+    ingress.mark_committed(notification).unwrap();
+
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Capture
+    );
+    assert_eq!(ingress.finish_cue_capture().unwrap(), None);
+    assert!(!ingress.status().unwrap().cue_capture_paused());
+    assert!(failures.try_recv().is_none());
+}
+
+#[test]
+fn one_cue_exceeding_the_hard_budget_remains_fail_closed() {
+    let (ingress, failures) = MandatoryIngress::new();
+    let hub = hub(ingress.clone());
+
+    for elapsed in 1..=MAX_UNCOMMITTED_EVENTS {
+        hub.admit_cue(counter_candidate(elapsed as u64), None)
+            .unwrap();
+    }
+    assert!(matches!(
+        hub.admit_cue(counter_candidate(50_000), None),
+        Err(HubAdmissionError::Reservation(
+            IngressAdmissionError::BudgetExhausted(_)
+        ))
+    ));
+    assert!(ingress.status().unwrap().normal_ingress_sealed());
+    assert_eq!(
+        failures.try_recv().unwrap().code(),
+        "mandatory_ingress_budget_exhausted"
+    );
+    assert!(failures.try_recv().is_none());
+}
+
+#[test]
+fn cue_capture_pauses_at_high_water_and_resumes_at_low_water_with_drop_count() {
+    let (ingress, failures) = MandatoryIngress::new();
+    let hub = hub(ingress.clone());
+
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Capture
+    );
+    for elapsed in 1..=CUE_CAPTURE_PAUSE_EVENTS {
+        hub.admit(counter_candidate(elapsed as u64), None).unwrap();
+    }
+
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Suppress
+    );
+    assert!(ingress.status().unwrap().cue_capture_paused());
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Suppress
+    );
+
+    let release_count = CUE_CAPTURE_PAUSE_EVENTS - CUE_CAPTURE_RESUME_EVENTS;
+    let released = (0..release_count)
+        .map(|_| ingress.try_dequeue().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    let batch = EventBatch::new(released).unwrap();
+    let notification = CommittedWatermark::fresh(run_id())
+        .candidate(&batch)
+        .unwrap();
+    ingress.mark_committed(notification).unwrap();
+
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Resume { suppressed_cues: 2 }
+    );
+    assert!(!ingress.status().unwrap().cue_capture_paused());
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Capture
+    );
+    assert!(failures.try_recv().is_none());
+}
+
+#[test]
+fn cue_capture_finish_reports_a_pending_gap_without_waiting_for_another_cue() {
+    let (ingress, failures) = MandatoryIngress::new();
+    let hub = hub(ingress.clone());
+
+    for elapsed in 1..=CUE_CAPTURE_PAUSE_EVENTS {
+        hub.admit_cue(counter_candidate(elapsed as u64), None)
+            .unwrap();
+    }
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Suppress
+    );
+    assert_eq!(
+        ingress.begin_cue_capture().unwrap(),
+        CueCaptureDecision::Suppress
+    );
+    assert!(ingress.status().unwrap().cue_capture_paused());
+    assert_eq!(ingress.finish_cue_capture().unwrap(), Some(2));
+    assert!(!ingress.status().unwrap().cue_capture_paused());
+    assert_eq!(ingress.finish_cue_capture().unwrap(), None);
     assert!(failures.try_recv().is_none());
 }
 

@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     fmt,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -12,7 +12,7 @@ use pyo3::{
 };
 use troupe_diagnostics_core::{
     detail::{
-        CustomNumber, DiagnosticAttributes, DiagnosticDimensions, InstantDetail,
+        CustomNumber, DiagnosticAttributes, DiagnosticDimensions, EmptyDetail, InstantDetail,
         ProductionConstructDetail, ProductionLoadDetail, ProductionPathResolutionDetail,
         SpanStartDetail,
     },
@@ -23,8 +23,9 @@ use troupe_diagnostics_core::{
         InstantOccurred, ObservationGap, SpanFinished, SpanStarted,
     },
     hub::{
-        ActEventSubscriber, BoundedInMemoryReserver, EventIdentity, HubAdmissionError,
-        MandatoryDurableReserver, ProductionDiagnosticHub, SinkOnlyDiagnosticHub,
+        AcceptedDiagnosticEvent, ActEventSubscriber, BoundedInMemoryReserver, CueCaptureDecision,
+        EventIdentity, HubAdmissionError, MandatoryDurableReserver, ProductionDiagnosticHub,
+        SinkOnlyDiagnosticHub, SubscriberLocalStream, SubscriberLocalStreamError,
     },
     kinds::{CounterKind, CustomSeverity, SpanOutcome},
     scalar::SchemaU64,
@@ -46,15 +47,72 @@ use crate::{
 const PATH_RESOLUTION_FALLBACK_ERROR: &str = "production-path-resolution-failed";
 const LOAD_FALLBACK_ERROR: &str = "production-load-failed";
 const CONSTRUCT_FALLBACK_ERROR: &str = "production-construct-failed";
+const CUE_CAPTURE_GAP_REASON: &str = "cue-diagnostics-suppressed";
 
 type CanonicalEventBuilder = Box<dyn FnOnce(EventIdentity) -> DiagnosticEvent + Send + 'static>;
+
+struct DiagnosticAdmissionReceipt {
+    accepted: AcceptedDiagnosticEvent,
+}
+
+impl DiagnosticAdmissionReceipt {
+    fn sequence(&self) -> SchemaU64 {
+        self.accepted.identity().sequence()
+    }
+
+    fn admitted_agent_event(&self) -> AdmittedAgentEvent {
+        AdmittedAgentEvent {
+            sequence: self.sequence(),
+            subscriber_local: self.accepted.is_subscriber_local(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AdmittedAgentEvent {
+    sequence: SchemaU64,
+    subscriber_local: bool,
+}
+
+impl AdmittedAgentEvent {
+    pub(crate) const fn durable(sequence: SchemaU64) -> Self {
+        Self {
+            sequence,
+            subscriber_local: false,
+        }
+    }
+
+    pub(crate) const fn sequence(self) -> SchemaU64 {
+        self.sequence
+    }
+
+    pub(crate) const fn is_subscriber_local(self) -> bool {
+        self.subscriber_local
+    }
+}
 
 trait DiagnosticEventAdmission: Send + Sync {
     fn admit(
         &self,
         candidate: CanonicalEventBuilder,
         subscriber: Option<&dyn ActEventSubscriber>,
-    ) -> Result<SchemaU64, DiagnosticProducerError>;
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError>;
+
+    fn admit_cue(
+        &self,
+        candidate: CanonicalEventBuilder,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError> {
+        self.admit(candidate, subscriber)
+    }
+
+    fn begin_cue_capture(&self) -> Result<CueCaptureDecision, DiagnosticProducerError> {
+        Ok(CueCaptureDecision::Capture)
+    }
+
+    fn finish_cue_capture(&self) -> Result<Option<u64>, DiagnosticProducerError> {
+        Ok(None)
+    }
 }
 
 struct ProductionEventAdmission<R> {
@@ -69,10 +127,37 @@ where
         &self,
         candidate: CanonicalEventBuilder,
         subscriber: Option<&dyn ActEventSubscriber>,
-    ) -> Result<SchemaU64, DiagnosticProducerError> {
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError> {
         self.hub
             .admit(candidate, subscriber)
-            .map(|receipt| receipt.accepted().identity().sequence())
+            .map(|receipt| DiagnosticAdmissionReceipt {
+                accepted: receipt.accepted().clone(),
+            })
+            .map_err(DiagnosticProducerError::admission)
+    }
+
+    fn admit_cue(
+        &self,
+        candidate: CanonicalEventBuilder,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError> {
+        self.hub
+            .admit_cue(candidate, subscriber)
+            .map(|receipt| DiagnosticAdmissionReceipt {
+                accepted: receipt.accepted().clone(),
+            })
+            .map_err(DiagnosticProducerError::admission)
+    }
+
+    fn begin_cue_capture(&self) -> Result<CueCaptureDecision, DiagnosticProducerError> {
+        self.hub
+            .begin_cue_capture()
+            .map_err(DiagnosticProducerError::admission)
+    }
+
+    fn finish_cue_capture(&self) -> Result<Option<u64>, DiagnosticProducerError> {
+        self.hub
+            .finish_cue_capture()
             .map_err(DiagnosticProducerError::admission)
     }
 }
@@ -90,22 +175,147 @@ where
         &self,
         candidate: CanonicalEventBuilder,
         subscriber: Option<&dyn ActEventSubscriber>,
-    ) -> Result<SchemaU64, DiagnosticProducerError> {
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError> {
         self.hub
             .admit(
                 candidate,
                 subscriber.unwrap_or(self.no_op_subscriber.as_ref()),
             )
-            .map(|receipt| receipt.accepted().identity().sequence())
+            .map(|receipt| DiagnosticAdmissionReceipt {
+                accepted: receipt.accepted().clone(),
+            })
             .map_err(DiagnosticProducerError::admission)
+    }
+}
+
+struct CueEventAdmission {
+    durable: Arc<dyn DiagnosticEventAdmission>,
+    state: Mutex<CueEventAdmissionState>,
+    subscriber_delivery_order: Mutex<()>,
+}
+
+struct CueEventAdmissionState {
+    local_stream: Option<SubscriberLocalStream>,
+}
+
+impl CueEventAdmission {
+    fn new(
+        durable: Arc<dyn DiagnosticEventAdmission>,
+        local_stream: Option<SubscriberLocalStream>,
+    ) -> Self {
+        Self {
+            durable,
+            state: Mutex::new(CueEventAdmissionState { local_stream }),
+            subscriber_delivery_order: Mutex::new(()),
+        }
+    }
+
+    fn local_error(error: SubscriberLocalStreamError) -> DiagnosticProducerError {
+        DiagnosticProducerError::new("diagnostic.cue-local-stream-failed", error.to_string())
+    }
+}
+
+impl DiagnosticEventAdmission for CueEventAdmission {
+    fn admit(
+        &self,
+        candidate: CanonicalEventBuilder,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError> {
+        let _subscriber_delivery_order = subscriber
+            .map(|_| {
+                self.subscriber_delivery_order.lock().map_err(|_| {
+                    DiagnosticProducerError::new(
+                        "diagnostic.cue-subscriber-delivery-state-poisoned",
+                        "Cue diagnostic subscriber delivery state is poisoned",
+                    )
+                })
+            })
+            .transpose()?;
+        let receipt = {
+            let mut state = self.state.lock().map_err(|_| {
+                DiagnosticProducerError::new(
+                    "diagnostic.cue-admission-state-poisoned",
+                    "Cue diagnostic admission state is poisoned",
+                )
+            })?;
+            if let Some(stream) = state.local_stream.as_mut() {
+                stream
+                    .admit(candidate, None)
+                    .map(|receipt| DiagnosticAdmissionReceipt {
+                        accepted: receipt.accepted().clone(),
+                    })
+                    .map_err(Self::local_error)
+            } else {
+                self.durable.admit_cue(candidate, None)
+            }
+        }?;
+        if let Some(subscriber) = subscriber {
+            let _ = subscriber.deliver(receipt.accepted.clone());
+        }
+        Ok(receipt)
+    }
+}
+
+#[derive(Default)]
+struct CueCaptureGap {
+    started_at: Mutex<Option<ElapsedNs>>,
+}
+
+impl CueCaptureGap {
+    fn note(&self, elapsed_ns: ElapsedNs) -> Result<(), DiagnosticProducerError> {
+        let mut started_at = self.started_at.lock().map_err(|_| {
+            DiagnosticProducerError::new(
+                "diagnostic.cue-capture-gap-state-poisoned",
+                "Cue capture gap state is poisoned",
+            )
+        })?;
+        if started_at.is_none() {
+            *started_at = Some(elapsed_ns);
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        elapsed_ns: ElapsedNs,
+    ) -> Result<AffectedElapsedInterval, DiagnosticProducerError> {
+        let started_at = self
+            .started_at
+            .lock()
+            .map_err(|_| {
+                DiagnosticProducerError::new(
+                    "diagnostic.cue-capture-gap-state-poisoned",
+                    "Cue capture gap state is poisoned",
+                )
+            })?
+            .take()
+            .ok_or_else(|| {
+                DiagnosticProducerError::new(
+                    "diagnostic.cue-capture-gap-start-missing",
+                    "Cue capture resumed without a recorded gap start",
+                )
+            })?;
+        Ok(AffectedElapsedInterval::new(started_at, elapsed_ns))
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct DiagnosticRunContext {
     admission: Arc<dyn DiagnosticEventAdmission>,
+    run_id: troupe_diagnostics_core::id::CanonicalUuid,
     clock: RunClock,
+    cue_capture_gap: Arc<CueCaptureGap>,
     subscribers: Arc<OnceLock<Arc<dyn DiagnosticActSubscriberLookup>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CueDiagnosticCapture {
+    Capture,
+    Suppress,
+    Resume {
+        suppressed_cues: u64,
+        affected_elapsed: AffectedElapsedInterval,
+    },
 }
 
 impl DiagnosticRunContext {
@@ -115,7 +325,9 @@ impl DiagnosticRunContext {
             Arc::new(ProductionEventAdmission { hub });
         Self {
             admission,
+            run_id: runtime.run_id(),
             clock: RunClock::from_origin(Instant::now()),
+            cue_capture_gap: Arc::new(CueCaptureGap::default()),
             subscribers: Arc::new(OnceLock::new()),
         }
     }
@@ -125,11 +337,14 @@ impl DiagnosticRunContext {
     where
         R: MandatoryDurableReserver + 'static,
     {
+        let run_id = hub.run_id();
         let admission: Arc<dyn DiagnosticEventAdmission> =
             Arc::new(ProductionEventAdmission { hub });
         Self {
             admission,
+            run_id,
             clock,
+            cue_capture_gap: Arc::new(CueCaptureGap::default()),
             subscribers: Arc::new(OnceLock::new()),
         }
     }
@@ -142,6 +357,7 @@ impl DiagnosticRunContext {
     where
         R: BoundedInMemoryReserver + 'static,
     {
+        let run_id = hub.run_id();
         let admission: Arc<dyn DiagnosticEventAdmission> = Arc::new(SinkOnlyEventAdmission {
             hub,
             no_op_subscriber: Arc::new(NoopDiagnosticActSubscriber),
@@ -153,7 +369,9 @@ impl DiagnosticRunContext {
         );
         Self {
             admission,
+            run_id,
             clock,
+            cue_capture_gap: Arc::new(CueCaptureGap::default()),
             subscribers: subscriber_slot,
         }
     }
@@ -167,8 +385,158 @@ impl DiagnosticRunContext {
             .map_err(|_| DiagnosticActSubscriberInstallError)
     }
 
+    pub(crate) fn without_act_subscriber_lookup(&self) -> Self {
+        Self {
+            admission: Arc::clone(&self.admission),
+            run_id: self.run_id,
+            clock: self.clock,
+            cue_capture_gap: Arc::clone(&self.cue_capture_gap),
+            subscribers: Arc::new(OnceLock::new()),
+        }
+    }
+
     pub(crate) const fn clock(&self) -> RunClock {
         self.clock
+    }
+
+    pub(crate) fn begin_cue_capture(
+        &self,
+    ) -> Result<CueDiagnosticCapture, DiagnosticProducerError> {
+        match self.admission.begin_cue_capture()? {
+            CueCaptureDecision::Capture => Ok(CueDiagnosticCapture::Capture),
+            CueCaptureDecision::Suppress => {
+                let elapsed_ns = self
+                    .clock
+                    .elapsed_now()
+                    .map_err(DiagnosticProducerError::clock)?;
+                self.cue_capture_gap.note(elapsed_ns)?;
+                Ok(CueDiagnosticCapture::Suppress)
+            }
+            CueCaptureDecision::Resume { suppressed_cues } => {
+                let elapsed_ns = self
+                    .clock
+                    .elapsed_now()
+                    .map_err(DiagnosticProducerError::clock)?;
+                Ok(CueDiagnosticCapture::Resume {
+                    suppressed_cues,
+                    affected_elapsed: self.cue_capture_gap.finish(elapsed_ns)?,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn emit_cue_capture_gap(
+        &self,
+        scope: DiagnosticScope,
+        suppressed_cues: u64,
+        affected_elapsed: AffectedElapsedInterval,
+    ) -> Result<(), DiagnosticProducerError> {
+        self.emit_observation_gap(
+            scope,
+            "runtime".to_owned(),
+            Some("cue-capture".to_owned()),
+            CUE_CAPTURE_GAP_REASON.to_owned(),
+            Some(SchemaU64::new(suppressed_cues)),
+            Some(affected_elapsed),
+            None,
+            None,
+            Vec::new(),
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn admit_agent_event<F>(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        caused_by: Vec<CausalLink>,
+        build: F,
+    ) -> Result<SchemaU64, DiagnosticProducerError>
+    where
+        F: FnOnce(DiagnosticEventHeader) -> DiagnosticEvent + Send + 'static,
+    {
+        self.admit_event(elapsed_ns, scope, caused_by, true, build)
+    }
+
+    pub(crate) fn admit_agent_event_with_provenance<F>(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        caused_by: Vec<CausalLink>,
+        build: F,
+    ) -> Result<AdmittedAgentEvent, DiagnosticProducerError>
+    where
+        F: FnOnce(DiagnosticEventHeader) -> DiagnosticEvent + Send + 'static,
+    {
+        self.admit_event_receipt(elapsed_ns, scope, caused_by, true, build)
+            .map(|receipt| receipt.admitted_agent_event())
+    }
+
+    pub(crate) fn finish_cue_capture(
+        &self,
+        scope: DiagnosticScope,
+    ) -> Result<(), DiagnosticProducerError> {
+        let Some(suppressed_cues) = self.admission.finish_cue_capture()? else {
+            return Ok(());
+        };
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        let affected_elapsed = self.cue_capture_gap.finish(elapsed_ns)?;
+        self.emit_cue_capture_gap(scope, suppressed_cues, affected_elapsed)
+    }
+
+    pub(crate) fn for_cue(
+        &self,
+        run_span_id: SchemaU64,
+        scene_scope: DiagnosticScope,
+        scene_span_id: SchemaU64,
+        local_only: bool,
+    ) -> Result<Self, DiagnosticProducerError> {
+        let local_stream = local_only
+            .then(|| {
+                let mut stream = SubscriberLocalStream::new(self.run_id);
+                let run_header = DiagnosticEventHeader::new(
+                    self.run_id,
+                    run_span_id,
+                    ElapsedNs::new(0),
+                    DiagnosticScope::new(None, None, None, None, None, None, None),
+                    Vec::new(),
+                )
+                .expect("runtime lineage has a nonzero Run span ID");
+                stream.seed(DiagnosticEvent::SpanStarted(SpanStarted::new(
+                    run_header,
+                    SpanStartDetail::RunLifecycle(EmptyDetail::new()),
+                    None,
+                )))?;
+                let scene_header = DiagnosticEventHeader::new(
+                    self.run_id,
+                    scene_span_id,
+                    ElapsedNs::new(0),
+                    scene_scope,
+                    Vec::new(),
+                )
+                .expect("runtime lineage has a nonzero Scene span ID");
+                stream.seed(DiagnosticEvent::SpanStarted(SpanStarted::new(
+                    scene_header,
+                    SpanStartDetail::SceneLifecycle(EmptyDetail::new()),
+                    Some(run_span_id),
+                )))?;
+                Ok::<_, SubscriberLocalStreamError>(stream)
+            })
+            .transpose()
+            .map_err(CueEventAdmission::local_error)?;
+        Ok(Self {
+            admission: Arc::new(CueEventAdmission::new(
+                Arc::clone(&self.admission),
+                local_stream,
+            )),
+            run_id: self.run_id,
+            clock: self.clock,
+            cue_capture_gap: Arc::clone(&self.cue_capture_gap),
+            subscribers: Arc::clone(&self.subscribers),
+        })
     }
 
     pub(crate) fn start_span(
@@ -286,6 +654,22 @@ impl DiagnosticRunContext {
             .elapsed_now()
             .map_err(DiagnosticProducerError::clock)?;
         self.admit_event(elapsed_ns, scope, caused_by, true, move |header| {
+            DiagnosticEvent::CounterSampled(CounterSampled::new(header, counter_kind, value))
+        })
+    }
+
+    pub(crate) fn emit_counter_without_act_subscriber(
+        &self,
+        scope: DiagnosticScope,
+        counter_kind: CounterKind,
+        value: SchemaU64,
+        caused_by: Vec<CausalLink>,
+    ) -> Result<SchemaU64, DiagnosticProducerError> {
+        let elapsed_ns = self
+            .clock
+            .elapsed_now()
+            .map_err(DiagnosticProducerError::clock)?;
+        self.admit_event(elapsed_ns, scope, caused_by, false, move |header| {
             DiagnosticEvent::CounterSampled(CounterSampled::new(header, counter_kind, value))
         })
     }
@@ -412,6 +796,27 @@ impl DiagnosticRunContext {
         deliver_to_act_subscriber: bool,
         build: F,
     ) -> Result<SchemaU64, DiagnosticProducerError>
+    where
+        F: FnOnce(DiagnosticEventHeader) -> DiagnosticEvent + Send + 'static,
+    {
+        self.admit_event_receipt(
+            elapsed_ns,
+            scope,
+            caused_by,
+            deliver_to_act_subscriber,
+            build,
+        )
+        .map(|receipt| receipt.sequence())
+    }
+
+    fn admit_event_receipt<F>(
+        &self,
+        elapsed_ns: ElapsedNs,
+        scope: DiagnosticScope,
+        caused_by: Vec<CausalLink>,
+        deliver_to_act_subscriber: bool,
+        build: F,
+    ) -> Result<DiagnosticAdmissionReceipt, DiagnosticProducerError>
     where
         F: FnOnce(DiagnosticEventHeader) -> DiagnosticEvent + Send + 'static,
     {
@@ -572,7 +977,10 @@ impl DiagnosticProducerError {
             }
             HubAdmissionError::Reservation(_) => "diagnostic.admission-failed".to_owned(),
         };
-        Self::new(code, error.to_string())
+        Self {
+            code,
+            message: error.to_string(),
+        }
     }
 
     pub(crate) fn code(&self) -> &str {
@@ -885,7 +1293,10 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex, Weak,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Instant,
     };
 
@@ -1005,6 +1416,53 @@ mod tests {
             }
             let subscriber: Arc<dyn ActEventSubscriber> = self.subscriber.clone();
             Some(subscriber)
+        }
+    }
+
+    struct ReentrantActSubscriber {
+        context: Weak<DiagnosticRunContext>,
+        scope: DiagnosticScope,
+        delivered: EventLog,
+        emitted: AtomicBool,
+    }
+
+    impl ActEventSubscriber for ReentrantActSubscriber {
+        fn deliver(&self, event: AcceptedDiagnosticEvent) -> Result<(), DeliveryFailure> {
+            self.delivered.push(event.clone());
+            if self
+                .emitted
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.context
+                    .upgrade()
+                    .ok_or_else(|| DeliveryFailure::new("cue-context-unavailable"))?
+                    .emit_counter_without_act_subscriber(
+                        self.scope.clone(),
+                        CounterKind::DiagnosticDroppedEvents,
+                        SchemaU64::new(1),
+                        vec![CausalLink::new(
+                            event.identity().sequence(),
+                            CausalRelation::FollowsFrom,
+                        )],
+                    )
+                    .map_err(|_| DeliveryFailure::new("reentrant-cue-admission-failed"))?;
+            }
+            Ok(())
+        }
+    }
+
+    struct ReentrantActSubscriberLookup {
+        act_id: String,
+        subscriber: Arc<ReentrantActSubscriber>,
+    }
+
+    impl DiagnosticActSubscriberLookup for ReentrantActSubscriberLookup {
+        fn subscriber_for(&self, act_id: &str) -> Option<Arc<dyn ActEventSubscriber>> {
+            (act_id == self.act_id).then(|| {
+                let subscriber: Arc<dyn ActEventSubscriber> = self.subscriber.clone();
+                subscriber
+            })
         }
     }
 
@@ -1466,6 +1924,89 @@ mod tests {
     }
 
     #[test]
+    fn cue_subscriber_can_emit_a_non_subscribed_fact_during_delivery() {
+        let durable = EventLog::default();
+        let hub = Arc::new(ProductionDiagnosticHub::production(
+            CanonicalUuid::new(Uuid::new_v4()),
+            RecordingReserver {
+                log: durable.clone(),
+                attempts: 0,
+                fail_on_attempt: None,
+            },
+            Box::new(IgnoreLive),
+        ));
+        let context = DiagnosticRunContext::with_hub(hub, RunClock::from_origin(Instant::now()));
+        let run_span_id = context
+            .start_span(
+                empty_scope(),
+                SpanStartDetail::RunLifecycle(EmptyDetail::new()),
+                None,
+            )
+            .unwrap();
+        let scene_id = RunLocalId::parse("scene-reentrant-subscriber").unwrap();
+        let scene_scope =
+            DiagnosticScope::new(Some(scene_id.clone()), None, None, None, None, None, None);
+        let scene_span_id = context
+            .start_span(
+                scene_scope.clone(),
+                SpanStartDetail::SceneLifecycle(EmptyDetail::new()),
+                Some(run_span_id),
+            )
+            .unwrap();
+        let cue_context = Arc::new(
+            context
+                .for_cue(run_span_id, scene_scope, scene_span_id, false)
+                .unwrap(),
+        );
+        let act_id = RunLocalId::parse("act-reentrant-subscriber").unwrap();
+        let act_scope = DiagnosticScope::new(
+            Some(scene_id),
+            None,
+            None,
+            None,
+            Some(act_id.clone()),
+            None,
+            None,
+        );
+        let delivered = EventLog::default();
+        let subscriber = Arc::new(ReentrantActSubscriber {
+            context: Arc::downgrade(&cue_context),
+            scope: act_scope.clone(),
+            delivered: delivered.clone(),
+            emitted: AtomicBool::new(false),
+        });
+        context
+            .install_act_subscriber_lookup(Arc::new(ReentrantActSubscriberLookup {
+                act_id: act_id.as_str().to_owned(),
+                subscriber,
+            }))
+            .unwrap();
+
+        cue_context
+            .emit_instant(
+                act_scope,
+                InstantDetail::ActAdmitted(EmptyDetail::new()),
+                None,
+            )
+            .expect("subscriber re-entry occurs after the Cue stream state is committed");
+
+        let events = durable.events();
+        assert_eq!(events.len(), 4);
+        assert_eq!(delivered.events().len(), 1);
+        let DiagnosticEvent::CounterSampled(counter) = events[3].event() else {
+            panic!("expected re-entrant drop counter")
+        };
+        assert_eq!(counter.counter_kind(), CounterKind::DiagnosticDroppedEvents);
+        assert_eq!(
+            counter.header().caused_by(),
+            &[CausalLink::new(
+                events[2].identity().sequence(),
+                CausalRelation::FollowsFrom,
+            )]
+        );
+    }
+
+    #[test]
     fn shared_context_admits_typed_causal_events_and_construction_scope_is_lifo() {
         let (producer, log) = make_producer(Path::new("/tmp/diagnostic-context"), None);
         let context = producer.context();
@@ -1622,5 +2163,175 @@ mod tests {
             pair[0].event().header().elapsed_ns().get()
                 <= pair[1].event().header().elapsed_ns().get()
         }));
+    }
+
+    #[test]
+    fn captured_cue_never_switches_to_local_after_a_partial_durable_prefix() {
+        let log = EventLog::default();
+        let hub = Arc::new(ProductionDiagnosticHub::production(
+            CanonicalUuid::new(Uuid::new_v4()),
+            RecordingReserver {
+                log: log.clone(),
+                attempts: 0,
+                fail_on_attempt: Some(4),
+            },
+            Box::new(IgnoreLive),
+        ));
+        let context = DiagnosticRunContext::with_hub(hub, RunClock::from_origin(Instant::now()));
+        let run_span_id = context
+            .start_span(
+                empty_scope(),
+                SpanStartDetail::RunLifecycle(EmptyDetail::new()),
+                None,
+            )
+            .unwrap();
+        let scene_scope = DiagnosticScope::new(
+            Some(RunLocalId::parse("scene-fallback").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let scene_span_id = context
+            .start_span(
+                scene_scope.clone(),
+                SpanStartDetail::SceneLifecycle(EmptyDetail::new()),
+                Some(run_span_id),
+            )
+            .unwrap();
+        let cue_context = context
+            .for_cue(run_span_id, scene_scope.clone(), scene_span_id, false)
+            .unwrap();
+
+        let local_span_id = cue_context
+            .start_custom_span(
+                scene_scope.clone(),
+                "application.cue_work".to_owned(),
+                Some(scene_span_id),
+                Default::default(),
+            )
+            .unwrap();
+        let error = cue_context
+            .emit_custom_instant(
+                scene_scope.clone(),
+                "application.pressure_fallback".to_owned(),
+                Some(local_span_id),
+                Some(CustomSeverity::Info),
+                Default::default(),
+            )
+            .expect_err("a captured Cue does not fork its canonical lifecycle mid-Cue");
+        assert_eq!(error.code(), "diagnostic.admission-failed");
+        cue_context
+            .finish_custom_span(scene_scope, local_span_id, SpanOutcome::Completed)
+            .expect("a retryable test reserver can still close the durable span");
+
+        let events = log.events();
+        assert_eq!(events.len(), 4);
+        assert_eq!(local_span_id, SchemaU64::new(3));
+        assert!(matches!(
+            events[2].event(),
+            DiagnosticEvent::CustomSpanStarted(_)
+        ));
+        assert!(matches!(
+            events[3].event(),
+            DiagnosticEvent::CustomSpanFinished(_)
+        ));
+    }
+
+    #[test]
+    fn suppressed_cue_context_never_enters_durable_admission() {
+        let log = EventLog::default();
+        let hub = Arc::new(ProductionDiagnosticHub::production(
+            CanonicalUuid::new(Uuid::new_v4()),
+            RecordingReserver {
+                log: log.clone(),
+                attempts: 0,
+                fail_on_attempt: None,
+            },
+            Box::new(IgnoreLive),
+        ));
+        let context = DiagnosticRunContext::with_hub(hub, RunClock::from_origin(Instant::now()));
+        let run_span_id = context
+            .start_span(
+                empty_scope(),
+                SpanStartDetail::RunLifecycle(EmptyDetail::new()),
+                None,
+            )
+            .unwrap();
+        let scene_scope = DiagnosticScope::new(
+            Some(RunLocalId::parse("scene-suppressed").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let scene_span_id = context
+            .start_span(
+                scene_scope.clone(),
+                SpanStartDetail::SceneLifecycle(EmptyDetail::new()),
+                Some(run_span_id),
+            )
+            .unwrap();
+        let cue_context = context
+            .for_cue(run_span_id, scene_scope.clone(), scene_span_id, true)
+            .unwrap();
+
+        let local_span_id = cue_context
+            .start_custom_span(
+                scene_scope.clone(),
+                "application.suppressed_cue".to_owned(),
+                Some(scene_span_id),
+                Default::default(),
+            )
+            .unwrap();
+        cue_context
+            .emit_custom_instant(
+                scene_scope.clone(),
+                "application.local_only".to_owned(),
+                Some(local_span_id),
+                Some(CustomSeverity::Info),
+                Default::default(),
+            )
+            .unwrap();
+        let local_receipt = cue_context
+            .admit_agent_event_with_provenance(
+                ElapsedNs::new(1),
+                scene_scope.clone(),
+                Vec::new(),
+                move |header| {
+                    DiagnosticEvent::InstantOccurred(InstantOccurred::new(
+                        header,
+                        InstantDetail::ActAdmitted(EmptyDetail::new()),
+                        None,
+                    ))
+                },
+            )
+            .expect("a wholly suppressed Cue keeps agent facts subscriber-local");
+        assert!(local_receipt.is_subscriber_local());
+        cue_context
+            .finish_custom_span(scene_scope, local_span_id, SpanOutcome::Completed)
+            .unwrap();
+
+        assert_eq!(local_span_id, SchemaU64::new(3));
+        assert_eq!(log.events().len(), 2);
+    }
+
+    #[test]
+    fn cue_capture_gap_keeps_the_first_suppressed_elapsed_time() {
+        let gap = CueCaptureGap::default();
+        gap.note(ElapsedNs::new(10)).unwrap();
+        gap.note(ElapsedNs::new(20)).unwrap();
+
+        let interval = gap.finish(ElapsedNs::new(30)).unwrap();
+        assert_eq!(interval.start_ns(), ElapsedNs::new(10));
+        assert_eq!(interval.end_ns(), ElapsedNs::new(30));
+        assert_eq!(
+            gap.finish(ElapsedNs::new(40)).unwrap_err().code(),
+            "diagnostic.cue-capture-gap-start-missing"
+        );
     }
 }

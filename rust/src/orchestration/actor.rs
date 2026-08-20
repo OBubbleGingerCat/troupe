@@ -859,8 +859,15 @@ mod tests {
                 capability.identity_address(),
                 PyString::new(py, "scene-cycle-cue0").unbind(),
             )?;
-            let operation =
-                CueOperation::new_runtime(&scene, &capability, &binding, cued, cue, py.None());
+            let operation = CueOperation::new_runtime(
+                &scene,
+                &capability,
+                &binding,
+                cued,
+                cue,
+                py.None(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
+            );
             lock(&capability.mailbox).enqueue(operation.clone());
 
             drop((operation, scene, binding, capability, state));
@@ -1115,6 +1122,7 @@ mod tests {
                 Arc::clone(&current_cued),
                 current_cue,
                 current_signal.clone().unbind(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
             );
             *lock(&current_slot) = Some(current.downgrade_for_test());
             current_prepared.commit(current.clone())?;
@@ -1156,6 +1164,7 @@ mod tests {
                 successor_cued,
                 successor_cue,
                 successor_signal.clone().unbind(),
+                crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
             );
             *lock(&successor_slot) = Some(successor.downgrade_for_test());
             successor_prepared.commit(successor.clone())?;
@@ -1300,6 +1309,7 @@ mod tests {
                             cued,
                             cue,
                             signal.unbind(),
+                            crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
                         );
                         prepared.commit(operation)?;
                         lock(&caller_admissions).push((label, id));
@@ -1472,6 +1482,7 @@ mod tests {
                     Arc::clone(&first_cued),
                     first_cue,
                     first_signal.clone().unbind(),
+                    crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
                 );
                 first.force_callback_attachment_error_for_test(attachment_boom.clone_ref(py));
 
@@ -1502,6 +1513,7 @@ mod tests {
                     second_cued,
                     second_cue,
                     second_signal.clone().unbind(),
+                    crate::diagnostic_runtime::cue_producer::CueCaptureMode::Capture,
                 );
 
                 let trigger_prepared = Arc::new(Mutex::new(Some(prepared)));

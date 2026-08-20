@@ -7,7 +7,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
 
-use crate::diagnostic_runtime::cue_producer::{self, CueHook, CueTerminalOutcome};
+use crate::diagnostic_runtime::cue_producer::{self, CueCaptureMode, CueHook, CueTerminalOutcome};
 use crate::diagnostic_runtime::effect_producer::{self, EffectHook};
 use crate::orchestration::actor::ActorCapability;
 use crate::orchestration::cue::Cue;
@@ -142,6 +142,7 @@ pub(crate) struct CueOperationInner {
     scene: Weak<SceneScope>,
     actor: Weak<ActorCapability>,
     binding: Weak<RunBinding>,
+    capture_mode: CueCaptureMode,
     cued: Arc<CuedScope>,
     state: Mutex<OperationState>,
 }
@@ -165,6 +166,11 @@ impl CueOperation {
     #[allow(dead_code)]
     pub(crate) fn diagnostic_cued(&self) -> &Arc<CuedScope> {
         &self.inner.cued
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn diagnostic_capture_mode(&self) -> CueCaptureMode {
+        self.inner.capture_mode
     }
 
     pub(crate) fn enqueue(&self) -> PyResult<()> {
@@ -194,6 +200,7 @@ impl CueOperation {
         cued: Arc<CuedScope>,
         cue: Py<Cue>,
         signal: Py<PyAny>,
+        capture_mode: CueCaptureMode,
     ) -> Self {
         Self {
             inner: Arc::new(CueOperationInner {
@@ -204,6 +211,7 @@ impl CueOperation {
                 scene: Arc::downgrade(scene),
                 actor: Arc::downgrade(actor),
                 binding: Arc::downgrade(binding),
+                capture_mode,
                 cued,
                 state: Mutex::new(OperationState {
                     phase: OperationPhase::Queued,
@@ -256,6 +264,7 @@ impl CueOperation {
                 scene,
                 actor,
                 binding: Weak::new(),
+                capture_mode: CueCaptureMode::Capture,
                 cued: CuedScope::new_for_test(cued_scene, "operation-fixture", index),
                 state: Mutex::new(OperationState {
                     phase: OperationPhase::Queued,
@@ -1128,8 +1137,9 @@ mod tests {
     use crate::orchestration::scene_context::{CuedScope, SceneScope};
 
     use super::{
-        CancellationIntent, CueOperation, CueOperationInner, Mailbox, OperationPhase,
-        OperationState, Running, TerminalOutcome, VALIDATION_CALLS, lock, validate_cued_result,
+        CancellationIntent, CueCaptureMode, CueOperation, CueOperationInner, Mailbox,
+        OperationPhase, OperationState, Running, TerminalOutcome, VALIDATION_CALLS, lock,
+        validate_cued_result,
     };
 
     #[test]
@@ -1141,6 +1151,7 @@ mod tests {
                 scene,
                 actor,
                 binding,
+                capture_mode,
                 cued,
                 state,
             } = inner;
@@ -1149,6 +1160,7 @@ mod tests {
             let _: Weak<SceneScope> = scene;
             let _: Weak<crate::orchestration::actor::ActorCapability> = actor;
             let _: Weak<crate::orchestration::scene_context::RunBinding> = binding;
+            let _: CueCaptureMode = capture_mode;
             let _: Arc<CuedScope> = cued;
             let _: Mutex<OperationState> = state;
         }

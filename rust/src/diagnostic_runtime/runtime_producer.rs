@@ -457,6 +457,11 @@ impl RuntimeLifecycleProducer {
             return;
         }
 
+        if let Err(error) = self.context.finish_cue_capture(empty_scope()) {
+            latch_failure(state, error.into());
+            return;
+        }
+
         if let PhaseState::Open(span_id) = state.shutdown {
             let shutdown_terminal = match run_terminal.outcome {
                 SpanOutcome::Completed => TerminalSpan::completed(),
@@ -687,7 +692,8 @@ mod tests {
         event::DiagnosticEvent,
         hub::{
             AcceptedDiagnosticEvent, AdmissionReservation, AdmissionReserver, AdmissionSize,
-            DeliveryFailure, LiveEventNotifier, MandatoryDurableReserver, ProductionDiagnosticHub,
+            CueCaptureDecision, DeliveryFailure, LiveEventNotifier, MandatoryDurableReserver,
+            ProductionDiagnosticHub,
         },
         id::CanonicalUuid,
         kinds::{SpanKind, SpanOutcome},
@@ -731,6 +737,8 @@ mod tests {
         log: EventLog,
         attempts: usize,
         fail_on_attempt: Option<usize>,
+        begin_cue_capture: CueCaptureDecision,
+        finish_suppressed_cues: Option<u64>,
     }
 
     impl AdmissionReserver for RecordingReserver {
@@ -746,7 +754,15 @@ mod tests {
         }
     }
 
-    impl MandatoryDurableReserver for RecordingReserver {}
+    impl MandatoryDurableReserver for RecordingReserver {
+        fn begin_cue_capture(&self) -> Result<CueCaptureDecision, Self::Error> {
+            Ok(self.begin_cue_capture)
+        }
+
+        fn finish_cue_capture(&self) -> Result<Option<u64>, Self::Error> {
+            Ok(self.finish_suppressed_cues)
+        }
+    }
 
     struct IgnoreLive;
 
@@ -764,6 +780,27 @@ mod tests {
                 log: log.clone(),
                 attempts: 0,
                 fail_on_attempt,
+                begin_cue_capture: CueCaptureDecision::Capture,
+                finish_suppressed_cues: None,
+            },
+            Box::new(IgnoreLive),
+        ));
+        (
+            DiagnosticRunContext::with_hub(hub, RunClock::from_origin(Instant::now())),
+            log,
+        )
+    }
+
+    fn context_with_pending_cue_gap() -> (DiagnosticRunContext, EventLog) {
+        let log = EventLog::default();
+        let hub = Arc::new(ProductionDiagnosticHub::production(
+            CanonicalUuid::new(Uuid::new_v4()),
+            RecordingReserver {
+                log: log.clone(),
+                attempts: 0,
+                fail_on_attempt: None,
+                begin_cue_capture: CueCaptureDecision::Suppress,
+                finish_suppressed_cues: Some(2),
             },
             Box::new(IgnoreLive),
         ));
@@ -856,6 +893,46 @@ mod tests {
                 pair[0].event().header().elapsed_ns().get()
                     <= pair[1].event().header().elapsed_ns().get()
             }));
+        });
+    }
+
+    #[test]
+    fn run_finish_emits_a_pending_cue_capture_gap_before_terminal_spans() {
+        let _python_test_guard = crate::initialize_python_for_test();
+        Python::attach(|py| {
+            let core = Arc::new(RuntimeCore::new());
+            let permit = core.begin().expect("start test runtime");
+            let binding = binding(py);
+            let (context, log) = context_with_pending_cue_gap();
+            assert_eq!(
+                context.begin_cue_capture().unwrap(),
+                crate::diagnostic_runtime::load_producer::CueDiagnosticCapture::Suppress
+            );
+            let producer = install(&core, &binding, context).expect("install runtime producer");
+
+            run_started(&core, &binding);
+            observe_binding(&binding, RuntimeHook::ProductionStartEntered, None);
+            observe_binding(&binding, RuntimeHook::ProductionStartReturned, None);
+            core.request_shutdown();
+            observe_binding(&binding, RuntimeHook::ProductionStopEntered, None);
+            observe_binding(&binding, RuntimeHook::ProductionStopReturned, None);
+            observe_binding(&binding, RuntimeHook::RunLifecycleReturned, None);
+            drop(permit);
+
+            assert!(producer.failure().is_none());
+            let events = log.events();
+            assert_eq!(events.len(), 9);
+            let DiagnosticEvent::ObservationGap(gap) = events[6].event() else {
+                panic!("expected pending Cue capture gap before terminal spans")
+            };
+            assert_eq!(gap.reason(), "cue-diagnostics-suppressed");
+            assert_eq!(gap.dropped_count().map(SchemaU64::get), Some(2));
+            let interval = gap.affected_elapsed().expect("gap has an elapsed interval");
+            assert!(interval.start_ns() <= interval.end_ns());
+            assert_eq!(gap.affected_kind(), None);
+            assert_eq!(gap.affected_scope(), None);
+            assert_finish(&events[7], 8, 4, SpanOutcome::Completed, None);
+            assert_finish(&events[8], 9, 1, SpanOutcome::Completed, None);
         });
     }
 

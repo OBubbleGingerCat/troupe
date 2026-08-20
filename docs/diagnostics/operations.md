@@ -78,12 +78,34 @@ responsibilities.
 ## Runtime and shutdown failures
 
 The diagnostic server runs in the Production process under the Runtime
-supervisor. A server execution-context exit, unexpected listener close,
-mandatory ingress exhaustion, writer stall, transaction or commit error, disk
-or permission failure, store invariant failure, or configured Run quota
-crossing is fatal. Troupe stops admitting new Production and Cue work, performs
-bounded settlement and diagnostic drain, and exits non-zero. It never discards
-core facts and continues the agent flow as if observation were healthy.
+supervisor. A server execution-context exit, unexpected listener close, writer
+stall, transaction or commit error, disk or permission failure, store invariant
+failure, configured Run quota crossing, or mandatory admission failure outside
+the protected Cue path is fatal. Troupe stops admitting new Production and Cue
+work, performs bounded settlement and diagnostic drain, and exits non-zero.
+
+Transient mandatory-ingress pressure is isolated at Cue boundaries. When
+accepted but uncommitted work reaches 24,576 events or 48 MiB (75% of either
+hard ingress budget), new Cues continue to execute but their durable and live
+diagnostic capture is suppressed. A Cue whose capture already started remains
+one complete canonical lifecycle and may use the remaining 25% completion
+headroom; it is never split between durable and subscriber-local histories.
+An optional per-Act Python sink may still receive the suppressed Cue's
+subscriber-local facts, but they never enter the Web timeline, live stream, or
+archive.
+This pressure path does not seal normal ingress or stop Production. A single
+already-admitted Cue, or a set of concurrent already-admitted Cues, that alone
+exhausts the 32,768-event or 64 MiB hard budget remains a fatal admission
+failure rather than producing an invalid partial lifecycle.
+
+Capture reopens for the next Cue after both pending dimensions drain to at most
+8,192 events and 16 MiB. Before that Cue is recorded, Troupe emits one canonical
+`ObservationGap` with reason `cue-diagnostics-suppressed`, the affected elapsed
+interval, and the number of suppressed Cue captures. The count is Cues rather
+than an estimate of their missing events. If no later Cue arrives, Run
+finalization emits the pending gap before the terminal Run facts. Core writer,
+store, quota, and non-Cue admission failures remain fail-closed; they are not
+reclassified as recoverable pressure.
 
 A single invalid request, disconnected or slow client, archive query, optional
 Python sink callback, or requested export is isolated to that operation. These

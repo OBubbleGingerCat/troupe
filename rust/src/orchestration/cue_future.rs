@@ -133,7 +133,6 @@ impl CueCall {
         let transaction = scene
             .begin_admission()
             .ok_or_else(|| CueContextError::new_err(CUE_CONTEXT_ERROR))?;
-        cue_producer::admission_started(&binding, &scene);
         let instruction = self
             .instruction
             .as_ref()
@@ -168,9 +167,17 @@ impl CueCall {
         )?;
         let loop_ = binding.event_loop(py);
         let signal = loop_.bind(py).call_method0("create_future")?.unbind();
-        let operation =
-            CueOperation::new_runtime(&scene, &target, &binding, cued, cue, signal.clone_ref(py));
         let waiter = Self::fresh_waiter(py, &signal)?;
+        let diagnostic_capture = cue_producer::admission_started(&binding, &scene);
+        let operation = CueOperation::new_runtime(
+            &scene,
+            &target,
+            &binding,
+            cued,
+            cue,
+            signal.clone_ref(py),
+            diagnostic_capture,
+        );
         prepared.commit(operation.clone())?;
         Ok((signal, waiter, operation))
     }

@@ -83,7 +83,26 @@ pub trait AdmissionReserver: Send {
     }
 }
 
-pub trait MandatoryDurableReserver: AdmissionReserver {}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CueCaptureDecision {
+    Capture,
+    Suppress,
+    Resume { suppressed_cues: u64 },
+}
+
+pub trait MandatoryDurableReserver: AdmissionReserver {
+    fn try_reserve_cue(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
+        self.try_reserve(size)
+    }
+
+    fn begin_cue_capture(&self) -> Result<CueCaptureDecision, Self::Error> {
+        Ok(CueCaptureDecision::Capture)
+    }
+
+    fn finish_cue_capture(&self) -> Result<Option<u64>, Self::Error> {
+        Ok(None)
+    }
+}
 
 pub trait BoundedInMemoryReserver: AdmissionReserver {}
 
@@ -95,6 +114,7 @@ struct AcceptedDiagnosticEventInner {
     event: DiagnosticEvent,
     canonical_bytes: Box<[u8]>,
     built_in_span_kind: Option<SpanKind>,
+    subscriber_local: bool,
 }
 
 impl AcceptedDiagnosticEvent {
@@ -102,11 +122,13 @@ impl AcceptedDiagnosticEvent {
         event: DiagnosticEvent,
         canonical_bytes: Vec<u8>,
         built_in_span_kind: Option<SpanKind>,
+        subscriber_local: bool,
     ) -> Self {
         Self(Arc::new(AcceptedDiagnosticEventInner {
             event,
             canonical_bytes: canonical_bytes.into_boxed_slice(),
             built_in_span_kind,
+            subscriber_local,
         }))
     }
 
@@ -121,6 +143,10 @@ impl AcceptedDiagnosticEvent {
     /// Returns the built-in kind carried by a start or resolved from its finish reference.
     pub fn built_in_span_kind(&self) -> Option<SpanKind> {
         self.0.built_in_span_kind
+    }
+
+    pub fn is_subscriber_local(&self) -> bool {
+        self.0.subscriber_local
     }
 
     pub fn identity(&self) -> EventIdentity {
@@ -217,6 +243,182 @@ impl AdmissionReceipt {
     }
 }
 
+pub struct SubscriberLocalStream {
+    run_id: CanonicalUuid,
+    next_sequence: Option<u64>,
+    sequence_exhausted: bool,
+    validator: ReferenceValidator,
+}
+
+impl SubscriberLocalStream {
+    pub const fn new(run_id: CanonicalUuid) -> Self {
+        Self {
+            run_id,
+            next_sequence: None,
+            sequence_exhausted: false,
+            validator: ReferenceValidator::new(),
+        }
+    }
+
+    pub fn seed(&mut self, event: DiagnosticEvent) -> Result<(), SubscriberLocalStreamError> {
+        let identity = EventIdentity::new(event.header().run_id(), event.header().sequence());
+        self.validate_seed_identity(identity)?;
+        self.validator
+            .validate(&event)
+            .map_err(SubscriberLocalStreamError::Reference)?;
+        self.advance(identity.sequence());
+        Ok(())
+    }
+
+    pub fn admit<C>(
+        &mut self,
+        candidate: C,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<AdmissionReceipt, SubscriberLocalStreamError>
+    where
+        C: DiagnosticEventCandidate,
+    {
+        if self.sequence_exhausted {
+            return Err(SubscriberLocalStreamError::SequenceExhausted);
+        }
+        let next = self
+            .next_sequence
+            .ok_or(SubscriberLocalStreamError::SequenceUnavailable)?;
+        let identity = EventIdentity::new(self.run_id, SchemaU64::new(next));
+        let event = candidate.materialize(identity);
+        let actual = EventIdentity::new(event.header().run_id(), event.header().sequence());
+        if actual != identity {
+            return Err(SubscriberLocalStreamError::IdentityMismatch {
+                expected: identity,
+                actual,
+            });
+        }
+        self.accept(event, subscriber)
+    }
+
+    fn accept(
+        &mut self,
+        event: DiagnosticEvent,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<AdmissionReceipt, SubscriberLocalStreamError> {
+        let canonical_bytes = serde_json::to_vec(&event)
+            .map_err(|_| SubscriberLocalStreamError::CanonicalEncoding)?;
+        let validated = self
+            .validator
+            .validate(&event)
+            .map_err(SubscriberLocalStreamError::Reference)?;
+        let built_in_span_kind = validated.built_in_span_kind();
+        let accepted =
+            AcceptedDiagnosticEvent::new(event, canonical_bytes, built_in_span_kind, true);
+        self.advance(accepted.identity().sequence());
+        let subscriber_delivery = match subscriber {
+            Some(subscriber) => match subscriber.deliver(accepted.clone()) {
+                Ok(()) => DeliveryOutcome::Delivered,
+                Err(error) => DeliveryOutcome::Failed(error),
+            },
+            None => DeliveryOutcome::NotConfigured,
+        };
+        Ok(AdmissionReceipt {
+            accepted,
+            live_delivery: DeliveryOutcome::NotConfigured,
+            subscriber_delivery,
+        })
+    }
+
+    fn validate_seed_identity(
+        &self,
+        identity: EventIdentity,
+    ) -> Result<(), SubscriberLocalStreamError> {
+        if identity.run_id() != self.run_id {
+            return Err(SubscriberLocalStreamError::RunIdentityMismatch);
+        }
+        if self.sequence_exhausted {
+            return Err(SubscriberLocalStreamError::SequenceExhausted);
+        }
+        if let Some(next) = self.next_sequence {
+            let actual = identity.sequence().get();
+            if actual < next {
+                return Err(SubscriberLocalStreamError::SequenceRegression {
+                    expected_at_least: next,
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn advance(&mut self, sequence: SchemaU64) {
+        match sequence.get().checked_add(1) {
+            Some(next) => self.next_sequence = Some(next),
+            None => {
+                self.next_sequence = None;
+                self.sequence_exhausted = true;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SubscriberLocalStreamError {
+    RunIdentityMismatch,
+    SequenceUnavailable,
+    SequenceExhausted,
+    SequenceRegression {
+        expected_at_least: u64,
+        actual: u64,
+    },
+    IdentityMismatch {
+        expected: EventIdentity,
+        actual: EventIdentity,
+    },
+    CanonicalEncoding,
+    Reference(ReferenceValidationError),
+}
+
+impl fmt::Display for SubscriberLocalStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RunIdentityMismatch => {
+                formatter.write_str("subscriber-local Run identity differs")
+            }
+            Self::SequenceUnavailable => {
+                formatter.write_str("subscriber-local sequence is not initialized")
+            }
+            Self::SequenceExhausted => {
+                formatter.write_str("subscriber-local sequence is exhausted")
+            }
+            Self::SequenceRegression {
+                expected_at_least,
+                actual,
+            } => write!(
+                formatter,
+                "subscriber-local sequence is {actual}, expected at least {expected_at_least}"
+            ),
+            Self::IdentityMismatch { expected, actual } => write!(
+                formatter,
+                "subscriber-local candidate identity {}:{} differs from assigned {}:{}",
+                actual.run_id(),
+                actual.sequence().get(),
+                expected.run_id(),
+                expected.sequence().get(),
+            ),
+            Self::CanonicalEncoding => {
+                formatter.write_str("subscriber-local event canonical encoding failed")
+            }
+            Self::Reference(error) => fmt::Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for SubscriberLocalStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Reference(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum HubAdmissionError<E> {
     StatePoisoned,
@@ -288,6 +490,7 @@ pub enum ProductionProfile {}
 pub enum SinkOnlyProfile {}
 
 pub struct DiagnosticHub<R, P> {
+    run_id: CanonicalUuid,
     state: Mutex<HubState<R>>,
     subscriber_delivery_order: Mutex<()>,
     profile: PhantomData<fn() -> P>,
@@ -324,7 +527,26 @@ where
     where
         C: DiagnosticEventCandidate,
     {
-        self.admit_inner(candidate, subscriber, AdmissionClass::Normal)
+        self.admit_inner(
+            candidate,
+            subscriber,
+            |reserver, size| reserver.try_reserve(size),
+        )
+    }
+
+    pub fn admit_cue<C>(
+        &self,
+        candidate: C,
+        subscriber: Option<&dyn ActEventSubscriber>,
+    ) -> Result<AdmissionReceipt, HubAdmissionError<R::Error>>
+    where
+        C: DiagnosticEventCandidate,
+    {
+        self.admit_inner(
+            candidate,
+            subscriber,
+            |reserver, size| reserver.try_reserve_cue(size),
+        )
     }
 
     pub fn admit_fatal<C>(
@@ -335,7 +557,33 @@ where
     where
         C: DiagnosticEventCandidate,
     {
-        self.admit_inner(candidate, subscriber, AdmissionClass::Fatal)
+        self.admit_inner(
+            candidate,
+            subscriber,
+            |reserver, size| reserver.try_reserve_fatal(size),
+        )
+    }
+
+    pub fn begin_cue_capture(&self) -> Result<CueCaptureDecision, HubAdmissionError<R::Error>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HubAdmissionError::StatePoisoned)?;
+        state
+            .reserver
+            .begin_cue_capture()
+            .map_err(HubAdmissionError::Reservation)
+    }
+
+    pub fn finish_cue_capture(&self) -> Result<Option<u64>, HubAdmissionError<R::Error>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HubAdmissionError::StatePoisoned)?;
+        state
+            .reserver
+            .finish_cue_capture()
+            .map_err(HubAdmissionError::Reservation)
     }
 }
 
@@ -355,14 +603,12 @@ where
     where
         C: DiagnosticEventCandidate,
     {
-        self.admit_inner(candidate, Some(subscriber), AdmissionClass::Normal)
+        self.admit_inner(
+            candidate,
+            Some(subscriber),
+            |reserver, size| reserver.try_reserve(size),
+        )
     }
-}
-
-#[derive(Clone, Copy)]
-enum AdmissionClass {
-    Normal,
-    Fatal,
 }
 
 impl<R, P> DiagnosticHub<R, P>
@@ -375,6 +621,7 @@ where
         live_notifier: Option<Box<dyn LiveEventNotifier>>,
     ) -> Self {
         Self {
+            run_id,
             state: Mutex::new(HubState {
                 run_id,
                 next_sequence: Some(1),
@@ -387,14 +634,19 @@ where
         }
     }
 
-    fn admit_inner<C>(
+    pub const fn run_id(&self) -> CanonicalUuid {
+        self.run_id
+    }
+
+    fn admit_inner<C, F>(
         &self,
         candidate: C,
         subscriber: Option<&dyn ActEventSubscriber>,
-        class: AdmissionClass,
+        reserve: F,
     ) -> Result<AdmissionReceipt, HubAdmissionError<R::Error>>
     where
         C: DiagnosticEventCandidate,
+        F: FnOnce(&mut R, AdmissionSize) -> Result<R::Reservation, R::Error>,
     {
         let _subscriber_delivery_order = subscriber
             .map(|_| {
@@ -420,22 +672,19 @@ where
                 actual,
             });
         }
-
         let canonical_bytes =
             serde_json::to_vec(&event).map_err(|_| HubAdmissionError::CanonicalEncoding)?;
         let size = AdmissionSize::one_event(canonical_bytes.len());
-        let reservation = match class {
-            AdmissionClass::Normal => state.reserver.try_reserve(size),
-            AdmissionClass::Fatal => state.reserver.try_reserve_fatal(size),
-        }
-        .map_err(HubAdmissionError::Reservation)?;
+        let reservation = reserve(&mut state.reserver, size)
+            .map_err(HubAdmissionError::Reservation)?;
 
         let validated = state
             .validator
             .validate(&event)
             .map_err(HubAdmissionError::Reference)?;
         let built_in_span_kind = validated.built_in_span_kind();
-        let accepted = AcceptedDiagnosticEvent::new(event, canonical_bytes, built_in_span_kind);
+        let accepted =
+            AcceptedDiagnosticEvent::new(event, canonical_bytes, built_in_span_kind, false);
         state.next_sequence = next.checked_add(1);
         reservation.commit(accepted.clone());
 

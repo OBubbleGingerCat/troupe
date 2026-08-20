@@ -57,6 +57,7 @@ mod active {
     use crate::diagnostic_runtime::{
         act_producer,
         hooks::{DiagnosticActSubscriberLookup, NoopDiagnosticActSubscriber},
+        load_producer::{AdmittedAgentEvent, DiagnosticRunContext},
     };
 
     const ADMISSION_FAILED: AgentDiagnosticErrorCode =
@@ -87,7 +88,7 @@ mod active {
             &self,
             candidate: CanonicalEventBuilder,
             subscriber: Option<&dyn ActEventSubscriber>,
-        ) -> Result<SchemaU64, AgentDiagnosticErrorCode>;
+        ) -> Result<AdmittedAgentEvent, AgentDiagnosticErrorCode>;
     }
 
     struct ProductionAdmission<R> {
@@ -102,10 +103,12 @@ mod active {
             &self,
             candidate: CanonicalEventBuilder,
             subscriber: Option<&dyn ActEventSubscriber>,
-        ) -> Result<SchemaU64, AgentDiagnosticErrorCode> {
+        ) -> Result<AdmittedAgentEvent, AgentDiagnosticErrorCode> {
             self.hub
                 .admit(candidate, subscriber)
-                .map(|receipt| receipt.accepted().identity().sequence())
+                .map(|receipt| {
+                    AdmittedAgentEvent::durable(receipt.accepted().identity().sequence())
+                })
                 .map_err(|_| ADMISSION_FAILED)
         }
     }
@@ -123,13 +126,15 @@ mod active {
             &self,
             candidate: CanonicalEventBuilder,
             subscriber: Option<&dyn ActEventSubscriber>,
-        ) -> Result<SchemaU64, AgentDiagnosticErrorCode> {
+        ) -> Result<AdmittedAgentEvent, AgentDiagnosticErrorCode> {
             self.hub
                 .admit(
                     candidate,
                     subscriber.unwrap_or(self.fallback_subscriber.as_ref()),
                 )
-                .map(|receipt| receipt.accepted().identity().sequence())
+                .map(|receipt| {
+                    AdmittedAgentEvent::durable(receipt.accepted().identity().sequence())
+                })
                 .map_err(|_| ADMISSION_FAILED)
         }
     }
@@ -240,6 +245,7 @@ mod active {
     #[derive(Clone)]
     struct CarriedContext {
         generation: Option<u64>,
+        context: Option<DiagnosticRunContext>,
         scope: DiagnosticScope,
         containing_span_id: Option<SchemaU64>,
         occupancy: AgentContextOccupancy,
@@ -610,6 +616,7 @@ mod active {
             )?;
             session.closed = true;
             session.last_sequence = lifecycle_sequence;
+            state.latest_context.remove(&key);
             Ok(ObservationDisposition::Admitted)
         }
 
@@ -816,7 +823,7 @@ mod active {
             observed_elapsed_ns: u64,
         ) -> Result<ObservationDisposition, AgentDiagnosticErrorCode> {
             let mut state = lock(&self.state);
-            let (key, generation, scope, containing_span_id, previous) = match metadata {
+            let (key, generation, context, scope, containing_span_id, previous) = match metadata {
                 AgentContextOccupancyMetadata::Turn(metadata) => {
                     let lineage = act_lineage(metadata)?;
                     ensure_turn(&mut state, metadata, lineage.containing_span_id())?;
@@ -832,6 +839,7 @@ mod active {
                     (
                         SessionKey::new(metadata.identity().session()),
                         Some(metadata.session_generation()),
+                        Some(lineage.context()),
                         lineage.event_scope().clone(),
                         Some(lineage.containing_span_id()),
                         turn.last_sequence,
@@ -843,6 +851,7 @@ mod active {
                     (
                         SessionKey::new(metadata.context()),
                         metadata.generation(),
+                        None,
                         scope,
                         containing_span_id,
                         previous,
@@ -852,7 +861,8 @@ mod active {
             let context_used_tokens = occupancy.context_used_tokens().map(SchemaU64::new);
             let context_window_tokens = occupancy.context_window_tokens().map(SchemaU64::new);
             let event_scope = scope.clone();
-            let sequence = self.admit_event(
+            let admitted = self.admit_event_in_context(
+                context.as_ref(),
                 ElapsedNs::new(event_elapsed_ns),
                 scope.clone(),
                 follows_from(previous),
@@ -871,10 +881,12 @@ mod active {
                     )
                 },
             )?;
+            let sequence = admitted.sequence();
             state.latest_context.insert(
                 key,
                 CarriedContext {
                     generation,
+                    context,
                     scope: event_scope,
                     containing_span_id,
                     occupancy,
@@ -897,36 +909,45 @@ mod active {
                 state.latest_context.get(&key).cloned().filter(|context| {
                     context.generation == candidate.detail().session_generation()
                 });
-            let (scope, containing_span_id, previous, occupancy, observed_elapsed_ns, origin) =
-                match carried {
-                    Some(context) => (
-                        context.scope,
-                        context.containing_span_id,
-                        context.sequence,
-                        context.occupancy,
-                        Some(ElapsedNs::new(context.observed_elapsed_ns)),
-                        ContextSampleOrigin::CarriedForward,
-                    ),
-                    None => {
-                        let scope = session_scope(
-                            candidate.detail().session(),
-                            candidate.detail().session_generation(),
-                        )?;
-                        let (containing_span_id, previous) =
-                            state.sessions.get(&key).map_or((None, None), |session| {
-                                (Some(session.lifecycle.span_id), Some(session.last_sequence))
-                            });
-                        (
-                            scope,
-                            containing_span_id,
-                            previous.unwrap_or(SchemaU64::new(1)),
-                            AgentContextOccupancy::new(None, None)
-                                .expect("empty context occupancy is valid"),
-                            None,
-                            ContextSampleOrigin::Provider,
-                        )
-                    }
-                };
+            let (
+                context,
+                scope,
+                containing_span_id,
+                previous,
+                occupancy,
+                observed_elapsed_ns,
+                origin,
+            ) = match carried {
+                Some(context) => (
+                    context.context,
+                    context.scope,
+                    context.containing_span_id,
+                    context.sequence,
+                    context.occupancy,
+                    Some(ElapsedNs::new(context.observed_elapsed_ns)),
+                    ContextSampleOrigin::CarriedForward,
+                ),
+                None => {
+                    let scope = session_scope(
+                        candidate.detail().session(),
+                        candidate.detail().session_generation(),
+                    )?;
+                    let (containing_span_id, previous) =
+                        state.sessions.get(&key).map_or((None, None), |session| {
+                            (Some(session.lifecycle.span_id), Some(session.last_sequence))
+                        });
+                    (
+                        None,
+                        scope,
+                        containing_span_id,
+                        previous.unwrap_or(SchemaU64::new(1)),
+                        AgentContextOccupancy::new(None, None)
+                            .expect("empty context occupancy is valid"),
+                        None,
+                        ContextSampleOrigin::Provider,
+                    )
+                }
+            };
             let amount = candidate.cost().amount().clone();
             let currency = candidate.cost().currency().clone();
             let context_used_tokens = occupancy.context_used_tokens().map(SchemaU64::new);
@@ -938,22 +959,30 @@ mod active {
             } else {
                 Vec::new()
             };
-            let sequence = self.admit_event(elapsed_ns, scope, causes, move |header| {
-                DiagnosticEvent::ContextUsageSampled(
-                    ContextUsageSampled::new(
-                        header,
-                        context_used_tokens,
-                        context_window_tokens,
-                        Some(amount),
-                        Some(currency),
-                        origin,
-                        observed_elapsed_ns,
+            let admitted = self.admit_event_in_context(
+                context.as_ref(),
+                elapsed_ns,
+                scope,
+                causes,
+                move |header| {
+                    DiagnosticEvent::ContextUsageSampled(
+                        ContextUsageSampled::new(
+                            header,
+                            context_used_tokens,
+                            context_window_tokens,
+                            Some(amount),
+                            Some(currency),
+                            origin,
+                            observed_elapsed_ns,
+                        )
+                        .expect("the observer emitted validated context and cost values"),
                     )
-                    .expect("the observer emitted validated context and cost values"),
-                )
-            })?;
-            if let Some(session) = state.sessions.get_mut(&key) {
-                session.last_sequence = sequence;
+                },
+            )?;
+            if !admitted.is_subscriber_local()
+                && let Some(session) = state.sessions.get_mut(&key)
+            {
+                session.last_sequence = admitted.sequence();
             }
             let _ = containing_span_id;
             Ok(ObservationDisposition::Admitted)
@@ -1429,6 +1458,32 @@ mod active {
         where
             F: FnOnce(DiagnosticEventHeader) -> DiagnosticEvent + Send + 'static,
         {
+            self.admit_event_in_context(None, elapsed_ns, scope, caused_by, build)
+                .map(AdmittedAgentEvent::sequence)
+        }
+
+        fn admit_event_in_context<F>(
+            &self,
+            context: Option<&DiagnosticRunContext>,
+            elapsed_ns: ElapsedNs,
+            scope: DiagnosticScope,
+            caused_by: Vec<CausalLink>,
+            build: F,
+        ) -> Result<AdmittedAgentEvent, AgentDiagnosticErrorCode>
+        where
+            F: FnOnce(DiagnosticEventHeader) -> DiagnosticEvent + Send + 'static,
+        {
+            let context = context.cloned().or_else(|| {
+                scope
+                    .act_id()
+                    .and_then(|act_id| act_producer::lineage_snapshot(act_id.as_str()))
+                    .map(|lineage| lineage.context())
+            });
+            if let Some(context) = context {
+                return context
+                    .admit_agent_event_with_provenance(elapsed_ns, scope, caused_by, build)
+                    .map_err(|_| ADMISSION_FAILED);
+            }
             let subscriber = scope.act_id().and_then(|act_id| {
                 self.subscribers
                     .as_ref()

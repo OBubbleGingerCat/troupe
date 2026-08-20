@@ -775,6 +775,39 @@ mod active {
         causal_sequence: SchemaU64,
         usage: FinalUsage,
     ) -> Result<SchemaU64, AgentDiagnosticErrorCode> {
+        if let Some(context) = scope
+            .act_id()
+            .and_then(|act_id| act_producer::lineage_snapshot(act_id.as_str()))
+            .map(|lineage| lineage.context())
+        {
+            return context
+                .admit_agent_event(
+                    elapsed_ns,
+                    scope,
+                    vec![CausalLink::new(
+                        causal_sequence,
+                        CausalRelation::FollowsFrom,
+                    )],
+                    move |header| {
+                        DiagnosticEvent::ActTokenUsageFinalized(
+                            ActTokenUsageFinalized::new(
+                                header,
+                                usage.availability,
+                                usage.source,
+                                usage.unavailable_reason,
+                                usage.provider_total_tokens,
+                                usage.input_tokens,
+                                usage.output_tokens,
+                                usage.thought_tokens,
+                                usage.cached_read_tokens,
+                                usage.cached_write_tokens,
+                            )
+                            .expect("the normalizer constructs validated terminal usage"),
+                        )
+                    },
+                )
+                .map_err(|_| ADMISSION_FAILED);
+        }
         admission.admit(
             Box::new(move |identity| {
                 let header = DiagnosticEventHeader::new(

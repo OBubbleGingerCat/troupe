@@ -284,6 +284,7 @@ mod active {
                 .act_id()
                 .expect("a prepared Act has an Act ID")
                 .clone();
+            let event_context = prepared.context().without_act_subscriber_lookup();
             let mut prepared_authority =
                 custom_act_binding::prepare(py, run, cued, prepared.act_scope())?;
             let reservation = self.state.registry.reserve(act_id.as_str())?;
@@ -294,6 +295,7 @@ mod active {
                 .map_err(PyRuntimeError::new_err)?;
             let failure_facts = Arc::new(DeliveryFactEmitter::new(
                 Arc::downgrade(&self.state),
+                event_context.clone(),
                 prepared.act_scope().clone(),
                 handle.id(),
             ));
@@ -310,6 +312,7 @@ mod active {
             );
             let subscriber = Arc::new(ActSinkSubscriber {
                 state: Arc::downgrade(&self.state),
+                context: event_context,
                 capture,
                 act_scope: prepared.act_scope().clone(),
                 authority: prepared_authority
@@ -877,6 +880,7 @@ mod active {
 
     struct ActSinkSubscriber {
         state: Weak<CapabilityState>,
+        context: DiagnosticRunContext,
         capture: DiagnosticCaptureConfig,
         act_scope: DiagnosticScope,
         authority: Option<custom_act_binding::ActAuthority>,
@@ -942,6 +946,7 @@ mod active {
             }
 
             let sequence = projected.canonical().identity().sequence();
+            let subscriber_local = projected.canonical().is_subscriber_local();
             let event_kind = projected.event().kind();
             let is_drop_counter = matches!(
                 projected.event(),
@@ -1002,7 +1007,7 @@ mod active {
                 }
             };
             if !is_drop_counter {
-                self.record_drops(sequence, &outcome);
+                self.record_drops(sequence, subscriber_local, &outcome);
             }
             if let Some(act_outcome) = act_outcome {
                 self.settle_terminal(act_outcome)?;
@@ -1034,7 +1039,12 @@ mod active {
             self.settlement.install_authority_expiry(authority)
         }
 
-        fn record_drops(&self, source_sequence: SchemaU64, outcome: &AdmissionOutcome) {
+        fn record_drops(
+            &self,
+            source_sequence: SchemaU64,
+            subscriber_local: bool,
+            outcome: &AdmissionOutcome,
+        ) {
             let dropped = dropped_events(outcome);
             if dropped == 0 {
                 return;
@@ -1044,8 +1054,11 @@ mod active {
             };
             let mut facts = lock(&self.drop_facts);
             facts.cumulative = facts.cumulative.saturating_add(dropped as u64);
+            if subscriber_local {
+                return;
+            }
             let value = SchemaU64::new(facts.cumulative);
-            let result = state.context.emit_counter(
+            let result = self.context.emit_counter_without_act_subscriber(
                 self.act_scope.clone(),
                 CounterKind::DiagnosticDroppedEvents,
                 value,
@@ -1173,15 +1186,22 @@ mod active {
 
     struct DeliveryFactEmitter {
         state: Weak<CapabilityState>,
+        context: DiagnosticRunContext,
         scope: DiagnosticScope,
         component_id: RunLocalId,
         emitted: AtomicBool,
     }
 
     impl DeliveryFactEmitter {
-        fn new(state: Weak<CapabilityState>, scope: DiagnosticScope, sink_id: u64) -> Self {
+        fn new(
+            state: Weak<CapabilityState>,
+            context: DiagnosticRunContext,
+            scope: DiagnosticScope,
+            sink_id: u64,
+        ) -> Self {
             Self {
                 state,
+                context,
                 scope,
                 component_id: RunLocalId::parse(&format!("sink-{sink_id}"))
                     .expect("a numeric sink ID is a RunLocalId"),
@@ -1220,7 +1240,7 @@ mod active {
                 related,
             )
             .expect("the sink delivery failure mapping is closed");
-            if let Err(error) = state.context.emit_instant_without_act_subscriber(
+            if let Err(error) = self.context.emit_instant_without_act_subscriber(
                 self.scope.clone(),
                 InstantDetail::DiagnosticComponentFailed(detail),
                 None,

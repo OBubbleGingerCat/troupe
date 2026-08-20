@@ -15,8 +15,8 @@ use std::{
 use pyo3::prelude::*;
 use troupe_diagnostics_core::{
     hub::{
-        AdmissionReserver, AdmissionSize, LiveEventNotifier, MandatoryDurableReserver,
-        ProductionDiagnosticHub,
+        AdmissionReserver, AdmissionSize, CueCaptureDecision, LiveEventNotifier,
+        MandatoryDurableReserver, ProductionDiagnosticHub,
     },
     id::CanonicalUuid,
     scalar::SchemaU64,
@@ -148,7 +148,26 @@ impl AdmissionReserver for DurableAdmission {
     }
 }
 
-impl MandatoryDurableReserver for DurableAdmission {}
+impl MandatoryDurableReserver for DurableAdmission {
+    fn try_reserve_cue(&mut self, size: AdmissionSize) -> Result<Self::Reservation, Self::Error> {
+        self.quota_precheck(size)?;
+        self.ingress
+            .try_reserve_cue(size)
+            .map_err(DurableAdmissionError::Ingress)
+    }
+
+    fn begin_cue_capture(&self) -> Result<CueCaptureDecision, Self::Error> {
+        self.ingress
+            .begin_cue_capture()
+            .map_err(|_| DurableAdmissionError::Ingress(IngressAdmissionError::StatePoisoned))
+    }
+
+    fn finish_cue_capture(&self) -> Result<Option<u64>, Self::Error> {
+        self.ingress
+            .finish_cue_capture()
+            .map_err(|_| DurableAdmissionError::Ingress(IngressAdmissionError::StatePoisoned))
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DurableAdmissionError {

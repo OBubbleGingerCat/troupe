@@ -540,6 +540,10 @@ mod active {
             &self.producer.act_scope
         }
 
+        pub(crate) fn context(&self) -> DiagnosticRunContext {
+            self.producer.context.clone()
+        }
+
         pub(crate) fn commit(self) {
             let producer = self.producer;
             {
