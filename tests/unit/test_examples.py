@@ -240,9 +240,11 @@ def test_diagnostics_complex_example_uses_a_sustainable_default_interval(
     assert parse_interval_seconds(
         [],
         default=DEFAULT_COMPLEX_INTERVAL_SECONDS,
-    ) == 5.0
+    ) == 30.0
     assert parse_interval_seconds([], default=DEFAULT_INTERVAL_SECONDS) == 30.0
-    assert "-- complex\n" in (EXAMPLES / "README.md").read_text(encoding="utf-8")
+    examples_readme = (EXAMPLES / "README.md").read_text(encoding="utf-8")
+    assert "-- complex\n" in examples_readme
+    assert "30-second Scene interval" in examples_readme
 
 
 def test_mixed_repository_repair_live_example_and_oracle_are_wired() -> None:

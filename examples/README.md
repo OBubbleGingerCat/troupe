@@ -124,7 +124,7 @@ provider turns:
 troupe --production examples/diagnostics --diagnostic-bind-host 127.0.0.1 --diagnostic-port 43120 -- complex
 ```
 
-This mode uses a conservative five-second Scene interval so it can run for a
+This mode uses a conservative 30-second Scene interval so it can run for a
 long observation without exhausting the diagnostics ingress budget. It is
 intended for checking Live retention, the rolling time window, dynamic Actor
 destruction, lane allocation, and deep Python span geometry. Each Cue
@@ -132,8 +132,9 @@ deliberately pauses between nested stages so the bars and event markers remain
 readable when a Scene is selected in History. This provider-free mode covers
 Cue, Actor, Python span, and Python event tracks; the default diagnostics
 showcase remains the provider-backed example for inspecting Act, tool, and
-agent-message tracks. A shorter explicit interval is useful as a brief stress
-test, but is not suitable for an unattended long run.
+agent-message tracks. A shorter explicit interval is useful only as a brief
+stress test and may eventually terminate the run when the durable ingress
+budget is exhausted.
 
 While the Production is running, inspect the same Run from another terminal or
 export its currently committed prefix as a Perfetto trace:

@@ -14,7 +14,7 @@ from .sink import EvaluationSink, JsonValue
 
 
 DEFAULT_INTERVAL_SECONDS = 30.0
-DEFAULT_COMPLEX_INTERVAL_SECONDS = 5.0
+DEFAULT_COMPLEX_INTERVAL_SECONDS = 30.0
 COMPLEX_STAGE_DELAY_SECONDS = 0.5
 PROBE_MARKER = "troupe-diagnostics-ready"
 
@@ -253,6 +253,13 @@ class Production(troupe.Production):
 
     async def start(self) -> None:
         if self.mode == "complex":
+            warning = (
+                "provider-free long-run timeline fixture; default cadence is tuned "
+                "for durable diagnostics storage; stop with Ctrl+C"
+                if self.interval_seconds >= DEFAULT_COMPLEX_INTERVAL_SECONDS
+                else "short interval is a stress test and may exhaust the diagnostics "
+                "ingress budget; stop with Ctrl+C"
+            )
             diagnostics.event(
                 "example.complex_started",
                 attributes={
@@ -267,7 +274,7 @@ class Production(troupe.Production):
                         "diagnostics_showcase": "complex_started",
                         "scene_interval_seconds": self.interval_seconds,
                         "provider_turns": 0,
-                        "warning": "provider-free long-run timeline fixture; stop with Ctrl+C",
+                        "warning": warning,
                     },
                     sort_keys=True,
                 ),
