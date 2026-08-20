@@ -176,6 +176,55 @@ describe("Actor timeline lifecycle affordances", () => {
     expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("1:05 - 1:15");
   });
 
+  it("pans a fixed-width History viewport without compressing short work", () => {
+    const history = { ...QUEUE_DATA, totalTime: 40, liveNow: 40 };
+    const view = render(
+      <ActorTimeline
+        data={history}
+        historyData={history}
+        historyStatus="ready"
+        livePaused={false}
+        unseenCount={0n}
+        onPauseToggle={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+    const position = screen.getByRole("slider", { name: "History window position" });
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:30 - 0:40");
+    expect(position).toHaveValue("30");
+    expect(screen.getByRole("button", { name: "Pan History forward" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Play History range" }));
+    expect(screen.getByRole("button", { name: "Pause History playback" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Pan History backward" }));
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:25 - 0:35");
+    expect(position).toHaveValue("25");
+    expect(screen.getByRole("button", { name: "Play History range" })).toBeInTheDocument();
+
+    fireEvent.input(position, { target: { value: "0" } });
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:10");
+    expect(screen.getByRole("slider", { name: "History playhead" })).toHaveValue("10");
+    const detailedWidth = Number(
+      view.container.querySelector(".cue-wait-track[data-cue-id='cue-1'] .cue-wait-bar")
+        ?.getAttribute("width"),
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "History window" }), {
+      target: { value: "30" },
+    });
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:00 - 0:30");
+    const overviewWidth = Number(
+      view.container.querySelector(".cue-wait-track[data-cue-id='cue-1'] .cue-wait-bar")
+        ?.getAttribute("width"),
+    );
+    expect(detailedWidth).toBeGreaterThan(overviewWidth * 2.5);
+
+    fireEvent.click(screen.getByRole("button", { name: "Pan History forward" }));
+    expect(screen.getByLabelText("Visible timeline range")).toHaveTextContent("0:10 - 0:40");
+    expect(position).toHaveValue("10");
+  });
+
   it("labels even a short lifetime and exposes rail/start/end details on hover", () => {
     const view = render(
       <ActorTimeline

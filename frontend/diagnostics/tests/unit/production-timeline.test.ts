@@ -13,6 +13,7 @@ import {
 } from "../../src/state/reducer.ts";
 import { activateWindow, createEventWindow } from "../../src/state/windows.ts";
 import {
+  historyTimelineRange,
   liveActorVisible,
   liveTimelineRange,
 } from "../../src/timeline/actor_timeline_model.ts";
@@ -161,6 +162,14 @@ describe("production Actor timeline projection", () => {
     expect(liveTimelineRange(59.9, 60).end).toBe(59.9);
     expect(liveTimelineRange(60, 60)).toEqual({ start: 0, end: 60 });
     expect(liveTimelineRange(75, 60)).toEqual({ start: 15, end: 75 });
+  });
+
+  it("keeps a fixed-width History viewport while clamping it to the Run", () => {
+    expect(historyTimelineRange(100, 45, 10)).toEqual({ start: 45, end: 55 });
+    expect(historyTimelineRange(100, -5, 10)).toEqual({ start: 0, end: 10 });
+    expect(historyTimelineRange(100, 95, 10)).toEqual({ start: 90, end: 100 });
+    expect(historyTimelineRange(6, 2, 10)).toEqual({ start: 0, end: 6 });
+    expect(historyTimelineRange(0, 10, 10)).toEqual({ start: 0, end: 0 });
   });
 
   it("places built-in lifecycles and Python diagnostics on one elapsed-time plane", () => {

@@ -293,7 +293,7 @@ test.describe("complex timeline geometry", () => {
       };
     });
 
-    expect(report.actorRows).toBeGreaterThanOrEqual(5);
+    expect(report.actorRows).toBeGreaterThanOrEqual(4);
     expect(report.cueTracks).toBeGreaterThanOrEqual(5);
     expect(report.deepSpans).toBeGreaterThan(0);
     expect(report.customEvents).toBeGreaterThan(0);
@@ -444,7 +444,7 @@ test.describe("complex timeline geometry", () => {
         throw new Error("known fixture Cue is missing");
       }
       const width = svg.viewBox.baseVal.width;
-      const expectedX = (time: number): number => 14 + (time / 16) * (width - 28);
+      const expectedX = (time: number): number => 14 + (time / 10) * (width - 28);
       const rect = (selector: string): { x: number; end: number } => {
         const element = cue.querySelector<SVGRectElement>(selector);
         if (element === null) {

@@ -278,10 +278,18 @@ function registerAccessibilityTests(): void {
     await page.keyboard.press("Enter");
     await expect(doubleSpeed).toHaveAttribute("aria-pressed", "true");
 
-    for (const name of ["History range start", "History range end", "History playhead"]) {
+    for (const name of ["History window position", "History playhead"]) {
       const slider = page.getByRole("slider", { name });
       await slider.focus();
       await expect(slider).toBeFocused();
+    }
+
+    await page.getByRole("button", { name: "Pan History backward" }).click();
+    await expect(page.getByRole("button", { name: "Pan History forward" })).toBeEnabled();
+    for (const name of ["Pan History backward", "Pan History forward"]) {
+      const button = page.getByRole("button", { name });
+      await button.focus();
+      await expect(button).toBeFocused();
     }
 
     const actor = page.getByRole("button", { name: /Keyboard operator/ }).first();

@@ -221,6 +221,11 @@ button:disabled {
   gap: 7px;
 }
 
+.history-pan {
+  display: inline-flex;
+  gap: 3px;
+}
+
 .icon-button {
   display: inline-grid;
   width: 34px;
@@ -343,7 +348,7 @@ button:disabled {
 
 .range-sliders {
   display: grid;
-  grid-template-columns: repeat(3, minmax(110px, 1fr));
+  grid-template-columns: repeat(2, minmax(150px, 1fr));
   gap: 13px;
 }
 
@@ -1196,6 +1201,11 @@ button:disabled {
 
   .mode-controls {
     order: 2;
+  }
+
+  .history-playback {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
   }
 
   .range-readout {

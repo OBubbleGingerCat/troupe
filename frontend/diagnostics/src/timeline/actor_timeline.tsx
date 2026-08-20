@@ -1,5 +1,7 @@
 import {
   Activity,
+  ArrowLeft,
+  ArrowRight,
   Archive,
   Braces,
   Clock3,
@@ -42,6 +44,7 @@ import {
   actorState,
   cueState,
   formatElapsed,
+  historyTimelineRange,
   intersects,
   lifecycleState,
   liveActorVisible,
@@ -64,8 +67,8 @@ const CUE_BAR_HEIGHT = 11;
 const CUE_LANE_STEP = 24;
 const ACT_BAR_HEIGHT = 14;
 const CUSTOM_SPAN_HEIGHT = 13;
-const HISTORY_MIN_RANGE = 12;
 const DEFAULT_LIVE_WINDOW_SECONDS = 10;
+const DEFAULT_HISTORY_WINDOW_SECONDS = 10;
 const SCENE_LABEL_CHAR_WIDTH = 5.8;
 const SCENE_LABEL_GAP = 4;
 const SCENE_COLORS: Readonly<Record<SceneRecord["tone"], string>> = {
@@ -1938,11 +1941,17 @@ export function ActorTimeline({
   const timelineData = mode === "history" && historyData !== null ? historyData : data;
   const [followLive, setFollowLive] = useState(true);
   const [liveWindow, setLiveWindow] = useState(DEFAULT_LIVE_WINDOW_SECONDS);
-  const [historyRange, setHistoryRange] = useState<TimelineRange>(() => ({
-    start: Math.max(0, data.totalTime - 120),
-    end: data.totalTime,
-  }));
-  const [historyCursor, setHistoryCursor] = useState(() => Math.max(0, data.totalTime - 120));
+  const [historyWindow, setHistoryWindow] = useState(DEFAULT_HISTORY_WINDOW_SECONDS);
+  const [historyViewport, setHistoryViewport] = useState<TimelineRange>(() => historyTimelineRange(
+    data.totalTime,
+    data.totalTime - DEFAULT_HISTORY_WINDOW_SECONDS,
+    DEFAULT_HISTORY_WINDOW_SECONDS,
+  ));
+  const [historyCursor, setHistoryCursor] = useState(() => historyTimelineRange(
+    data.totalTime,
+    data.totalTime - DEFAULT_HISTORY_WINDOW_SECONDS,
+    DEFAULT_HISTORY_WINDOW_SECONDS,
+  ).start);
   const [historyPlaying, setHistoryPlaying] = useState(false);
   const [historySpeed, setHistorySpeed] = useState(1);
   const [selectedActorId, setSelectedActorId] = useState<string | null>(
@@ -1950,13 +1959,12 @@ export function ActorTimeline({
   );
 
   useEffect(() => {
-    setHistoryRange((current) => {
-      const end = Math.min(timelineData.totalTime, current.end);
-      const start = Math.min(current.start, end);
-      return start === current.start && end === current.end ? current : { start, end };
+    setHistoryViewport((current) => {
+      const next = historyTimelineRange(timelineData.totalTime, current.start, historyWindow);
+      return next.start === current.start && next.end === current.end ? current : next;
     });
     setHistoryCursor((current) => Math.min(current, timelineData.totalTime));
-  }, [timelineData.totalTime]);
+  }, [historyWindow, timelineData.totalTime]);
 
   useEffect(() => {
     if (mode !== "live" || selectedActorId === null) {
@@ -1977,19 +1985,19 @@ export function ActorTimeline({
     }
     const interval = window.setInterval(() => {
       setHistoryCursor((current) => {
-        const next = Math.min(historyRange.end, current + historySpeed * 0.25);
-        if (next >= historyRange.end) {
+        const next = Math.min(historyViewport.end, current + historySpeed * 0.25);
+        if (next >= historyViewport.end) {
           setHistoryPlaying(false);
         }
         return next;
       });
     }, 250);
     return () => window.clearInterval(interval);
-  }, [historyPlaying, historyRange.end, historySpeed, mode]);
+  }, [historyPlaying, historySpeed, historyViewport.end, mode]);
 
   const range = mode === "live"
     ? liveTimelineRange(timelineData.liveNow, liveWindow)
-    : historyRange;
+    : historyViewport;
   const cursor = mode === "live" ? timelineData.liveNow : historyCursor;
   const rows = useMemo(
     () => actorRows(timelineData, mode, range, cursor, liveWindow, selectedActorId),
@@ -1999,9 +2007,15 @@ export function ActorTimeline({
   const selectedRow = rows.find((row) => row.actor?.id === selectedActorId) ?? null;
   const activeActors = timelineData.actors.filter((actor) => actorState(actor, cursor) === "active").length;
   const visibleActors = rows.filter((row) => row.actor !== null).length;
-  const minimumHistoryRange = Math.min(HISTORY_MIN_RANGE, Math.max(0.25, timelineData.totalTime));
   const historyReady = onModeChange === undefined
     || (historyStatus === "ready" && historyData !== null);
+
+  const moveHistoryViewport = (requestedStart: number): void => {
+    const next = historyTimelineRange(timelineData.totalTime, requestedStart, historyWindow);
+    setHistoryViewport(next);
+    setHistoryCursor((current) => Math.min(next.end, Math.max(next.start, current)));
+    setHistoryPlaying(false);
+  };
 
   const changeMode = (next: TimelineMode): void => {
     setMode(next);
@@ -2011,31 +2025,40 @@ export function ActorTimeline({
       setFollowLive(true);
       return;
     }
-    const start = Math.max(0, data.totalTime - 120);
-    setHistoryRange({ start, end: data.totalTime });
-    setHistoryCursor(start);
-  };
-  const changeHistoryStart = (value: number): void => {
-    const next = Math.max(0, Math.min(value, historyRange.end - minimumHistoryRange));
-    setHistoryRange({ start: next, end: historyRange.end });
-    setHistoryCursor((current) => Math.max(next, current));
-  };
-  const changeHistoryEnd = (value: number): void => {
-    const next = Math.min(
-      timelineData.totalTime,
-      Math.max(value, historyRange.start + minimumHistoryRange),
+    const nextViewport = historyTimelineRange(
+      data.totalTime,
+      data.totalTime - historyWindow,
+      historyWindow,
     );
-    setHistoryRange({ start: historyRange.start, end: next });
-    setHistoryCursor((current) => Math.min(next, current));
+    setHistoryViewport(nextViewport);
+    setHistoryCursor(nextViewport.start);
+  };
+  const changeHistoryWindow = (windowSeconds: number): void => {
+    const center = (historyViewport.start + historyViewport.end) / 2;
+    const next = historyTimelineRange(
+      timelineData.totalTime,
+      center - windowSeconds / 2,
+      windowSeconds,
+    );
+    setHistoryWindow(windowSeconds);
+    setHistoryViewport(next);
+    setHistoryCursor((current) => Math.min(next.end, Math.max(next.start, current)));
+    setHistoryPlaying(false);
   };
   const selectSceneRange = (scene: SceneRecord): void => {
-    const start = Math.max(0, scene.start - 4);
-    const end = Math.min(
+    const duration = historyViewport.end - historyViewport.start;
+    const sceneEnd = scene.end ?? timelineData.totalTime;
+    const sceneDuration = Math.max(0, sceneEnd - scene.start);
+    const requestedStart = sceneDuration >= duration
+      ? scene.start
+      : scene.start - (duration - sceneDuration) / 2;
+    const next = historyTimelineRange(
       timelineData.totalTime,
-      (scene.end ?? timelineData.totalTime) + 4,
+      requestedStart,
+      historyWindow,
     );
-    setHistoryRange({ start, end });
-    setHistoryCursor(scene.start);
+    setHistoryViewport(next);
+    setHistoryCursor(Math.min(next.end, Math.max(next.start, scene.start)));
     setHistoryPlaying(false);
   };
 
@@ -2113,8 +2136,8 @@ export function ActorTimeline({
             <IconButton
               label={historyPlaying ? "Pause History playback" : "Play History range"}
               onClick={() => {
-                if (historyCursor >= historyRange.end) {
-                  setHistoryCursor(historyRange.start);
+                if (historyCursor >= historyViewport.end) {
+                  setHistoryCursor(historyViewport.start);
                 }
                 setHistoryPlaying((playing) => !playing);
               }}
@@ -2126,13 +2149,33 @@ export function ActorTimeline({
             <IconButton
               label="Restart History range"
               onClick={() => {
-                setHistoryCursor(historyRange.start);
+                setHistoryCursor(historyViewport.start);
                 setHistoryPlaying(false);
               }}
               disabled={!historyReady}
             >
               <RotateCcw aria-hidden="true" />
             </IconButton>
+            <div class="history-pan" role="group" aria-label="History window navigation">
+              <IconButton
+                label="Pan History backward"
+                onClick={() => moveHistoryViewport(
+                  historyViewport.start - (historyViewport.end - historyViewport.start) / 2,
+                )}
+                disabled={!historyReady || historyViewport.start <= 0}
+              >
+                <ArrowLeft aria-hidden="true" />
+              </IconButton>
+              <IconButton
+                label="Pan History forward"
+                onClick={() => moveHistoryViewport(
+                  historyViewport.start + (historyViewport.end - historyViewport.start) / 2,
+                )}
+                disabled={!historyReady || historyViewport.end >= timelineData.totalTime}
+              >
+                <ArrowRight aria-hidden="true" />
+              </IconButton>
+            </div>
             <div class="segmented segmented--compact" role="group" aria-label="Playback speed">
               {[0.5, 1, 2, 4].map((speed) => (
                 <button
@@ -2147,6 +2190,20 @@ export function ActorTimeline({
                 </button>
               ))}
             </div>
+            <label class="select-control">
+              <span>Window</span>
+              <select
+                aria-label="History window"
+                value={historyWindow}
+                disabled={!historyReady}
+                onChange={(event) => changeHistoryWindow(Number(event.currentTarget.value))}
+              >
+                <option value="10">10 sec</option>
+                <option value="30">30 sec</option>
+                <option value="60">60 sec</option>
+                <option value="120">120 sec</option>
+              </select>
+            </label>
           </div>
         )}
         <output class="range-readout" aria-label="Visible timeline range">
@@ -2166,35 +2223,25 @@ export function ActorTimeline({
         <section class="history-controls" aria-label="History range selection">
           <RunOverview
             data={timelineData}
-            range={historyRange}
+            range={historyViewport}
             cursor={historyCursor}
             onSelectScene={selectSceneRange}
           />
           <div class="range-sliders">
             <label>
-              <span>Range start <output>{formatElapsed(historyRange.start)}</output></span>
+              <span>
+                Window position
+                <output>{formatElapsed(historyViewport.start)} - {formatElapsed(historyViewport.end)}</output>
+              </span>
               <input
                 type="range"
-                aria-label="History range start"
+                aria-label="History window position"
                 min="0"
-                max={Math.max(0, timelineData.totalTime - minimumHistoryRange)}
-                step="0.1"
-                value={historyRange.start}
-                disabled={!historyReady}
-                onInput={(event) => changeHistoryStart(Number(event.currentTarget.value))}
-              />
-            </label>
-            <label>
-              <span>Range end <output>{formatElapsed(historyRange.end)}</output></span>
-              <input
-                type="range"
-                aria-label="History range end"
-                min={minimumHistoryRange}
-                max={timelineData.totalTime}
-                step="0.1"
-                value={historyRange.end}
-                disabled={!historyReady}
-                onInput={(event) => changeHistoryEnd(Number(event.currentTarget.value))}
+                max={Math.max(0, timelineData.totalTime - (historyViewport.end - historyViewport.start))}
+                step="0.25"
+                value={historyViewport.start}
+                disabled={!historyReady || historyViewport.end - historyViewport.start >= timelineData.totalTime}
+                onInput={(event) => moveHistoryViewport(Number(event.currentTarget.value))}
               />
             </label>
             <label>
@@ -2202,8 +2249,8 @@ export function ActorTimeline({
               <input
                 type="range"
                 aria-label="History playhead"
-                min={historyRange.start}
-                max={historyRange.end}
+                min={historyViewport.start}
+                max={historyViewport.end}
                 step="0.25"
                 value={historyCursor}
                 disabled={!historyReady}

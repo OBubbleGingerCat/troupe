@@ -149,6 +149,19 @@ export function liveTimelineRange(now: number, windowSeconds: number): TimelineR
   };
 }
 
+/** Clamp a fixed-width History viewport to the recorded Run interval. */
+export function historyTimelineRange(
+  totalTime: number,
+  requestedStart: number,
+  windowSeconds: number,
+): TimelineRange {
+  const runEnd = Math.max(0, totalTime);
+  const duration = Math.min(runEnd, Math.max(1, windowSeconds));
+  const maximumStart = Math.max(0, runEnd - duration);
+  const start = Math.min(maximumStart, Math.max(0, requestedStart));
+  return { start, end: start + duration };
+}
+
 export function liveActorVisible(
   actor: ActorRecord,
   now: number,
