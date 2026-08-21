@@ -967,7 +967,7 @@ def test_python_project_metadata_and_build_configuration() -> None:
         "module-name": "troupe._runtime",
         "locked": True,
         "include": [{"path": "examples/**/*", "format": "sdist"}],
-        "exclude": ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"],
+        "exclude": ["**/__pycache__/**", "**/*.pyc", "**/*.pyo", "**/.troupe/**"],
         "sbom": {"rust": False},
     }
     assert "mypy" not in config["tool"]
@@ -1231,6 +1231,28 @@ def test_verifier_accepts_the_exact_synthetic_layout(tmp_path: Path) -> None:
     source, sdist, wheel = _synthetic_artifacts(tmp_path)
 
     verifier._validate_artifacts(source, sdist, wheel)
+
+
+def test_verifier_tracks_the_realized_diagnostics_package_and_examples() -> None:
+    verifier = _verifier()
+
+    package = verifier._validate_source(PACKAGE)
+    assert set(package) == {
+        "__init__.py",
+        "__init__.pyi",
+        "act_schema.pyi",
+        "diagnostics.pyi",
+        "py.typed",
+    }
+
+    examples = verifier._source_examples(PACKAGE)
+    assert {
+        "diagnostics/__init__.py",
+        "diagnostics/custom.py",
+        "diagnostics/production.py",
+        "diagnostics/sink.py",
+    } <= set(examples)
+    assert not any(".troupe/" in name for name in examples)
 
 
 def test_verifier_accepts_pinned_maturin_entry_point_format(tmp_path: Path) -> None:
@@ -2537,8 +2559,9 @@ def _installed_smoke_payload(child: Path) -> dict[str, object]:
         "dependency_file": str(installed / "troupe_smoke_dependency.py"),
         "production_identity": True,
         "production_module": "troupe",
-        "exports": PUBLIC_EXPORTS,
+        "exports": [*PUBLIC_EXPORTS, "diagnostics"],
         "public_identities": True,
+        "module_identities": True,
         "public_modules": True,
         "schema_contract": True,
         "agent_test_support_absent": True,
@@ -2660,6 +2683,7 @@ def _producer_observations() -> tuple[dict[str, object], dict[str, object]]:
         ("exports", [*PUBLIC_EXPORTS, "Other"]),
         ("exports", ["Other"]),
         ("public_identities", False),
+        ("module_identities", False),
         ("public_modules", False),
         ("agent_test_support_absent", False),
         ("native_construction_gates", False),
@@ -2898,13 +2922,19 @@ def _execute_child_probe(
     for name, public_type in public_types.items():
         setattr(package, name, public_type)
     package.act_schema = schema
-    package.__all__ = ["Other"] if mutation == "exports" else PUBLIC_EXPORTS
+    package.__all__ = (
+        ["Other"] if mutation == "exports" else [*PUBLIC_EXPORTS, "diagnostics"]
+    )
+    diagnostics = ModuleType("troupe.diagnostics")
+    diagnostics.__file__ = "/child/lib/python/site-packages/troupe/diagnostics.pyi"
+    package.diagnostics = diagnostics
     runtime = ModuleType("troupe._runtime")
     runtime.__file__ = "/child/lib/python/site-packages/troupe/_runtime.abi3.so"
     for name, public_type in public_types.items():
         if name != "AgentProfile":
             setattr(runtime, name, public_type)
     runtime.act_schema = schema
+    runtime.diagnostics = diagnostics
     if mutation == "agent-test-support":
         runtime._agent_test_set_launch = object()
     if mutation is not None and mutation.startswith("identity-"):
@@ -2916,6 +2946,7 @@ def _execute_child_probe(
     monkeypatch.setitem(sys.modules, "troupe", package)
     monkeypatch.setitem(sys.modules, "troupe._runtime", runtime)
     monkeypatch.setitem(sys.modules, "troupe.act_schema", schema)
+    monkeypatch.setitem(sys.modules, "troupe.diagnostics", diagnostics)
     monkeypatch.setitem(sys.modules, "troupe_smoke_dependency", dependency)
 
     class EntryPoint:
@@ -3421,7 +3452,7 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
     child = workspace / "child-venv"
     outside = workspace / "outside-repository"
     events_path = workspace / "events.json"
-    fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    fixture = workspace / "wheel_smoke_production"
     raw_args = ["--events", str(events_path), "--value", "7", "input.txt"]
     expected_events = _installed_smoke_events(raw_args)
     managed_python = tmp_path / "managed" / "bin" / "python3.10"
@@ -3506,6 +3537,24 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
             (workspace / "agent-events.jsonl").write_text(
                 _mock_agent_events(),
                 encoding="utf-8",
+            )
+            run_id = "123e4567-e89b-42d3-a456-426614174000"
+            archive = fixture / ".troupe" / "diagnostics" / "runs" / run_id
+            archive.mkdir(parents=True)
+            locator = {
+                "locator_schema_version": 1,
+                "run_id": run_id,
+                "local_url": "http://127.0.0.1:43120/",
+                "advertise_url": None,
+                "archive_directory": str(archive),
+                "security_scope": "trusted_network",
+            }
+            stderr_sink = kwargs["stderr_sink"]
+            assert isinstance(stderr_sink, list)
+            stderr_sink.append(
+                "troupe: diagnostic ready "
+                + json.dumps(locator, separators=(",", ":"))
+                + "\n"
             )
         return ""
 
@@ -3599,8 +3648,10 @@ def test_clean_smoke_wiring_uses_child_python_offline_and_literal_console(
         expected_kwargs: dict[str, object] = {}
         if index in (2, 4):
             expected_kwargs["timeout"] = verifier.SMOKE_TIMEOUT
-        if index in (3, 4):
+        if index == 3:
             expected_kwargs["forbidden_stderr"] = "troupe:"
+        if index == 4:
+            expected_kwargs["stderr_sink"] = kwargs["stderr_sink"]
         assert kwargs == expected_kwargs
 
 

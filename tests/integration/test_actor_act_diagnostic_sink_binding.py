@@ -237,7 +237,7 @@ def test_binding_transaction_and_inactive_fast_path_are_source_frozen() -> None:
     assert "_DiagnosticSink__lock" in binding
     assert "project_act_event(&canonical, &self.act_scope, self.capture" in delivery
     assert "AdmissionClass::Structural" in delivery
-    assert "self.record_drops(sequence, &outcome)" in delivery
+    assert "self.record_drops(sequence, subscriber_local, &outcome)" in delivery
     assert delivery.count("self.failure_facts.report_enqueue(Some(sequence))") == 2
     assert delivery.count("Err(DeliveryFailure::new(SINK_DELIVERY_FAILED))") == 2
     assert "emit_instant_without_act_subscriber" in source
