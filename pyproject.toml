@@ -31,7 +31,7 @@ manifest-path = "rust/Cargo.toml"
 module-name = "troupe._runtime"
 locked = true
 include = [{ path = "examples/**/*", format = "sdist" }]
-exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.pyo"]
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.pyo", "**/.troupe/**"]
 
 [tool.maturin.sbom]
 rust = false

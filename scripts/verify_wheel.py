@@ -250,6 +250,23 @@ EXPECTED_ACT_SCHEMA_STUB_SHA256 = (
     "3236d84d315e43785d82edb677fb1c50ade695aeafc7ec22e469a9e52d85a75b"
 )
 EXPECTED_PY_TYPED = b""
+# The merged diagnostics API is part of the package contract. Keep its
+# realized inventory separate from the small synthetic contract used by the
+# verifier's layout tests below.
+REALIZED_PACKAGE_FILES = (
+    "__init__.py",
+    "__init__.pyi",
+    "act_schema.pyi",
+    "diagnostics.pyi",
+    "py.typed",
+)
+REALIZED_PACKAGE_SHA256 = {
+    "__init__.py": "82d8b338efb0c973d52e4680d9b77590bb91dad30f469468122aa293d5e04c8e",
+    "__init__.pyi": "f5046f600a3e2383f4efd07477b2fafd549592e2c1cd9159ff8b34b69e38d295",
+    "act_schema.pyi": EXPECTED_ACT_SCHEMA_STUB_SHA256,
+    "diagnostics.pyi": "457852eeb32409b2faa8697d332a07fb9dbe9be67ab5331e4270947e4e0de418",
+    "py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+}
 PUBLIC_EXPORTS = [
     "Actor",
     "ActorHandle",
@@ -271,6 +288,7 @@ PUBLIC_EXPORTS = [
     "Production",
     "act_schema",
 ]
+REALIZED_PUBLIC_EXPORTS = [*PUBLIC_EXPORTS, "diagnostics"]
 EXPECTED_EXAMPLE_FILES = (
     "README.md",
     "actor_pipeline/__init__.py",
@@ -292,6 +310,17 @@ EXPECTED_EXAMPLE_FILES = (
     "live_agents/mixed_repository_repair/production.py",
     "repeating_scenes/__init__.py",
     "repeating_scenes/production.py",
+)
+REALIZED_EXAMPLE_FILES = tuple(
+    sorted(
+        (
+            *EXPECTED_EXAMPLE_FILES,
+            "diagnostics/__init__.py",
+            "diagnostics/custom.py",
+            "diagnostics/production.py",
+            "diagnostics/sink.py",
+        )
+    )
 )
 SMOKE_TIMEOUT = 10.0
 
@@ -328,25 +357,45 @@ def _relative_package_files(names: Sequence[str], prefix: str) -> list[str]:
     return sorted(name.removeprefix(prefix) for name in names if name.startswith(prefix))
 
 
-def _assert_thin_package(names: Sequence[str], prefix: str) -> None:
+def _assert_thin_package(
+    names: Sequence[str],
+    prefix: str,
+    *,
+    python_members: Sequence[str] = ("__init__.py",),
+    stub_members: Sequence[str] = ("__init__.pyi", "act_schema.pyi"),
+) -> None:
     relative = _relative_package_files(names, prefix)
     python_files = [name for name in relative if name.endswith(".py")]
     stub_files = [name for name in relative if name.endswith(".pyi")]
-    if python_files != ["__init__.py"]:
+    if python_files != list(python_members):
         raise VerificationError(f"unexpected Python package files: {python_files}")
-    if stub_files != ["__init__.pyi", "act_schema.pyi"]:
+    if stub_files != list(stub_members):
         raise VerificationError(f"unexpected stub files: {stub_files}")
     if relative.count("py.typed") != 1:
         raise VerificationError("py.typed is missing or ambiguous")
 
 
-def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes, bytes]:
+def _validate_source(source_package: Path) -> dict[str, bytes]:
     try:
+        repository_source = source_package.resolve(strict=True) == SOURCE_PACKAGE
+        package_files = REALIZED_PACKAGE_FILES if repository_source else (
+            "__init__.py",
+            "__init__.pyi",
+            "act_schema.pyi",
+            "py.typed",
+        )
+        python_members = ("__init__.py",)
+        stub_members = tuple(name for name in package_files if name.endswith(".pyi"))
         files = [path for path in source_package.rglob("*") if path.is_file()]
         names = [path.relative_to(source_package).as_posix() for path in files]
-        _assert_thin_package(names, "")
+        _assert_thin_package(
+            names,
+            "",
+            python_members=python_members,
+            stub_members=stub_members,
+        )
 
-        allowed = {"__init__.py", "__init__.pyi", "act_schema.pyi", "py.typed"}
+        allowed = set(package_files)
         for name in names:
             if name in allowed:
                 continue
@@ -356,19 +405,26 @@ def _validate_source(source_package: Path) -> tuple[bytes, bytes, bytes, bytes]:
                 continue
             raise VerificationError(f"unexpected source package file: {name}")
 
-        wrapper = (source_package / "__init__.py").read_bytes()
-        stub = (source_package / "__init__.pyi").read_bytes()
-        act_schema_stub = (source_package / "act_schema.pyi").read_bytes()
-        py_typed = (source_package / "py.typed").read_bytes()
-        if wrapper != EXPECTED_WRAPPER:
-            raise VerificationError("source wrapper is not the approved thin wrapper")
-        if stub != EXPECTED_STUB:
-            raise VerificationError("source stub is not the approved public API")
-        if hashlib.sha256(act_schema_stub).hexdigest() != EXPECTED_ACT_SCHEMA_STUB_SHA256:
-            raise VerificationError("source act_schema stub is not the approved public API")
-        if py_typed != EXPECTED_PY_TYPED:
-            raise VerificationError("source py.typed marker is not exact")
-        return wrapper, stub, act_schema_stub, py_typed
+        payloads = {
+            name: (source_package / name).read_bytes()
+            for name in package_files
+        }
+        expected_hashes = (
+            REALIZED_PACKAGE_SHA256
+            if repository_source
+            else {
+                "__init__.py": hashlib.sha256(EXPECTED_WRAPPER).hexdigest(),
+                "__init__.pyi": hashlib.sha256(EXPECTED_STUB).hexdigest(),
+                "act_schema.pyi": EXPECTED_ACT_SCHEMA_STUB_SHA256,
+                "py.typed": hashlib.sha256(EXPECTED_PY_TYPED).hexdigest(),
+            }
+        )
+        for name, expected_hash in expected_hashes.items():
+            if hashlib.sha256(payloads[name]).hexdigest() != expected_hash:
+                raise VerificationError(
+                    f"source package member is not the approved public API: {name}"
+                )
+        return payloads
     except VerificationError:
         raise
     except OSError as error:
@@ -399,16 +455,25 @@ def _sdist_package_prefix(names: Sequence[str]) -> str:
 def _source_examples(source_package: Path) -> dict[str, bytes]:
     examples = source_package.parent.parent / "examples"
     try:
+        expected_files = (
+            REALIZED_EXAMPLE_FILES
+            if source_package.resolve(strict=True) == SOURCE_PACKAGE
+            else EXPECTED_EXAMPLE_FILES
+        )
         files: dict[str, bytes] = {}
         for path in examples.rglob("*"):
             if not path.is_file():
                 continue
             name = path.relative_to(examples).as_posix()
             parts = PurePosixPath(name).parts
-            if "__pycache__" in parts or path.suffix in (".pyc", ".pyo"):
+            if (
+                ".troupe" in parts
+                or "__pycache__" in parts
+                or path.suffix in (".pyc", ".pyo")
+            ):
                 continue
             files[name] = path.read_bytes()
-        if tuple(sorted(files)) != EXPECTED_EXAMPLE_FILES:
+        if tuple(sorted(files)) != expected_files:
             raise VerificationError("source examples inventory is not exact")
         return files
     except VerificationError:
@@ -444,15 +509,34 @@ def _source_rust_build_inputs(source_package: Path) -> dict[str, bytes]:
         raise VerificationError(f"could not inspect source Rust inputs: {error}") from error
 
 
+def _rust_input_matches_sdist(name: str, source: bytes, packaged: bytes) -> bool:
+    if source == packaged:
+        return True
+    if PurePosixPath(name).name != "Cargo.toml":
+        return False
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib
+        return tomllib.loads(source.decode("utf-8")) == tomllib.loads(
+            packaged.decode("utf-8")
+        )
+    except (ModuleNotFoundError, UnicodeError, ValueError):
+        return False
+
+
 def _validate_sdist(
     source_package: Path,
     sdist: Path,
     *,
-    expected: tuple[bytes, bytes, bytes, bytes] | None = None,
+    expected: Mapping[str, bytes] | None = None,
 ) -> None:
-    wrapper, stub, act_schema_stub, py_typed = (
+    package_payloads = dict(
         expected if expected is not None else _validate_source(source_package)
     )
+    python_members = sorted(name for name in package_payloads if name.endswith(".py"))
+    stub_members = sorted(name for name in package_payloads if name.endswith(".pyi"))
     source_examples = _source_examples(source_package)
     source_rust_inputs = _source_rust_build_inputs(source_package)
     try:
@@ -469,13 +553,16 @@ def _validate_sdist(
             regular_names = [member.name for member in members if member.isfile()]
             prefix = _sdist_package_prefix(regular_names)
             package_names = [name for name in regular_names if name.startswith(prefix)]
-            _assert_thin_package(package_names, prefix)
-            if set(package_names) != {
-                f"{prefix}__init__.py",
-                f"{prefix}__init__.pyi",
-                f"{prefix}act_schema.pyi",
-                f"{prefix}py.typed",
-            }:
+            _assert_thin_package(
+                package_names,
+                prefix,
+                python_members=python_members,
+                stub_members=stub_members,
+            )
+            expected_package_names = {
+                f"{prefix}{name}" for name in package_payloads
+            }
+            if set(package_names) != expected_package_names:
                 raise VerificationError("sdist runtime package inventory is not exact")
 
             distribution_prefix = prefix.removesuffix("src/troupe/")
@@ -506,21 +593,12 @@ def _validate_sdist(
             if rust_names != expected_rust_names:
                 raise VerificationError("sdist Rust build input inventory is not exact")
 
-            wrapper_member = archive.extractfile(f"{prefix}__init__.py")
-            stub_member = archive.extractfile(f"{prefix}__init__.pyi")
-            act_schema_stub_member = archive.extractfile(f"{prefix}act_schema.pyi")
-            py_typed_member = archive.extractfile(f"{prefix}py.typed")
-            if wrapper_member is None or wrapper_member.read() != wrapper:
-                raise VerificationError("sdist wrapper differs from source")
-            if stub_member is None or stub_member.read() != stub:
-                raise VerificationError("sdist stub differs from source")
-            if (
-                act_schema_stub_member is None
-                or act_schema_stub_member.read() != act_schema_stub
-            ):
-                raise VerificationError("sdist act_schema stub differs from source")
-            if py_typed_member is None or py_typed_member.read() != py_typed:
-                raise VerificationError("sdist py.typed marker differs from source")
+            for name, payload in package_payloads.items():
+                member = archive.extractfile(f"{prefix}{name}")
+                if member is None or member.read() != payload:
+                    raise VerificationError(
+                        f"sdist package member differs from source: {name}"
+                    )
             for name, data in source_examples.items():
                 member = archive.extractfile(f"{examples_prefix}{name}")
                 if member is None or member.read() != data:
@@ -529,7 +607,9 @@ def _validate_sdist(
                     )
             for name, data in source_rust_inputs.items():
                 member = archive.extractfile(f"{distribution_prefix}{name}")
-                if member is None or member.read() != data:
+                if member is None or not _rust_input_matches_sdist(
+                    name, data, member.read()
+                ):
                     raise VerificationError(f"sdist Rust input differs from source: {name}")
     except VerificationError:
         raise
@@ -618,9 +698,9 @@ def _validate_wheel(
     wheel: Path,
     *,
     required_manylinux: str | None,
-    expected: tuple[bytes, bytes, bytes, bytes] | None = None,
+    expected: Mapping[str, bytes] | None = None,
 ) -> None:
-    wrapper, stub, act_schema_stub, py_typed = (
+    package_payloads = dict(
         expected if expected is not None else _validate_source(source_package)
     )
     filename_tags, filename_platforms = _parse_wheel_filename(wheel)
@@ -652,10 +732,7 @@ def _validate_wheel(
             dist_info = "troupe-0.1.0.dist-info"
             record = f"{dist_info}/RECORD"
             expected_names = {
-                "troupe/__init__.py",
-                "troupe/__init__.pyi",
-                "troupe/act_schema.pyi",
-                "troupe/py.typed",
+                *(f"troupe/{name}" for name in package_payloads),
                 native_libraries[0],
                 f"{dist_info}/METADATA",
                 f"{dist_info}/WHEEL",
@@ -671,14 +748,11 @@ def _validate_wheel(
 
             for info in infos:
                 archive.read(info)
-            if archive.read("troupe/__init__.py") != wrapper:
-                raise VerificationError("wheel wrapper differs from source")
-            if archive.read("troupe/__init__.pyi") != stub:
-                raise VerificationError("wheel stub differs from source")
-            if archive.read("troupe/act_schema.pyi") != act_schema_stub:
-                raise VerificationError("wheel act_schema stub differs from source")
-            if archive.read("troupe/py.typed") != py_typed:
-                raise VerificationError("wheel py.typed marker differs from source")
+            for name, payload in package_payloads.items():
+                if archive.read(f"troupe/{name}") != payload:
+                    raise VerificationError(
+                        f"wheel package member differs from source: {name}"
+                    )
 
             metadata = _parse_metadata(archive.read(f"{dist_info}/METADATA"))
             if metadata.get("Name") != "troupe":
@@ -789,6 +863,7 @@ def _run(
     cwd: Path,
     env: Mapping[str, str],
     forbidden_stderr: str | None = None,
+    stderr_sink: list[str] | None = None,
     timeout: float | None = None,
 ) -> str:
     options: dict[str, Any] = {
@@ -813,6 +888,10 @@ def _run(
         raise VerificationError(f"command failed ({completed.returncode}): {output.strip()}")
     if forbidden_stderr is not None and forbidden_stderr in completed.stderr:
         raise VerificationError(f"command emitted forbidden stderr: {completed.stderr.strip()}")
+    if stderr_sink is not None:
+        if stderr_sink:
+            raise VerificationError("stderr capture sink must be empty")
+        stderr_sink.append(completed.stderr)
     return completed.stdout
 
 
@@ -850,7 +929,11 @@ public_exports = [
     "Production",
     "act_schema",
 ]
-public_type_exports = [name for name in public_exports if name != "act_schema"]
+module_exports = ["act_schema"]
+if hasattr(troupe, "diagnostics"):
+    public_exports.append("diagnostics")
+    module_exports.append("diagnostics")
+public_type_exports = [name for name in public_exports if name not in module_exports]
 native_exports = [name for name in public_type_exports if name != "AgentProfile"]
 schema_exports = [
     "BoolValue",
@@ -879,6 +962,10 @@ schema_contract = (
 public_identities = troupe.act_schema is runtime.act_schema and all(
     getattr(troupe, name) is getattr(runtime, name) for name in native_exports
 )
+module_identities = troupe.act_schema is runtime.act_schema and (
+    not hasattr(troupe, "diagnostics")
+    or troupe.diagnostics is runtime.diagnostics
+)
 public_modules = troupe.act_schema.__name__ == "troupe.act_schema" and all(
     getattr(troupe, name).__module__ == "troupe" for name in public_type_exports
 )
@@ -886,6 +973,7 @@ assert troupe.Production is runtime.Production
 assert troupe.Production.__module__ == "troupe"
 assert troupe.__all__ == public_exports
 assert public_identities
+assert module_identities
 assert public_modules
 assert schema_contract
 assert not hasattr(runtime, "AgentProfile")
@@ -1044,6 +1132,7 @@ print(json.dumps({
     "production_module": troupe.Production.__module__,
     "exports": troupe.__all__,
     "public_identities": public_identities,
+    "module_identities": module_identities,
     "public_modules": public_modules,
     "schema_contract": schema_contract,
     "agent_test_support_absent": agent_test_support_absent,
@@ -1086,8 +1175,9 @@ def _validate_smoke_payload(child_venv: Path, payload: Mapping[str, object]) -> 
     expected_values: dict[str, object] = {
         "production_identity": True,
         "production_module": "troupe",
-        "exports": PUBLIC_EXPORTS,
+        "exports": REALIZED_PUBLIC_EXPORTS,
         "public_identities": True,
+        "module_identities": True,
         "public_modules": True,
         "schema_contract": True,
         "agent_test_support_absent": True,
@@ -1282,6 +1372,57 @@ def _validate_mock_agent_cleanup(path: Path) -> None:
         raise VerificationError("wheel smoke left a mock agent process running")
 
 
+def _validate_diagnostic_ready_stderr(stderr: str, production: Path) -> None:
+    prefix = "troupe: diagnostic ready "
+    if not stderr.endswith("\n") or stderr.count("\n") != 1:
+        raise VerificationError("packaged Production stderr is not one readiness line")
+    line = stderr.removesuffix("\n")
+    if not line.startswith(prefix):
+        raise VerificationError("packaged Production did not report diagnostic readiness")
+    try:
+        locator = json.loads(line.removeprefix(prefix))
+    except json.JSONDecodeError as error:
+        raise VerificationError("packaged diagnostic readiness is not JSON") from error
+    fields = {
+        "locator_schema_version",
+        "run_id",
+        "local_url",
+        "advertise_url",
+        "archive_directory",
+        "security_scope",
+    }
+    if not isinstance(locator, dict) or set(locator) != fields:
+        raise VerificationError("packaged diagnostic readiness fields are not exact")
+    run_id = locator["run_id"]
+    if not isinstance(run_id, str) or re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+        r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        run_id,
+    ) is None:
+        raise VerificationError("packaged diagnostic readiness Run ID is invalid")
+    if (
+        locator["locator_schema_version"] != 1
+        or locator["advertise_url"] is not None
+        or locator["security_scope"] != "trusted_network"
+        or not isinstance(locator["local_url"], str)
+        or re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]*/", locator["local_url"])
+        is None
+    ):
+        raise VerificationError("packaged diagnostic readiness locator drifted")
+    try:
+        archive = Path(locator["archive_directory"]).resolve(strict=True)
+        archive.relative_to((production / ".troupe/diagnostics/runs").resolve(strict=True))
+    except (OSError, TypeError, ValueError) as error:
+        raise VerificationError(
+            "packaged diagnostic readiness archive escaped the Production"
+        ) from error
+    if archive.name != run_id:
+        raise VerificationError("packaged diagnostic readiness archive Run ID drifted")
+    canonical = json.dumps(locator, separators=(",", ":"), ensure_ascii=False)
+    if line.removeprefix(prefix) != canonical:
+        raise VerificationError("packaged diagnostic readiness JSON is not canonical")
+
+
 def _smoke_wheel(wheel: Path, workspace: Path) -> None:
     child_venv = workspace / "child-venv"
     outside = workspace / "outside-repository"
@@ -1337,15 +1478,25 @@ def _smoke_wheel(wheel: Path, workspace: Path) -> None:
 
     _run(["troupe", "--help"], cwd=outside, env=env, forbidden_stderr="troupe:")
     events = workspace / "events.json"
-    fixture = ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    source_fixture = (
+        ROOT / "tests" / "fixtures" / "productions" / "wheel_smoke_production"
+    )
+    fixture = workspace / "wheel_smoke_production"
+    shutil.copytree(
+        source_fixture,
+        fixture,
+        ignore=shutil.ignore_patterns(".troupe", "__pycache__", "*.pyc", "*.pyo"),
+    )
     raw_args = ["--events", str(events), "--value", "7", "input.txt"]
+    production_stderr: list[str] = []
     _run(
         ["troupe", "--production", str(fixture), "--", *raw_args],
         cwd=outside,
         env=env,
-        forbidden_stderr="troupe:",
+        stderr_sink=production_stderr,
         timeout=SMOKE_TIMEOUT,
     )
+    _validate_diagnostic_ready_stderr(production_stderr[0], fixture)
     _validate_smoke_events(events, raw_args)
     _validate_mock_agent_cleanup(workspace / "agent-events.jsonl")
 
