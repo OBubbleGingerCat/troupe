@@ -6,7 +6,7 @@ Troupe does not perform authentication.
 
 Codex and Claude require Node.js with npm and `npx` because Troupe launches
 their pinned ACP adapter packages through `npx`. Kimi requires the pinned Kimi
-Code 0.31.1 CLI. All three CLIs must be installed and logged in before the
+Code 0.39.1 CLI. All three CLIs must be installed and logged in before the
 Production starts.
 
 For Codex, provide an explicit profile whose workspace is an existing writable
@@ -41,7 +41,7 @@ cancellation settlement, and process cleanup. Neither live runner performs an
 authentication flow.
 
 Kimi uses its built-in ACP server. The runner requires the adapter-pinned Kimi
-Code 0.31.1 binary and an existing Kimi Code login; it accepts the same profile
+Code 0.39.1 binary and an existing Kimi Code login; it accepts the same profile
 shape.
 
 ```console
@@ -49,7 +49,7 @@ export TROUPE_LIVE_KIMI_PROFILE='{"workspace":"/tmp","model":"kimi-code/k3","eff
 scripts/test_live_agent.sh kimi
 ```
 
-The runner resolves exactly version 0.31.1, places it on an isolated child
+The runner resolves exactly version 0.39.1, places it on an isolated child
 `PATH`, and copies only the login material needed by a temporary
 `KIMI_CODE_HOME`. It verifies the Read, Write, Bash, and AskUserQuestion
 harness, unattended permission handling, contextual turns, both schema

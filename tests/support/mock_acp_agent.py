@@ -1413,7 +1413,7 @@ def main() -> int:
                             "version": (
                                 "0.31.2"
                                 if args.scenario == "kimi_agent_version_mismatch"
-                                else "0.31.1"
+                                else "0.39.1"
                                 if args.provider == "kimi" or args.scenario == "mixed_agents"
                                 else "1"
                             ),

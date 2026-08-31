@@ -155,7 +155,7 @@ pip install troupe
 Codex, Claude, and Kimi must already be logged in through their own CLI. Troupe
 does not collect API keys or add an authentication flow. Codex and Claude use
 pinned ACP adapter packages and require Node.js with npm and `npx`; Kimi uses
-the ACP server in Kimi Code 0.31.1.
+the ACP server in Kimi Code 0.39.1.
 
 After activating the environment, run a production package directly. Arguments
 after `--` are passed untouched to the Production constructor:
@@ -305,7 +305,7 @@ for its lifetime, so later cues can use context established by earlier calls.
 Codex, Claude, and Kimi must already be logged in through their own CLI. Troupe
 does not collect credentials, expose an authentication flow, or return raw
 agent output from `act()`. Codex and Claude launch pinned ACP packages and
-therefore require Node.js with npm and `npx`; Kimi requires Kimi Code 0.31.1.
+therefore require Node.js with npm and `npx`; Kimi requires Kimi Code 0.39.1.
 
 `Actor.act()` may only be called by that Actor while handling `cued()`. It sends
 the script to the persistent session and returns one validated JSON-compatible

@@ -11,7 +11,7 @@
       "provider": "codex",
       "runner": "npx",
       "package": "@agentclientprotocol/codex-acp",
-      "version": "1.1.9",
+      "version": "1.7.0",
       "qualified": true,
       "evidence": ["single_request", "tool_loop"]
     },
@@ -19,7 +19,7 @@
       "provider": "claude",
       "runner": "npx",
       "package": "@agentclientprotocol/claude-agent-acp",
-      "version": "0.64.2",
+      "version": "0.70.0",
       "qualified": true,
       "evidence": ["single_request", "multi_request"]
     },
@@ -27,7 +27,7 @@
       "provider": "kimi",
       "runner": "command",
       "package": "kimi",
-      "version": "0.31.1",
+      "version": "0.39.1",
       "qualified": false,
       "evidence": []
     }

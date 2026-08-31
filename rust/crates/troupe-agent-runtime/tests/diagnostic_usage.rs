@@ -270,12 +270,12 @@ fn qualification_fixture_pins_only_proven_whole_turn_adapters() {
         QUALIFIED_CODEX_ADAPTER_PACKAGE,
         "@agentclientprotocol/codex-acp"
     );
-    assert_eq!(QUALIFIED_CODEX_ADAPTER_VERSION, "1.1.9");
+    assert_eq!(QUALIFIED_CODEX_ADAPTER_VERSION, "1.7.0");
     assert_eq!(
         QUALIFIED_CLAUDE_ADAPTER_PACKAGE,
         "@agentclientprotocol/claude-agent-acp"
     );
-    assert_eq!(QUALIFIED_CLAUDE_ADAPTER_VERSION, "0.64.2");
+    assert_eq!(QUALIFIED_CLAUDE_ADAPTER_VERSION, "0.70.0");
 }
 
 #[test]
@@ -299,7 +299,7 @@ fn codex_and_claude_terminal_fixtures_are_qualified_only_after_whole_turn_settle
     let codex = assert_qualified_fixture(
         CODEX_AVAILABLE_FIXTURE,
         AgentDiagnosticProvider::Codex,
-        "codex-acp@1.1.9",
+        "codex-acp@1.7.0",
         &["single_request", "tool_loop"],
     );
     assert_eq!(
@@ -314,7 +314,7 @@ fn codex_and_claude_terminal_fixtures_are_qualified_only_after_whole_turn_settle
     let claude = assert_qualified_fixture(
         CLAUDE_PARTIAL_FIXTURE,
         AgentDiagnosticProvider::Claude,
-        "claude-agent-acp@0.64.2",
+        "claude-agent-acp@0.70.0",
         &["single_request", "multi_request"],
     );
     assert_eq!(
@@ -331,7 +331,7 @@ fn codex_and_claude_terminal_fixtures_are_qualified_only_after_whole_turn_settle
 #[test]
 fn kimi_stays_source_unsupported_even_if_the_terminal_response_has_numbers() {
     let fixture = fixture(KIMI_UNAVAILABLE_FIXTURE);
-    assert_eq!(fixture["adapterProfile"], "kimi-code@0.31.1");
+    assert_eq!(fixture["adapterProfile"], "kimi-code@0.39.1");
     assert_eq!(
         pinned_usage_qualification(AgentDiagnosticProvider::Kimi),
         AgentUsageQualification::SourceUnsupported

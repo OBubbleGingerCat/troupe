@@ -1,5 +1,5 @@
 {
-  "adapterProfile": "kimi-code@0.31.1",
+  "adapterProfile": "kimi-code@0.39.1",
   "turns": [
     {
       "shape": "single_request",
