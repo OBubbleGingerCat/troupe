@@ -289,7 +289,7 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     mcp_transport_profile: McpTransportProfileId::V1,
     runner: LaunchRunner::Npx {
         package: "@agentclientprotocol/codex-acp",
-        exact_version: "1.1.9",
+        exact_version: "1.7.0",
         fixed_args: NO_ARGS,
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
@@ -306,8 +306,8 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
-    autonomous_request_profile: AutonomousRequestProfileId("codex-acp@1.1.9"),
-    settlement_profile: SettlementProfileId("codex-acp@1.1.9"),
+    autonomous_request_profile: AutonomousRequestProfileId("codex-acp@1.7.0"),
+    settlement_profile: SettlementProfileId("codex-acp@1.7.0"),
     opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
@@ -320,7 +320,7 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     mcp_transport_profile: McpTransportProfileId::V1,
     runner: LaunchRunner::Npx {
         package: "@agentclientprotocol/claude-agent-acp",
-        exact_version: "0.64.2",
+        exact_version: "0.70.0",
         fixed_args: NO_ARGS,
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
@@ -337,8 +337,8 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
-    autonomous_request_profile: AutonomousRequestProfileId("claude-agent-acp@0.64.2"),
-    settlement_profile: SettlementProfileId("claude-agent-acp@0.64.2"),
+    autonomous_request_profile: AutonomousRequestProfileId("claude-agent-acp@0.70.0"),
+    settlement_profile: SettlementProfileId("claude-agent-acp@0.70.0"),
     opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
@@ -353,7 +353,7 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     runner: LaunchRunner::Command {
         program: "kimi",
         fixed_args: KIMI_ARGS,
-        exact_version: "0.31.1",
+        exact_version: "0.39.1",
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
     fixed_environment: NO_ENVIRONMENT,
@@ -369,8 +369,8 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
-    autonomous_request_profile: AutonomousRequestProfileId("kimi-code@0.31.1"),
-    settlement_profile: SettlementProfileId("kimi-code@0.31.1"),
+    autonomous_request_profile: AutonomousRequestProfileId("kimi-code@0.39.1"),
+    settlement_profile: SettlementProfileId("kimi-code@0.39.1"),
     opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };

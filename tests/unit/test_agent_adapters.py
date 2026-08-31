@@ -55,8 +55,8 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
     assert snapshot == {
         "codex": {
             "program": "npx",
-            "args": ["--yes", "@agentclientprotocol/codex-acp@1.1.9"],
-            "version": "1.1.9",
+            "args": ["--yes", "@agentclientprotocol/codex-acp@1.7.0"],
+            "version": "1.7.0",
             "acp_wire_protocol": "stable-v1",
             "client_sdk_version": "2.0.0",
             "mcp_wire_protocol": "2025-06-18",
@@ -76,13 +76,13 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "configuration_order": ["mode", "model", "effort"],
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
-            "autonomous_request_profile": "codex-acp@1.1.9",
-            "settlement_profile": "codex-acp@1.1.9",
+            "autonomous_request_profile": "codex-acp@1.7.0",
+            "settlement_profile": "codex-acp@1.7.0",
         },
         "claude": {
             "program": "npx",
-            "args": ["--yes", "@agentclientprotocol/claude-agent-acp@0.64.2"],
-            "version": "0.64.2",
+            "args": ["--yes", "@agentclientprotocol/claude-agent-acp@0.70.0"],
+            "version": "0.70.0",
             "acp_wire_protocol": "stable-v1",
             "client_sdk_version": "2.0.0",
             "mcp_wire_protocol": "2025-11-25",
@@ -102,13 +102,13 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "configuration_order": ["mode", "model", "effort"],
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
-            "autonomous_request_profile": "claude-agent-acp@0.64.2",
-            "settlement_profile": "claude-agent-acp@0.64.2",
+            "autonomous_request_profile": "claude-agent-acp@0.70.0",
+            "settlement_profile": "claude-agent-acp@0.70.0",
         },
         "kimi": {
             "program": "kimi",
             "args": ["acp"],
-            "version": "0.31.1",
+            "version": "0.39.1",
             "acp_wire_protocol": "stable-v1",
             "client_sdk_version": "2.0.0",
             "mcp_wire_protocol": "2025-11-25",
@@ -128,8 +128,8 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "configuration_order": ["mode", "model", "effort"],
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
-            "autonomous_request_profile": "kimi-code@0.31.1",
-            "settlement_profile": "kimi-code@0.31.1",
+            "autonomous_request_profile": "kimi-code@0.39.1",
+            "settlement_profile": "kimi-code@0.39.1",
         },
     }
     assert "latest" not in repr(snapshot).lower()
@@ -747,7 +747,7 @@ def test_kimi_live_login_isolation_excludes_ambient_state(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     ("with_exact_binary", "failure_pattern"),
     [
-        (False, "0.31.1 is required"),
+        (False, "0.39.1 is required"),
         (True, "login material is unavailable"),
     ],
 )
@@ -764,7 +764,7 @@ def test_kimi_live_setup_failure_cleans_its_owned_workspace(
         binary_dir = source / "bin"
         binary_dir.mkdir()
         binary = binary_dir / "kimi.bak"
-        binary.write_text("#!/bin/sh\nprintf '0.31.1\\n'\n", encoding="ascii")
+        binary.write_text("#!/bin/sh\nprintf '0.39.1\\n'\n", encoding="ascii")
         binary.chmod(0o700)
         (source / "config.toml").write_text(
             "default_model = 'test'\n",

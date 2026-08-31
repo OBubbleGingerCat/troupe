@@ -137,7 +137,7 @@ def test_readme_documents_actor_act_schema_and_callback_boundaries() -> None:
         "Node.js",
         "npm",
         "`npx`",
-        "Kimi Code 0.31.1",
+        "Kimi Code 0.39.1",
         "`description`",
         "`choices`",
         "`ObjectValue`",
