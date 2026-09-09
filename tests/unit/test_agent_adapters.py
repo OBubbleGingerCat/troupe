@@ -735,6 +735,40 @@ def test_kimi_live_example_and_isolated_acceptance_runner_are_wired() -> None:
     assert "start_new_session=True" in harness_source
 
 
+def test_pi_live_example_and_acceptance_runner_are_wired() -> None:
+    expected = [
+        ROOT / "examples" / "live_agents" / "README.md",
+        ROOT / "examples" / "live_agents" / "pi_actor" / "__init__.py",
+        ROOT / "examples" / "live_agents" / "pi_actor" / "production.py",
+        ROOT / "tests" / "live" / "provider_acceptance.py",
+        ROOT / "scripts" / "test_live_agent.sh",
+    ]
+    assert all(path.is_file() for path in expected)
+    assert expected[1].read_bytes() == b""
+
+    live_readme = expected[0].read_text(encoding="utf-8")
+    assert "TROUPE_LIVE_PI_PROFILE" in live_readme
+    assert "examples/live_agents/pi_actor" in live_readme
+    assert "deepseek-v4-flash" in live_readme
+    assert "deepseek-v4-pro" in live_readme
+
+    production_source = expected[2].read_text(encoding="utf-8")
+    assert "TROUPE_LIVE_PI_PROFILE" in production_source
+    assert "diagnostic_sink=sink" in production_source
+    assert "diagnostics.span" in production_source
+    assert "diagnostics.event" in production_source
+    assert "Do not call any tool except" in production_source
+
+    harness_source = expected[3].read_text(encoding="utf-8")
+    assert '"pi": ROOT / "examples" / "live_agents" / "pi_actor"' in harness_source
+    assert '"pi": "TROUPE_LIVE_PI_PROFILE"' in harness_source
+    assert '"DEEPSEEK_API_KEY"' in harness_source
+
+    runner_source = expected[4].read_text(encoding="utf-8")
+    assert "{codex|claude|kimi|pi}" in runner_source
+    assert "pi)" in runner_source
+
+
 def _kimi_wire_calls() -> list[tuple[str, dict[str, object]]]:
     return [
         ("Read", {"path": "seed.txt"}),

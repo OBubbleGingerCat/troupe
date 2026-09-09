@@ -6,8 +6,37 @@ Troupe does not perform authentication.
 
 Codex and Claude require Node.js with npm and `npx` because Troupe launches
 their pinned ACP adapter packages through `npx`. Kimi requires the pinned Kimi
-Code 0.39.1 CLI. All three CLIs must be installed and logged in before the
-Production starts.
+Code 0.39.1 CLI. Pi requires Node.js 22.19 or newer and the pinned Pi 0.85.1
+CLI on `PATH`; configure Pi for DeepSeek before the Production starts. All
+providers must already be authenticated. The live examples are explicit
+provider calls and can consume tokens.
+
+Pi is launched by Troupe with only its structured-result extension enabled. The
+example therefore demonstrates the provider-neutral part of the integration:
+two Acts on one persistent Actor, a typed result, and Python-side diagnostic
+spans/events plus a `DiagnosticSink`. Pi's built-in file and shell tools are
+intentionally disabled by the backend.
+
+```console
+export TROUPE_LIVE_PI_PROFILE='{"workspace":"/tmp","model":"deepseek-v4-flash","effort":"high"}'
+scripts/test_live_agent.sh pi
+```
+
+For a one-off interactive demonstration, create a writable workspace and run
+the same Production directly. `SEED_TOKEN` is remembered across the two Acts;
+the report is written only so the command can be inspected while it waits for
+`Ctrl+C`:
+
+```console
+export TROUPE_LIVE_PI_PROFILE='{"workspace":"/tmp","model":"deepseek-v4-pro","effort":"high"}'
+troupe --production examples/live_agents/pi_actor -- acceptance /tmp/pi-example-report.json pi-demo-token
+```
+
+The command requires Pi 0.85.1 and Node.js 22.19+ on `PATH`, plus a configured
+DeepSeek credential (`DEEPSEEK_API_KEY` or Pi's own credential store). Use
+`deepseek-v4-flash` for a lower-cost smoke test or `deepseek-v4-pro` when you
+want to exercise the Pro profile. Stop it with `Ctrl+C` after the report is
+published.
 
 For Codex, provide an explicit profile whose workspace is an existing writable
 directory. The live harness creates and removes its own child workspace there.

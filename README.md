@@ -2,9 +2,9 @@
 
 Troupe is a runtime for building long-running, autonomous agent workflows in
 Python. A Troupe program casts stateful **Actors**, sends them work as **Cues**,
-and receives owned **Effects**. Each Actor owns one persistent Codex, Claude, or
-Kimi session, with the provider's native coding harness available for real
-repository work.
+and receives owned **Effects**. Each Actor owns one persistent provider session
+(Codex, Claude, Kimi, or Pi/DeepSeek), with the provider's native coding
+harness available for real repository work.
 
 > Troupe is not a stateless model API wrapper. It is the orchestration layer
 > around stateful roles: your Python code decides who acts next, each Actor keeps
@@ -22,7 +22,7 @@ One agent turn travels through the system like this:
 flowchart LR
     Scene["Production scene<br/>Python orchestration"]
     Actor["Actor<br/>long-lived role"]
-    Session["Persistent agent session<br/>Codex / Claude / Kimi"]
+    Session["Persistent agent session<br/>Codex / Claude / Kimi / Pi"]
     Validate["Troupe result tool<br/>schema validation"]
 
     Scene -->|"cue(instruction)"| Actor
@@ -196,8 +196,9 @@ usage, custom instrumentation, Python sink summaries, and Timeline History repla
 [Progressive examples](examples/README.md) introduce Actors and Effects, repeated
 Scenes, Actor-to-Actor routing, cooperative workers, and cancellation in small,
 deterministic steps. [Live agent examples](examples/live_agents/README.md) then
-exercise Codex, Claude, Kimi, and the mixed-provider repository repair against
-real provider CLIs. Every example uses the same `troupe --production` command as
+exercise Codex, Claude, Kimi, and Pi/DeepSeek (including the runnable
+[`pi_actor`](examples/live_agents/pi_actor/production.py) example) against real
+provider CLIs. Every example uses the same `troupe --production` command as
 deployment.
 
 ## Complete Production example

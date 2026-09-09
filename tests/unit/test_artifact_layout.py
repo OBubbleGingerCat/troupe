@@ -378,6 +378,8 @@ EXAMPLE_FILES = {
     "live_agents/kimi_actor/production.py": b"import troupe\n",
     "live_agents/mixed_repository_repair/__init__.py": b"",
     "live_agents/mixed_repository_repair/production.py": b"import troupe\n",
+    "live_agents/pi_actor/__init__.py": b"",
+    "live_agents/pi_actor/production.py": b"import troupe\n",
     "repeating_scenes/__init__.py": b"",
     "repeating_scenes/production.py": b"import troupe\n",
 }

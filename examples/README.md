@@ -4,9 +4,11 @@ These production packages progress from one Actor to cooperative scheduling and
 structured cancellation. Run the commands from the repository root after
 installing Troupe in the active Python environment.
 
-These examples cast Codex-backed Actors, so Node.js, npm, and `npx` must be
-installed and Codex must already be logged in through its CLI. The agent session
-starts at cast time even when an example does not call `Actor.act()`.
+The deterministic examples that cast agent-backed Actors use Codex, so Node.js,
+npm, and `npx` must be installed and Codex must already be logged in through its
+CLI. The agent session starts at cast time even when an example does not call
+`Actor.act()`. The separate [live-agent examples](live_agents/README.md) include
+a runnable Pi/DeepSeek Actor and require their provider-specific setup.
 
 Four examples print their result once and then keep that Scene active until
 `Ctrl+C`. The repeating-Scenes and diagnostics examples instead return from each

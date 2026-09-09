@@ -322,6 +322,8 @@ EXPECTED_EXAMPLE_FILES = (
     "live_agents/kimi_actor/production.py",
     "live_agents/mixed_repository_repair/__init__.py",
     "live_agents/mixed_repository_repair/production.py",
+    "live_agents/pi_actor/__init__.py",
+    "live_agents/pi_actor/production.py",
     "repeating_scenes/__init__.py",
     "repeating_scenes/production.py",
 )
