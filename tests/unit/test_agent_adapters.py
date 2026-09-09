@@ -131,6 +131,40 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "autonomous_request_profile": "kimi-code@0.39.1",
             "settlement_profile": "kimi-code@0.39.1",
         },
+        "pi": {
+            "program": "node",
+            "args": [
+                "<staged-acp-shim.mjs>",
+                "--pi-command",
+                "<pi>",
+                "--extension",
+                "<staged-result-extension.mjs>",
+                "--model",
+                "<allowlisted-deepseek-model>",
+            ],
+            "version": "0.85.1",
+            "acp_wire_protocol": "stable-v1",
+            "client_sdk_version": "2.0.0",
+            "mcp_wire_protocol": "2025-11-25",
+            "mcp_transport_profile": "McpTransportProfileV1",
+            "environment_policy": "inherit_parent",
+            "fixed_environment": {},
+            "removed_environment": [],
+            "initial_mode": "default",
+            "mode_application": {
+                "method": "session/set_config_option",
+                "config_id": "mode",
+                "value": "default",
+            },
+            "model_config_id": "model",
+            "effort_config_id": "thinking",
+            "effort_option_optional_when_unspecified": True,
+            "configuration_order": ["mode", "model", "effort"],
+            "effective_value_validation": "exact_advertised_select",
+            "mcp_registration": "session/new.mcpServers.http",
+            "autonomous_request_profile": "troupe-pi-shim@0.1.0",
+            "settlement_profile": "pi-rpc-agent-settled@0.85.1",
+        },
     }
     assert "latest" not in repr(snapshot).lower()
 
@@ -562,6 +596,40 @@ def test_kimi_adapter_treats_real_terminal_responses_as_authoritative(
     )
 
 
+@pytest.mark.parametrize(
+    ("code", "data", "expected"),
+    [
+        (-32000, None, "authentication_lost"),
+        (-32603, {"piErrorKind": "auth"}, "authentication_lost"),
+        (-32603, {"piErrorKind": "provider"}, "provider_failure"),
+        (-32603, {"piErrorKind": "prompt"}, "uncertain"),
+        (-32603, {"piErrorKind": "protocol"}, "uncertain"),
+        (-32602, {"piErrorKind": "provider"}, "uncertain"),
+    ],
+)
+def test_pi_adapter_requires_explicit_error_markers_for_terminal_settlement(
+    code: int,
+    data: object | None,
+    expected: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_settlement_for_test(
+            "pi", code, json.dumps(data)
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("stop_reason", ["cancelled", "end_turn", "refusal"])
+def test_pi_adapter_treats_acp_prompt_responses_as_authoritative(
+    stop_reason: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_supervisor_response_for_test("pi", stop_reason)
+        == "authoritative"
+    )
+
+
 def test_codex_live_example_and_explicit_acceptance_runner_are_wired() -> None:
     expected = [
         ROOT / "examples" / "live_agents" / "README.md",
@@ -665,6 +733,40 @@ def test_kimi_live_example_and_isolated_acceptance_runner_are_wired() -> None:
     assert '"KIMI_CODE_NO_AUTO_UPDATE"' in harness_source
     assert '"kimi.bak"' in harness_source
     assert "start_new_session=True" in harness_source
+
+
+def test_pi_live_example_and_acceptance_runner_are_wired() -> None:
+    expected = [
+        ROOT / "examples" / "live_agents" / "README.md",
+        ROOT / "examples" / "live_agents" / "pi_actor" / "__init__.py",
+        ROOT / "examples" / "live_agents" / "pi_actor" / "production.py",
+        ROOT / "tests" / "live" / "provider_acceptance.py",
+        ROOT / "scripts" / "test_live_agent.sh",
+    ]
+    assert all(path.is_file() for path in expected)
+    assert expected[1].read_bytes() == b""
+
+    live_readme = expected[0].read_text(encoding="utf-8")
+    assert "TROUPE_LIVE_PI_PROFILE" in live_readme
+    assert "examples/live_agents/pi_actor" in live_readme
+    assert "deepseek-v4-flash" in live_readme
+    assert "deepseek-v4-pro" in live_readme
+
+    production_source = expected[2].read_text(encoding="utf-8")
+    assert "TROUPE_LIVE_PI_PROFILE" in production_source
+    assert "diagnostic_sink=sink" in production_source
+    assert "diagnostics.span" in production_source
+    assert "diagnostics.event" in production_source
+    assert "Do not call any tool except" in production_source
+
+    harness_source = expected[3].read_text(encoding="utf-8")
+    assert '"pi": ROOT / "examples" / "live_agents" / "pi_actor"' in harness_source
+    assert '"pi": "TROUPE_LIVE_PI_PROFILE"' in harness_source
+    assert '"DEEPSEEK_API_KEY"' in harness_source
+
+    runner_source = expected[4].read_text(encoding="utf-8")
+    assert "{codex|claude|kimi|pi}" in runner_source
+    assert "pi)" in runner_source
 
 
 def _kimi_wire_calls() -> list[tuple[str, dict[str, object]]]:

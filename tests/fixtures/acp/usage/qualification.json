@@ -30,6 +30,14 @@
       "version": "0.39.1",
       "qualified": false,
       "evidence": []
+    },
+    {
+      "provider": "pi",
+      "runner": "pi",
+      "package": "pi",
+      "version": "0.85.1",
+      "qualified": false,
+      "evidence": []
     }
   ]
 }

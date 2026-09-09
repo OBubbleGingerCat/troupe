@@ -79,6 +79,15 @@ def test_cast_agent_profile_is_public_keyword_only_immutable_and_slotted(
         with pytest.raises(dataclasses.FrozenInstanceError):
             profile.model = "replacement"  # type: ignore[misc]
 
+    pi_profile = troupe.AgentProfile(
+        agent="pi",
+        workspace=tmp_path,
+        model="deepseek-v4-pro",
+        effort="medium",
+    )
+    assert pi_profile.agent == "pi"
+    assert pi_profile.model == "deepseek-v4-pro"
+
     with pytest.raises(TypeError):
         troupe.AgentProfile("codex", tmp_path, "model", None)  # type: ignore[misc]
     for missing in ("agent", "workspace", "model", "effort"):
@@ -147,6 +156,27 @@ def test_cast_agent_profile_rejects_invalid_effort(effort: object, tmp_path: Pat
             workspace=tmp_path,
             model="model",
             effort=effort,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-flash-vision-exp", "deepseek-chat", "model"])
+def test_cast_pi_profile_rejects_unsupported_model(model: str, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="pi model"):
+        troupe.AgentProfile(
+            agent="pi",
+            workspace=tmp_path,
+            model=model,
+            effort=None,
+        )
+
+
+def test_cast_pi_profile_rejects_unsupported_effort(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="pi effort"):
+        troupe.AgentProfile(
+            agent="pi",
+            workspace=tmp_path,
+            model="deepseek-v4-flash",
+            effort="off",
         )
 
 

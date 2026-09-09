@@ -94,7 +94,7 @@ impl AgentSupervisor {
         &self,
         profile: &ResolvedAgentProfile,
     ) -> Result<ResolvedLaunch, AgentStartupFailure> {
-        resolve_launch(profile.agent)
+        resolve_launch(profile)
     }
 
     pub fn start(

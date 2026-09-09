@@ -275,6 +275,7 @@ fn adapter_for_provider(provider: AgentDiagnosticProvider) -> &'static dyn AcpAg
         AgentDiagnosticProvider::Codex => AgentKind::Codex,
         AgentDiagnosticProvider::Claude => AgentKind::Claude,
         AgentDiagnosticProvider::Kimi => AgentKind::Kimi,
+        AgentDiagnosticProvider::Pi => AgentKind::Pi,
     };
     agent_adapter(agent)
 }

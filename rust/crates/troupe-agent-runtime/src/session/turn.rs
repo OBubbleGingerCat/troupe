@@ -62,6 +62,7 @@ pub enum AgentTurnStop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromptErrorSettlement {
     AuthoritativeRequestFailure,
+    ProviderFailure,
     AuthenticationLost,
     Uncertain,
     TransportLost,
@@ -587,7 +588,8 @@ impl AgentTurnControl {
                         match prompt_error_settlement
                             .expect("an error response has an error settlement")
                         {
-                            PromptErrorSettlement::AuthoritativeRequestFailure => None,
+                            PromptErrorSettlement::AuthoritativeRequestFailure
+                            | PromptErrorSettlement::ProviderFailure => None,
                             PromptErrorSettlement::AuthenticationLost => {
                                 Some(AgentSessionFailure::authentication_lost())
                             }
@@ -620,6 +622,16 @@ impl AgentTurnControl {
                         {
                             PromptErrorSettlement::AuthoritativeRequestFailure => {
                                 let outcome = outcome_from_authoritative_request_error(result);
+                                let failure = match &outcome {
+                                    AgentTurnOutcome::SessionBroken(failure) => {
+                                        Some(failure.clone())
+                                    }
+                                    _ => None,
+                                };
+                                (outcome, failure)
+                            }
+                            PromptErrorSettlement::ProviderFailure => {
+                                let outcome = outcome_from_provider_failure(result);
                                 let failure = match &outcome {
                                     AgentTurnOutcome::SessionBroken(failure) => {
                                         Some(failure.clone())
@@ -693,9 +705,13 @@ impl AgentTurnControl {
                 let terminal_observation =
                     match (retained_response.as_ref(), prompt_error_settlement) {
                         (Some(response), _) => TurnTerminalObservation::settled(response, adapter),
-                        (None, Some(PromptErrorSettlement::AuthoritativeRequestFailure)) => {
-                            TurnTerminalObservation::authoritative_without_response(adapter)
-                        }
+                        (
+                            None,
+                            Some(
+                                PromptErrorSettlement::AuthoritativeRequestFailure
+                                | PromptErrorSettlement::ProviderFailure,
+                            ),
+                        ) => TurnTerminalObservation::authoritative_without_response(adapter),
                         (None, _) => TurnTerminalObservation::unknown(Some(adapter)),
                     };
                 let terminal_observation = broken_failure
@@ -1074,6 +1090,9 @@ fn classify_prompt_error(
         if adapter_settlement == RemotePromptErrorSettlement::AuthoritativeRequestFailure {
             return PromptErrorSettlement::AuthoritativeRequestFailure;
         }
+        if adapter_settlement == RemotePromptErrorSettlement::ProviderFailure {
+            return PromptErrorSettlement::ProviderFailure;
+        }
         let code = i32::from(error.code);
         return if authoritative_error_codes.contains(&code) {
             PromptErrorSettlement::AuthoritativeRequestFailure
@@ -1146,6 +1165,29 @@ fn outcome_from_authoritative_request_error(result: ResultAtSettlement) -> Agent
             AgentTurnOutcome::SessionBroken(AgentSessionFailure::result_channel_lost())
         }
         ResultAtSettlement::Accepted(_) | ResultAtSettlement::Missing => {
+            AgentTurnOutcome::Stopped(AgentTurnStop::RequestFailed)
+        }
+    }
+}
+
+fn outcome_from_provider_failure(result: ResultAtSettlement) -> AgentTurnOutcome {
+    match result {
+        ResultAtSettlement::Rejected {
+            issues,
+            invalid_calls,
+            truncated,
+        } => AgentTurnOutcome::ResultRejected {
+            issues,
+            invalid_calls,
+            truncated,
+        },
+        ResultAtSettlement::SchemaCallbackFailed(error) => {
+            AgentTurnOutcome::SchemaCallbackFailed(error)
+        }
+        ResultAtSettlement::Accepted(_) => {
+            AgentTurnOutcome::SessionBroken(AgentSessionFailure::provider_request_failed())
+        }
+        ResultAtSettlement::Missing | ResultAtSettlement::Unavailable => {
             AgentTurnOutcome::Stopped(AgentTurnStop::RequestFailed)
         }
     }
@@ -1465,6 +1507,24 @@ mod tests {
         assert!(matches!(
             outcome,
             AgentTurnOutcome::Stopped(AgentTurnStop::MaxTokens)
+        ));
+    }
+
+    #[test]
+    fn pi_provider_failure_does_not_become_result_channel_loss() {
+        let before_result = outcome_from_provider_failure(ResultAtSettlement::Unavailable);
+        assert!(matches!(
+            before_result,
+            AgentTurnOutcome::Stopped(AgentTurnStop::RequestFailed)
+        ));
+
+        let after_result = outcome_from_provider_failure(ResultAtSettlement::Accepted(
+            ValidatedActValue::Object(Vec::new()),
+        ));
+        assert!(matches!(
+            after_result,
+            AgentTurnOutcome::SessionBroken(failure)
+                if failure.code == "provider_request_failed"
         ));
     }
 

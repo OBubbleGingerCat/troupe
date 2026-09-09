@@ -49,6 +49,7 @@ EXPECTED_WRAPPER = (
     b"from ._runtime import act_schema as act_schema\n"
     b"from ._runtime import Cue as Cue\n"
     b"from ._runtime import CueContextError as CueContextError\n"
+    b"from ._runtime import diagnostics as diagnostics\n"
     b"from ._runtime import Effect as Effect\n"
     b"from ._runtime import EffectContextError as EffectContextError\n"
     b"from ._runtime import Production as Production\n"
@@ -56,7 +57,7 @@ EXPECTED_WRAPPER = (
     b"\n"
     b"@_dataclass(frozen=True, slots=True, kw_only=True)\n"
     b"class AgentProfile:\n"
-    b'    agent: _Literal["codex", "claude", "kimi"]\n'
+    b'    agent: _Literal["codex", "claude", "kimi", "pi"]\n'
     b"    workspace: str | _PathLike[str]\n"
     b"    model: str\n"
     b"    effort: str | None\n"
@@ -64,8 +65,8 @@ EXPECTED_WRAPPER = (
     b"    def __post_init__(self) -> None:\n"
     b"        if not isinstance(self.agent, str):\n"
     b'            raise TypeError("agent must be a str")\n'
-    b'        if self.agent not in {"codex", "claude", "kimi"}:\n'
-    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi'\")\n"
+    b'        if self.agent not in {"codex", "claude", "kimi", "pi"}:\n'
+    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi', 'pi'\")\n"
     b"        if not isinstance(self.model, str):\n"
     b'            raise TypeError("model must be a str")\n'
     b"        if not self.model:\n"
@@ -74,6 +75,15 @@ EXPECTED_WRAPPER = (
     b'            raise TypeError("effort must be a str or None")\n'
     b'        if self.effort == "":\n'
     b'            raise ValueError("effort must not be empty")\n'
+    b'        if self.agent == "pi":\n'
+    b'            if self.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:\n'
+    b"                raise ValueError(\n"
+    b'                    "pi model must be one of: \'deepseek-v4-flash\', \'deepseek-v4-pro\'"\n'
+    b"                )\n"
+    b'            if self.effort not in {None, "low", "medium", "high", "xhigh", "max"}:\n'
+    b"                raise ValueError(\n"
+    b'                    "pi effort must be one of: None, \'low\', \'medium\', \'high\', \'xhigh\', \'max\'"\n'
+    b"                )\n"
     b"\n"
     b"\n"
     b"__all__ = [\n"
@@ -96,6 +106,7 @@ EXPECTED_WRAPPER = (
     b'    "EffectContextError",\n'
     b'    "Production",\n'
     b'    "act_schema",\n'
+    b'    "diagnostics",\n'
     b"]\n"
 )
 EXPECTED_STUB = (
@@ -109,6 +120,7 @@ EXPECTED_STUB = (
     b"from typing_extensions import disjoint_base\n"
     b"\n"
     b"from . import act_schema as act_schema\n"
+    b"from . import diagnostics as diagnostics\n"
     b"\n"
     b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
     b'_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]\n'
@@ -148,7 +160,7 @@ EXPECTED_STUB = (
     b"\n"
     b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
     b"class AgentProfile:\n"
-    b'    agent: Literal["codex", "claude", "kimi"]\n'
+    b'    agent: Literal["codex", "claude", "kimi", "pi"]\n'
     b"    workspace: str | PathLike[str]\n"
     b"    model: str\n"
     b"    effort: str | None\n"
@@ -173,6 +185,7 @@ EXPECTED_STUB = (
     b"        *,\n"
     b"        script: str,\n"
     b"        output_schema: dict[str, act_schema.FieldSpec],\n"
+    b"        diagnostic_sink: diagnostics.DiagnosticSink | None = None,\n"
     b"    ) -> dict[str, _JsonValue]:\n"
     b'        """Return one validated JSON object from this Actor\'s persistent agent session."""\n'
     b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
@@ -244,6 +257,7 @@ EXPECTED_STUB = (
     b'    "EffectContextError",\n'
     b'    "Production",\n'
     b'    "act_schema",\n'
+    b'    "diagnostics",\n'
     b"]\n"
 )
 EXPECTED_ACT_SCHEMA_STUB_SHA256 = (
@@ -261,8 +275,8 @@ REALIZED_PACKAGE_FILES = (
     "py.typed",
 )
 REALIZED_PACKAGE_SHA256 = {
-    "__init__.py": "82d8b338efb0c973d52e4680d9b77590bb91dad30f469468122aa293d5e04c8e",
-    "__init__.pyi": "f5046f600a3e2383f4efd07477b2fafd549592e2c1cd9159ff8b34b69e38d295",
+    "__init__.py": "9fd82da63ac5203cd17295e894787c6ce2a3bdd0c9b744ef29137670db8d471c",
+    "__init__.pyi": "a112315e2751e116cc87ae3601e0371fbaf942cb5f5a05781f2d32bc098834cc",
     "act_schema.pyi": EXPECTED_ACT_SCHEMA_STUB_SHA256,
     "diagnostics.pyi": "457852eeb32409b2faa8697d332a07fb9dbe9be67ab5331e4270947e4e0de418",
     "py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -308,6 +322,8 @@ EXPECTED_EXAMPLE_FILES = (
     "live_agents/kimi_actor/production.py",
     "live_agents/mixed_repository_repair/__init__.py",
     "live_agents/mixed_repository_repair/production.py",
+    "live_agents/pi_actor/__init__.py",
+    "live_agents/pi_actor/production.py",
     "repeating_scenes/__init__.py",
     "repeating_scenes/production.py",
 )
@@ -492,6 +508,13 @@ def _source_rust_build_inputs(source_package: Path) -> dict[str, bytes]:
             for path in rust_root.rglob("*.rs")
             if "target" not in path.relative_to(rust_root).parts
         )
+        paths.extend(
+            path
+            for path in (rust_root / "crates" / "troupe-agent-runtime" / "assets").rglob(
+                "*.mjs"
+            )
+            if path.is_file()
+        )
         crates_root = rust_root / "crates"
         if crates_root.is_dir():
             paths.extend(crates_root.rglob("Cargo.toml"))
@@ -585,6 +608,7 @@ def _validate_sdist(
                     name.endswith(".rs")
                     or name.endswith("/Cargo.toml")
                     or name == f"{rust_prefix}Cargo.lock"
+                    or name.endswith(".mjs")
                 )
             }
             expected_rust_names = {

@@ -166,6 +166,13 @@ impl AgentSessionFailure {
         }
     }
 
+    pub(crate) const fn provider_request_failed() -> Self {
+        Self {
+            code: "provider_request_failed",
+            message: "agent provider request failed after result handoff",
+        }
+    }
+
     pub(crate) const fn resource_limit() -> Self {
         Self {
             code: "resource_limit",

@@ -18,11 +18,13 @@ PRODUCTIONS = {
     "codex": ROOT / "examples" / "live_agents" / "codex_actor",
     "claude": ROOT / "examples" / "live_agents" / "claude_actor",
     "kimi": ROOT / "examples" / "live_agents" / "kimi_actor",
+    "pi": ROOT / "examples" / "live_agents" / "pi_actor",
 }
 PROFILE_ENVS = {
     "codex": "TROUPE_LIVE_CODEX_PROFILE",
     "claude": "TROUPE_LIVE_CLAUDE_PROFILE",
     "kimi": "TROUPE_LIVE_KIMI_PROFILE",
+    "pi": "TROUPE_LIVE_PI_PROFILE",
 }
 CLAUDE_USER_ENV_ALLOWLIST = frozenset(
     {
@@ -186,6 +188,11 @@ def _run_case(
         environment["PATH"] = os.pathsep.join(
             (str(kimi_command_dir), environment.get("PATH", ""))
         )
+    elif provider == "pi":
+        # Normal Pi acceptance deliberately inherits the user's Pi credential
+        # setup.  The unlogged case replaces the config directory below and
+        # removes the only supported DeepSeek environment credential.
+        pass
     else:
         raise AcceptanceFailure("unsupported live provider")
     environment[PROFILE_ENVS[provider]] = json.dumps(
@@ -200,8 +207,10 @@ def _run_case(
             environment["CODEX_HOME"] = str(provider_home)
         elif provider == "claude":
             environment["CLAUDE_CONFIG_DIR"] = str(provider_home)
-        else:
+        elif provider == "kimi":
             environment["KIMI_CODE_HOME"] = str(provider_home)
+        else:
+            environment["PI_CODING_AGENT_DIR"] = str(provider_home)
         environment["NO_BROWSER"] = "1"
         environment["BROWSER"] = "/bin/false"
         for name in (
@@ -215,6 +224,7 @@ def _run_case(
             "KIMI_API_KEY",
             "KIMI_CODE_OAUTH_TOKEN",
             "MOONSHOT_API_KEY",
+            "DEEPSEEK_API_KEY",
         ):
             environment.pop(name, None)
         if provider == "kimi":
@@ -1172,9 +1182,83 @@ def _run_claude(base: Path, configured_profile: dict[str, object]) -> None:
             raise cleanup_error
 
 
+def _run_pi(base: Path, configured_profile: dict[str, object]) -> None:
+    """Run the small Pi example and its non-interactive auth probe.
+
+    Pi's public profile constructor rejects unsupported model/effort values
+    before a Production can publish a report, so those cases remain covered by
+    the deterministic AgentProfile tests.  This live check focuses on the
+    provider-specific path: two persistent Acts, the result extension, and an
+    isolated unlogged startup.
+    """
+
+    workspace = Path(tempfile.mkdtemp(prefix=".troupe-live-pi-", dir=base))
+    ownership_marker = workspace / ".troupe-live-owned"
+    ownership_marker.write_text("pi\n", encoding="ascii")
+    seed_token = f"ctx-{secrets.token_hex(8)}"
+    try:
+        live_profile = {**configured_profile, "workspace": str(workspace)}
+        acceptance = _run_case(
+            provider="pi",
+            mode="acceptance",
+            workspace=workspace,
+            profile=live_profile,
+            seed_token=seed_token,
+        )
+        remember = acceptance.get("remember")
+        if not isinstance(remember, dict) or remember.get("result") != {
+            "status": "stored",
+            "token": seed_token,
+        }:
+            raise AcceptanceFailure("Pi did not return the first contextual result")
+        diagnostics = remember.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            raise AcceptanceFailure("Pi example did not return sink diagnostics")
+        if diagnostics.get("complete") is not True:
+            raise AcceptanceFailure("Pi diagnostic sink did not close completely")
+        if not isinstance(diagnostics.get("delivered_events"), int) or diagnostics[
+            "delivered_events"
+        ] <= 0:
+            raise AcceptanceFailure("Pi diagnostic sink received no events")
+        if acceptance.get("recall") != {
+            "result": {
+                "status": "recalled",
+                "token": seed_token,
+                "confidence": 8,
+            }
+        }:
+            raise AcceptanceFailure("Pi did not retain context across Acts")
+
+        _require_error(
+            _run_case(
+                provider="pi",
+                mode="auth-required",
+                workspace=workspace,
+                profile=live_profile,
+                seed_token=seed_token,
+                unlogged=True,
+            ),
+            # Pi can open its local RPC session before DeepSeek checks the
+            # credential. The first prompt then reports the provider auth
+            # failure as a broken session, which is the intentional Pi
+            # classification used by the adapter.
+            error_type="AgentSessionBrokenError",
+            code="authentication_lost",
+            phase=None,
+        )
+    finally:
+        if ownership_marker.read_text(encoding="ascii") != "pi\n":
+            raise AcceptanceFailure("refusing to clean an unowned live workspace")
+        shutil.rmtree(workspace)
+    if workspace.exists():
+        raise AcceptanceFailure("live Pi workspace survived cleanup")
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1 or argv[0] not in PRODUCTIONS:
-        raise AcceptanceFailure("usage: provider_acceptance.py {codex|claude|kimi}")
+        raise AcceptanceFailure(
+            "usage: provider_acceptance.py {codex|claude|kimi|pi}"
+        )
     from troupe import _runtime
 
     if hasattr(_runtime, "_agent_test_reset_launch"):
@@ -1185,8 +1269,10 @@ def main(argv: list[str]) -> int:
         _run_codex(base, profile)
     elif provider == "claude":
         _run_claude(base, profile)
-    else:
+    elif provider == "kimi":
         _run_kimi(base, profile)
+    else:
+        _run_pi(base, profile)
     return 0
 
 

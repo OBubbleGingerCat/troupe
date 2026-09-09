@@ -1,7 +1,7 @@
 import re
 from collections.abc import Awaitable
 
-from troupe import AgentProfile, Actor, ActorHandle, Cue, Effect, Production, act_schema
+from troupe import Actor, ActorHandle, AgentProfile, Cue, Effect, Production, act_schema
 from typing_extensions import assert_type
 
 
@@ -124,6 +124,13 @@ async def exercise() -> None:
         model="test-model",
         effort=None,
     )
+    pi_profile = AgentProfile(
+        agent="pi",
+        workspace="/tmp",
+        model="deepseek-v4-pro",
+        effort="medium",
+    )
+    _ = pi_profile
 
     positional: ActorHandle = production.cast_actor(
         ExampleActor,

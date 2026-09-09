@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 mod kimi;
+mod pi;
 
 use agent_client_protocol::Error;
 #[cfg(feature = "agent-test-support")]
@@ -14,12 +15,14 @@ use serde_json::Value;
 use self::claude::CLAUDE_ADAPTER;
 use self::codex::CODEX_ADAPTER;
 use self::kimi::KIMI_ADAPTER;
+use self::pi::PI_ADAPTER;
 use crate::launch::AgentLaunchSpec;
 use crate::profile::AgentKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemotePromptErrorSettlement {
     AuthoritativeRequestFailure,
+    ProviderFailure,
     AuthenticationLost,
     Uncertain,
 }
@@ -58,6 +61,7 @@ pub(crate) fn agent_adapter(agent: AgentKind) -> &'static dyn AcpAgentAdapter {
         AgentKind::Codex => &CODEX_ADAPTER,
         AgentKind::Claude => &CLAUDE_ADAPTER,
         AgentKind::Kimi => &KIMI_ADAPTER,
+        AgentKind::Pi => &PI_ADAPTER,
     }
 }
 
@@ -105,6 +109,7 @@ fn parse_agent_for_test(agent: &str) -> pyo3::PyResult<AgentKind> {
         "codex" => Ok(AgentKind::Codex),
         "claude" => Ok(AgentKind::Claude),
         "kimi" => Ok(AgentKind::Kimi),
+        "pi" => Ok(AgentKind::Pi),
         _ => Err(pyo3::exceptions::PyValueError::new_err(
             "unknown agent adapter",
         )),
@@ -145,6 +150,7 @@ pub fn settlement_for_test(
             RemotePromptErrorSettlement::AuthoritativeRequestFailure => {
                 "authoritative_request_failure"
             }
+            RemotePromptErrorSettlement::ProviderFailure => "provider_failure",
             RemotePromptErrorSettlement::AuthenticationLost => "authentication_lost",
             RemotePromptErrorSettlement::Uncertain => "uncertain",
         },

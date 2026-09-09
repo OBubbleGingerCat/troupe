@@ -80,6 +80,8 @@ fn compiler_prompt_and_native_validator_share_one_ordered_ir() {
         assert_eq!(compiled.validation_mode(), SchemaValidationMode::NativeOnly);
         let prompt = compiled.render_prompt("Inspect the repository.").unwrap();
         assert!(prompt.contains("Inspect the repository."));
+        assert!(prompt.contains(crate::result::RESULT_CHANNEL_DESCRIPTION));
+        assert!(prompt.find("RESULT_CHANNEL").unwrap() < prompt.find("SCRIPT_JSON").unwrap());
         let positions =
             ["decision", "score", "ratio", "metadata"].map(|field| prompt.find(field).unwrap());
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));

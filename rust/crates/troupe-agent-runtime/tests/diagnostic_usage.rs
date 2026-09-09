@@ -47,6 +47,7 @@ fn provider(name: &str) -> AgentDiagnosticProvider {
         "codex" => AgentDiagnosticProvider::Codex,
         "claude" => AgentDiagnosticProvider::Claude,
         "kimi" => AgentDiagnosticProvider::Kimi,
+        "pi" => AgentDiagnosticProvider::Pi,
         _ => panic!("unknown provider fixture: {name}"),
     }
 }
@@ -219,7 +220,7 @@ fn qualification_fixture_pins_only_proven_whole_turn_adapters() {
 
     let launch = source(crate_root().join("src/launch/mod.rs"));
     let adapters = fixture["adapters"].as_array().expect("adapter profiles");
-    assert_eq!(adapters.len(), 3);
+    assert_eq!(adapters.len(), 4);
     for adapter in adapters {
         let name = adapter["provider"].as_str().expect("provider name");
         let qualification = pinned_usage_qualification(provider(name));
@@ -233,15 +234,19 @@ fn qualification_fixture_pins_only_proven_whole_turn_adapters() {
         let block = launch_profile_block(&launch, name);
         let package = adapter["package"].as_str().expect("adapter package");
         let version = adapter["version"].as_str().expect("adapter version");
-        let runner_field = if adapter["runner"] == "npx" {
-            "package"
+        if name == "pi" {
+            assert!(block.contains("runner: LaunchRunner::Pi"));
         } else {
-            "program"
-        };
-        assert!(
-            block.contains(&format!("{runner_field}: \"{package}\"")),
-            "{name} package drifted"
-        );
+            let runner_field = if adapter["runner"] == "npx" {
+                "package"
+            } else {
+                "program"
+            };
+            assert!(
+                block.contains(&format!("{runner_field}: \"{package}\"")),
+                "{name} package drifted"
+            );
+        }
         assert!(
             block.contains(&format!("exact_version: \"{version}\"")),
             "{name} version drifted"
@@ -262,6 +267,7 @@ fn qualification_fixture_pins_only_proven_whole_turn_adapters() {
                 )
             }
             "kimi" => assert!(evidence.is_empty()),
+            "pi" => assert!(evidence.is_empty()),
             _ => unreachable!(),
         }
     }

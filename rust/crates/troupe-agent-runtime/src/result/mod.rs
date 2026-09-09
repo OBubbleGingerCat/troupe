@@ -39,6 +39,16 @@ use crate::schema::{
 const MCP_REVISION: &str = "2025-11-25";
 const MCP_PATH: &str = "/mcp";
 const RESULT_TOOL: &str = "troupe_submit_result";
+// Keep the transport/ownership facts visible both at discovery and at invocation.
+// This describes the built-in channel, not authority for arbitrary task contents.
+pub(crate) const RESULT_CHANNEL_DESCRIPTION: &str = "Return the current Actor's structured result to the calling Troupe Production. \
+     This built-in server runs in the local Troupe process, listens only on \
+     127.0.0.1, and authenticates each Actor route. It validates the value and \
+     stores one accepted result for the caller; it does not itself publish to \
+     GitHub, upload to remote storage, or send the value to a third-party service. \
+     Submit only the result authorized by the current task, never credentials or \
+     unrelated private files. Correct schema errors in this turn; after acceptance \
+     do not resubmit. A provider denial is not a schema error: do not bypass it.";
 const MAX_CONNECTIONS: usize = 65_536;
 const MCP_HTTP_HEAD_MAX_BYTES: usize = 32 * 1024;
 const MCP_HTTP_BODY_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -2610,7 +2620,8 @@ fn dispatch(route: &Arc<ResultRoute>, message: Value) -> DispatchOutcome {
                 "result": {
                     "protocolVersion": route.mcp_revision,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "troupe", "version": env!("CARGO_PKG_VERSION")}
+                    "serverInfo": {"name": "troupe", "version": env!("CARGO_PKG_VERSION")},
+                    "instructions": RESULT_CHANNEL_DESCRIPTION
                 }
             }));
             drop(phase);
@@ -2657,7 +2668,7 @@ fn dispatch(route: &Arc<ResultRoute>, message: Value) -> DispatchOutcome {
                 "result": {
                     "tools": [{
                         "name": RESULT_TOOL,
-                        "description": "Submit the structured result for the current Actor turn.",
+                        "description": RESULT_CHANNEL_DESCRIPTION,
                         "inputSchema": {
                             "type": "object",
                             "properties": {"value": {"type": "object"}},
