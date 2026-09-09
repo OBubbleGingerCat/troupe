@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "agent-test-support"))]
+use std::process::Command;
 use std::sync::Arc;
 
 #[cfg(feature = "agent-test-support")]
@@ -13,7 +15,9 @@ use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use tokio::sync::Notify;
 
 use crate::error::AgentStartupFailure;
-use crate::profile::AgentKind;
+use crate::profile::{AgentKind, ResolvedAgentProfile};
+#[cfg(not(feature = "agent-test-support"))]
+use uuid::Uuid;
 
 pub(super) mod fd_registry;
 pub(super) mod process;
@@ -29,6 +33,12 @@ pub(crate) enum LaunchRunner {
     Command {
         program: &'static str,
         fixed_args: &'static [&'static str],
+        exact_version: &'static str,
+    },
+    #[allow(dead_code)]
+    Pi {
+        node_min_major: u32,
+        node_min_minor: u32,
         exact_version: &'static str,
     },
 }
@@ -236,7 +246,7 @@ impl AgentLaunchSpec {
                 package,
                 exact_version,
             }),
-            LaunchRunner::Command { .. } => None,
+            LaunchRunner::Command { .. } | LaunchRunner::Pi { .. } => None,
         }
     }
 
@@ -244,6 +254,7 @@ impl AgentLaunchSpec {
         match self.runner {
             LaunchRunner::Npx { .. } => None,
             LaunchRunner::Command { exact_version, .. } => Some(exact_version),
+            LaunchRunner::Pi { .. } => None,
         }
     }
 
@@ -375,11 +386,43 @@ const KIMI: AgentLaunchSpec = AgentLaunchSpec {
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
 
+const PI: AgentLaunchSpec = AgentLaunchSpec {
+    agent: AgentKind::Pi,
+    acp_wire_protocol: AcpWireProtocolVersion::StableV1,
+    client_sdk_version: ACP_CLIENT_SDK_VERSION,
+    mcp_wire_protocol: McpWireProtocolVersion::V2025_11_25,
+    mcp_transport_profile: McpTransportProfileId::V1,
+    runner: LaunchRunner::Pi {
+        node_min_major: 22,
+        node_min_minor: 19,
+        exact_version: "0.85.1",
+    },
+    environment_policy: LaunchEnvironmentPolicy::InheritParent,
+    fixed_environment: NO_ENVIRONMENT,
+    removed_environment: NO_REMOVED_ENVIRONMENT,
+    initial_mode: "default",
+    mode_application: ModeApplicationV1::SessionConfigOption {
+        config_id: "mode",
+        value: "default",
+    },
+    model_config_id: "model",
+    effort_config_id: "thinking",
+    effort_option_optional_when_unspecified: true,
+    configuration_order: ConfigurationOrderV1::ModeModelEffort,
+    effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
+    mcp_registration: McpRegistrationV1::SessionNewHttp,
+    autonomous_request_profile: AutonomousRequestProfileId("troupe-pi-shim@0.1.0"),
+    settlement_profile: SettlementProfileId("pi-rpc-agent-settled@0.85.1"),
+    opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
+    authoritative_prompt_error_codes: NO_ERROR_CODES,
+};
+
 pub(crate) const fn launch_spec(agent: AgentKind) -> &'static AgentLaunchSpec {
     match agent {
         AgentKind::Codex => &CODEX,
         AgentKind::Claude => &CLAUDE,
         AgentKind::Kimi => &KIMI,
+        AgentKind::Pi => &PI,
     }
 }
 
@@ -392,6 +435,9 @@ pub(crate) struct ResolvedAgentCommand {
     pub(crate) mode_application: ResolvedModeApplication,
     pub(crate) opening_transient_errors: Vec<OpeningTransientErrorV1>,
     pub(crate) authoritative_prompt_error_codes: Arc<[i32]>,
+    // Owns the temporary directory containing the embedded Pi bridge scripts.
+    // The child command only retains paths into this directory.
+    pub(crate) _pi_staging: Option<Arc<PiStaging>>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) opening_gate: Option<Arc<TestOpeningGate>>,
     #[cfg(feature = "agent-test-support")]
@@ -402,6 +448,17 @@ pub(crate) struct ResolvedAgentCommand {
     pub(crate) opening_backoff: Option<Arc<TestOpeningBackoff>>,
     #[cfg(feature = "agent-test-support")]
     pub(crate) turn_gates: TestTurnGates,
+}
+
+#[derive(Debug)]
+pub(crate) struct PiStaging {
+    directory: PathBuf,
+}
+
+impl Drop for PiStaging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -445,10 +502,100 @@ fn resolve_program(program: &Path) -> Result<PathBuf, AgentStartupFailure> {
 }
 
 #[cfg(not(feature = "agent-test-support"))]
+fn unsupported_version() -> AgentStartupFailure {
+    AgentStartupFailure::start(
+        "version_unsupported",
+        "preparation",
+        "Pi requires the pinned Node.js and Pi versions",
+    )
+}
+
+#[cfg(not(feature = "agent-test-support"))]
+fn command_version(program: &Path, args: &[&str]) -> Result<String, AgentStartupFailure> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|_| unavailable())?;
+    if !output.status.success() {
+        return Err(unavailable());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value = if stdout.trim().is_empty() {
+        stderr.trim()
+    } else {
+        stdout.trim()
+    };
+    Ok(value.to_owned())
+}
+
+#[cfg(not(feature = "agent-test-support"))]
+fn node_meets_minimum(version: &str, major: u32, minor: u32) -> bool {
+    let version = version.trim();
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let mut parts = version.split('.');
+    let Some(actual_major) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let actual_minor = parts
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(0);
+    actual_major > major || (actual_major == major && actual_minor >= minor)
+}
+
+#[cfg(not(feature = "agent-test-support"))]
+fn stage_pi_assets() -> Result<(Arc<PiStaging>, PathBuf, PathBuf), AgentStartupFailure> {
+    let base = std::env::temp_dir();
+    let directory = (0..16).find_map(|_| {
+        let candidate = base.join(format!("troupe-pi-{}", Uuid::new_v4()));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => Some(candidate),
+            Err(_) => None,
+        }
+    });
+    let Some(directory) = directory else {
+        return Err(unavailable());
+    };
+    let result = (|| {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let shim = directory.join("acp-shim.mjs");
+        let extension = directory.join("result-extension.mjs");
+        std::fs::write(&shim, include_str!("../../assets/pi/acp-shim.mjs"))?;
+        std::fs::write(
+            &extension,
+            include_str!("../../assets/pi/result-extension.mjs"),
+        )?;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&extension, std::fs::Permissions::from_mode(0o600))?;
+        Ok::<_, std::io::Error>((shim, extension))
+    })();
+    let Ok((shim, extension)) = result else {
+        let _ = std::fs::remove_dir_all(&directory);
+        return Err(unavailable());
+    };
+    let staging = Arc::new(PiStaging {
+        directory: directory.clone(),
+    });
+    Ok((staging, shim, extension))
+}
+
+#[cfg(not(feature = "agent-test-support"))]
+fn pi_thinking_arg(effort: &str) -> &'static str {
+    match effort {
+        "low" => "low",
+        "medium" | "high" | "xhigh" => "high",
+        "max" => "max",
+        _ => unreachable!("Pi effort was validated by AgentProfile"),
+    }
+}
+
+#[cfg(not(feature = "agent-test-support"))]
 fn production_command(
     spec: &'static AgentLaunchSpec,
+    profile: &ResolvedAgentProfile,
 ) -> Result<ResolvedAgentCommand, AgentStartupFailure> {
-    let (program, args) = match spec.runner {
+    let (program, args, pi_staging) = match spec.runner {
         LaunchRunner::Npx {
             package,
             exact_version,
@@ -462,6 +609,7 @@ fn production_command(
             .into_iter()
             .chain(fixed_args.iter().map(OsString::from))
             .collect(),
+            None,
         ),
         LaunchRunner::Command {
             program,
@@ -470,7 +618,41 @@ fn production_command(
         } => (
             PathBuf::from(program),
             fixed_args.iter().map(OsString::from).collect(),
+            None,
         ),
+        LaunchRunner::Pi {
+            node_min_major,
+            node_min_minor,
+            exact_version,
+        } => {
+            let node = resolve_program(Path::new("node"))?;
+            let pi = resolve_program(Path::new("pi"))?;
+            let node_version = command_version(&node, &["--version"])?;
+            if !node_meets_minimum(&node_version, node_min_major, node_min_minor) {
+                return Err(unsupported_version());
+            }
+            let pi_version = command_version(&pi, &["--version"])?;
+            if pi_version.trim() != exact_version {
+                return Err(unsupported_version());
+            }
+            let (staging, shim, extension) = stage_pi_assets()?;
+            let mut args = vec![
+                shim.into_os_string(),
+                OsString::from("--pi-command"),
+                pi.into_os_string(),
+                OsString::from("--extension"),
+                extension.into_os_string(),
+                OsString::from("--model"),
+                OsString::from(profile.requested_model.as_str()),
+            ];
+            if let Some(effort) = profile.requested_effort.as_deref() {
+                args.push(OsString::from("--thinking"));
+                args.push(OsString::from(pi_thinking_arg(effort)));
+                args.push(OsString::from("--requested-effort"));
+                args.push(OsString::from(effort));
+            }
+            (node, args, Some(staging))
+        }
     };
     let environment = match spec.environment_policy {
         LaunchEnvironmentPolicy::InheritParent => spec
@@ -491,6 +673,7 @@ fn production_command(
         mode_application: spec.mode_application.into(),
         opening_transient_errors: spec.opening_transient_errors.to_vec(),
         authoritative_prompt_error_codes: Arc::from(spec.authoritative_prompt_error_codes),
+        _pi_staging: pi_staging,
         #[cfg(feature = "agent-test-support")]
         opening_gate: None,
         #[cfg(feature = "agent-test-support")]
@@ -665,7 +848,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentStartupFailure> {
+pub(crate) fn resolve_launch(
+    profile: &ResolvedAgentProfile,
+) -> Result<ResolvedLaunch, AgentStartupFailure> {
+    let agent = profile.agent;
     #[cfg(feature = "agent-test-support")]
     {
         let _ = agent;
@@ -694,6 +880,7 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
                 ),
                 opening_transient_errors: configured.transient_opening_errors,
                 authoritative_prompt_error_codes: Arc::from(authoritative_prompt_error_codes),
+                _pi_staging: None,
                 opening_gate: configured.opening_gate,
                 configuration_ready_gate: configured.configuration_ready_gate,
                 mcp_ready_gate: configured.mcp_ready_gate,
@@ -705,7 +892,7 @@ pub(crate) fn resolve_launch(agent: AgentKind) -> Result<ResolvedLaunch, AgentSt
 
     #[cfg(not(feature = "agent-test-support"))]
     {
-        production_command(launch_spec(agent))
+        production_command(launch_spec(agent), profile)
             .map(Box::new)
             .map(ResolvedLaunchKind::Process)
             .map(ResolvedLaunch)
@@ -1123,7 +1310,7 @@ pub fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<py
     use pyo3::types::{PyDict, PyDictMethods};
 
     let snapshot = PyDict::new(py);
-    for spec in [&CODEX, &CLAUDE, &KIMI] {
+    for spec in [&CODEX, &CLAUDE, &KIMI, &PI] {
         let value = PyDict::new(py);
         let (program, args, version) = match spec.runner {
             LaunchRunner::Npx {
@@ -1145,6 +1332,19 @@ pub fn launch_specs_for_test(py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::Py<py
             } => (
                 program,
                 fixed_args.iter().map(|value| (*value).to_owned()).collect(),
+                exact_version,
+            ),
+            LaunchRunner::Pi { exact_version, .. } => (
+                "node",
+                vec![
+                    "<staged-acp-shim.mjs>".to_owned(),
+                    "--pi-command".to_owned(),
+                    "<pi>".to_owned(),
+                    "--extension".to_owned(),
+                    "<staged-result-extension.mjs>".to_owned(),
+                    "--model".to_owned(),
+                    "<allowlisted-deepseek-model>".to_owned(),
+                ],
                 exact_version,
             ),
         };

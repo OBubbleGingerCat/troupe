@@ -1466,7 +1466,20 @@ fn lifecycle_transition_commits_only_after_response_write_success() {
 #[tokio::test]
 async fn tools_list_declares_the_result_value_as_an_object() {
     let route = route();
-    dispatch(&route, initialize())
+    let initialized = dispatch(&route, initialize());
+    let body = initialized
+        .response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let response: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response.pointer("/result/instructions"),
+        Some(&json!(RESULT_CHANNEL_DESCRIPTION))
+    );
+    initialized
         .transition
         .expect("initialize has a response transition")
         .finish(true);
@@ -1494,6 +1507,12 @@ async fn tools_list_declares_the_result_value_as_an_object() {
         .unwrap()
         .to_bytes();
     let response: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        response.pointer("/result/tools/0/description"),
+        Some(&json!(RESULT_CHANNEL_DESCRIPTION))
+    );
+    assert!(RESULT_CHANNEL_DESCRIPTION.contains("127.0.0.1"));
+    assert!(RESULT_CHANNEL_DESCRIPTION.contains("do not bypass"));
     assert_eq!(
         response.pointer("/result/tools/0/inputSchema/properties/value/type"),
         Some(&json!("object")),

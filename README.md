@@ -307,6 +307,17 @@ does not collect credentials, expose an authentication flow, or return raw
 agent output from `act()`. Codex and Claude launch pinned ACP packages and
 therefore require Node.js with npm and `npx`; Kimi requires Kimi Code 0.39.1.
 
+`agent="pi"` requires Node.js 22.19 or newer and Pi 0.85.1 on `PATH`. Its
+first-release model allowlist is limited to the text-only
+`deepseek-v4-flash` and `deepseek-v4-pro` profiles. Configure DeepSeek through
+Pi before starting the Production, either with `DEEPSEEK_API_KEY` or Pi's own
+credential setup. Troupe passes the result route only to its Pi child process;
+it does not copy credentials into prompts or command arguments. The Pi result
+extension runs with the Pi process user's permissions, so it reduces ambient
+Pi loading but is not an OS sandbox. `effort=None` keeps Pi's default thinking
+level; `medium` and `xhigh` are conservatively mapped to Pi's `high` level,
+while `max` maps to `max`.
+
 `Actor.act()` may only be called by that Actor while handling `cued()`. It sends
 the script to the persistent session and returns one validated JSON-compatible
 dictionary. Built-in schema values require a `description`; scalar values also

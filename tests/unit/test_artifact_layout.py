@@ -110,6 +110,7 @@ EXPECTED_WRAPPER = (
     b"from ._runtime import act_schema as act_schema\n"
     b"from ._runtime import Cue as Cue\n"
     b"from ._runtime import CueContextError as CueContextError\n"
+    b"from ._runtime import diagnostics as diagnostics\n"
     b"from ._runtime import Effect as Effect\n"
     b"from ._runtime import EffectContextError as EffectContextError\n"
     b"from ._runtime import Production as Production\n"
@@ -117,7 +118,7 @@ EXPECTED_WRAPPER = (
     b"\n"
     b"@_dataclass(frozen=True, slots=True, kw_only=True)\n"
     b"class AgentProfile:\n"
-    b'    agent: _Literal["codex", "claude", "kimi"]\n'
+    b'    agent: _Literal["codex", "claude", "kimi", "pi"]\n'
     b"    workspace: str | _PathLike[str]\n"
     b"    model: str\n"
     b"    effort: str | None\n"
@@ -125,8 +126,8 @@ EXPECTED_WRAPPER = (
     b"    def __post_init__(self) -> None:\n"
     b"        if not isinstance(self.agent, str):\n"
     b'            raise TypeError("agent must be a str")\n'
-    b'        if self.agent not in {"codex", "claude", "kimi"}:\n'
-    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi'\")\n"
+    b'        if self.agent not in {"codex", "claude", "kimi", "pi"}:\n'
+    b"            raise ValueError(\"agent must be one of: 'codex', 'claude', 'kimi', 'pi'\")\n"
     b"        if not isinstance(self.model, str):\n"
     b'            raise TypeError("model must be a str")\n'
     b"        if not self.model:\n"
@@ -135,6 +136,15 @@ EXPECTED_WRAPPER = (
     b'            raise TypeError("effort must be a str or None")\n'
     b'        if self.effort == "":\n'
     b'            raise ValueError("effort must not be empty")\n'
+    b'        if self.agent == "pi":\n'
+    b'            if self.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:\n'
+    b"                raise ValueError(\n"
+    b'                    "pi model must be one of: \'deepseek-v4-flash\', \'deepseek-v4-pro\'"\n'
+    b"                )\n"
+    b'            if self.effort not in {None, "low", "medium", "high", "xhigh", "max"}:\n'
+    b"                raise ValueError(\n"
+    b'                    "pi effort must be one of: None, \'low\', \'medium\', \'high\', \'xhigh\', \'max\'"\n'
+    b"                )\n"
     b"\n"
     b"\n"
     b"__all__ = [\n"
@@ -157,6 +167,7 @@ EXPECTED_WRAPPER = (
     b'    "EffectContextError",\n'
     b'    "Production",\n'
     b'    "act_schema",\n'
+    b'    "diagnostics",\n'
     b"]\n"
 )
 EXPECTED_STUB = (
@@ -170,6 +181,7 @@ EXPECTED_STUB = (
     b"from typing_extensions import disjoint_base\n"
     b"\n"
     b"from . import act_schema as act_schema\n"
+    b"from . import diagnostics as diagnostics\n"
     b"\n"
     b'_EffectT = TypeVar("_EffectT", bound="Effect")\n'
     b'_JsonValue = None | bool | int | float | str | list["_JsonValue"] | dict[str, "_JsonValue"]\n'
@@ -209,7 +221,7 @@ EXPECTED_STUB = (
     b"\n"
     b"@dataclass(frozen=True, slots=True, kw_only=True)\n"
     b"class AgentProfile:\n"
-    b'    agent: Literal["codex", "claude", "kimi"]\n'
+    b'    agent: Literal["codex", "claude", "kimi", "pi"]\n'
     b"    workspace: str | PathLike[str]\n"
     b"    model: str\n"
     b"    effort: str | None\n"
@@ -234,6 +246,7 @@ EXPECTED_STUB = (
     b"        *,\n"
     b"        script: str,\n"
     b"        output_schema: dict[str, act_schema.FieldSpec],\n"
+    b"        diagnostic_sink: diagnostics.DiagnosticSink | None = None,\n"
     b"    ) -> dict[str, _JsonValue]:\n"
     b'        """Return one validated JSON object from this Actor\'s persistent agent session."""\n'
     b"    async def cued(self, cue: Cue) -> tuple[Effect, ...]: ...\n"
@@ -305,6 +318,7 @@ EXPECTED_STUB = (
     b'    "EffectContextError",\n'
     b'    "Production",\n'
     b'    "act_schema",\n'
+    b'    "diagnostics",\n'
     b"]\n"
 )
 EXPECTED_ACT_SCHEMA_STUB = (PACKAGE / "act_schema.pyi").read_bytes()

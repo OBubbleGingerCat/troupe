@@ -48,7 +48,7 @@ class AgentResultMissingError(AgentResultError): ...
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentProfile:
-    agent: Literal["codex", "claude", "kimi"]
+    agent: Literal["codex", "claude", "kimi", "pi"]
     workspace: str | PathLike[str]
     model: str
     effort: str | None

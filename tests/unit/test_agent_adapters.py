@@ -131,6 +131,40 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "autonomous_request_profile": "kimi-code@0.39.1",
             "settlement_profile": "kimi-code@0.39.1",
         },
+        "pi": {
+            "program": "node",
+            "args": [
+                "<staged-acp-shim.mjs>",
+                "--pi-command",
+                "<pi>",
+                "--extension",
+                "<staged-result-extension.mjs>",
+                "--model",
+                "<allowlisted-deepseek-model>",
+            ],
+            "version": "0.85.1",
+            "acp_wire_protocol": "stable-v1",
+            "client_sdk_version": "2.0.0",
+            "mcp_wire_protocol": "2025-11-25",
+            "mcp_transport_profile": "McpTransportProfileV1",
+            "environment_policy": "inherit_parent",
+            "fixed_environment": {},
+            "removed_environment": [],
+            "initial_mode": "default",
+            "mode_application": {
+                "method": "session/set_config_option",
+                "config_id": "mode",
+                "value": "default",
+            },
+            "model_config_id": "model",
+            "effort_config_id": "thinking",
+            "effort_option_optional_when_unspecified": True,
+            "configuration_order": ["mode", "model", "effort"],
+            "effective_value_validation": "exact_advertised_select",
+            "mcp_registration": "session/new.mcpServers.http",
+            "autonomous_request_profile": "troupe-pi-shim@0.1.0",
+            "settlement_profile": "pi-rpc-agent-settled@0.85.1",
+        },
     }
     assert "latest" not in repr(snapshot).lower()
 
@@ -558,6 +592,40 @@ def test_kimi_adapter_treats_real_terminal_responses_as_authoritative(
 ) -> None:
     assert (
         _native()._agent_adapter_supervisor_response_for_test("kimi", stop_reason)
+        == "authoritative"
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "data", "expected"),
+    [
+        (-32000, None, "authentication_lost"),
+        (-32603, {"piErrorKind": "auth"}, "authentication_lost"),
+        (-32603, {"piErrorKind": "provider"}, "provider_failure"),
+        (-32603, {"piErrorKind": "prompt"}, "uncertain"),
+        (-32603, {"piErrorKind": "protocol"}, "uncertain"),
+        (-32602, {"piErrorKind": "provider"}, "uncertain"),
+    ],
+)
+def test_pi_adapter_requires_explicit_error_markers_for_terminal_settlement(
+    code: int,
+    data: object | None,
+    expected: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_settlement_for_test(
+            "pi", code, json.dumps(data)
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("stop_reason", ["cancelled", "end_turn", "refusal"])
+def test_pi_adapter_treats_acp_prompt_responses_as_authoritative(
+    stop_reason: str,
+) -> None:
+    assert (
+        _native()._agent_adapter_supervisor_response_for_test("pi", stop_reason)
         == "authoritative"
     )
 

@@ -16,6 +16,7 @@ pub(crate) enum AgentKind {
     Codex,
     Claude,
     Kimi,
+    Pi,
 }
 
 impl AgentKind {
@@ -24,6 +25,7 @@ impl AgentKind {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
             "kimi" => Some(Self::Kimi),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -34,6 +36,7 @@ impl AgentKind {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Kimi => "kimi",
+            Self::Pi => "pi",
         }
     }
 }
@@ -84,8 +87,9 @@ pub fn resolve_agent_profile(profile: &Bound<'_, PyAny>) -> PyResult<ResolvedAge
     }
     let agent_value = profile.getattr("agent")?;
     let agent_name = required_string(&agent_value, "agent")?;
-    let agent = AgentKind::parse(&agent_name)
-        .ok_or_else(|| PyValueError::new_err("agent must be one of: 'codex', 'claude', 'kimi'"))?;
+    let agent = AgentKind::parse(&agent_name).ok_or_else(|| {
+        PyValueError::new_err("agent must be one of: 'codex', 'claude', 'kimi', 'pi'")
+    })?;
     let model_value = profile.getattr("model")?;
     let requested_model = required_string(&model_value, "model")?;
     let effort_value = profile.getattr("effort")?;
@@ -94,6 +98,23 @@ pub fn resolve_agent_profile(profile: &Bound<'_, PyAny>) -> PyResult<ResolvedAge
     } else {
         Some(required_string(&effort_value, "effort")?)
     };
+    if agent == AgentKind::Pi {
+        if !matches!(
+            requested_model.as_str(),
+            "deepseek-v4-flash" | "deepseek-v4-pro"
+        ) {
+            return Err(PyValueError::new_err(
+                "pi model must be one of: 'deepseek-v4-flash', 'deepseek-v4-pro'",
+            ));
+        }
+        if let Some(effort) = requested_effort.as_deref()
+            && !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max")
+        {
+            return Err(PyValueError::new_err(
+                "pi effort must be one of: None, 'low', 'medium', 'high', 'xhigh', 'max'",
+            ));
+        }
+    }
     let workspace = profile.getattr("workspace")?;
     let value = py.import("os")?.getattr("fspath")?.call1((workspace,))?;
     let value = value.cast::<PyString>().map_err(|_| {

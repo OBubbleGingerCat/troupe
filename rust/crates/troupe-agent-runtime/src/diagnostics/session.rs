@@ -31,6 +31,7 @@ pub enum AgentDiagnosticProvider {
     Codex,
     Claude,
     Kimi,
+    Pi,
 }
 
 impl AgentDiagnosticProvider {
@@ -39,6 +40,7 @@ impl AgentDiagnosticProvider {
             AgentKind::Codex => Self::Codex,
             AgentKind::Claude => Self::Claude,
             AgentKind::Kimi => Self::Kimi,
+            AgentKind::Pi => Self::Pi,
         }
     }
 
@@ -47,6 +49,7 @@ impl AgentDiagnosticProvider {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Kimi => "kimi",
+            Self::Pi => "pi",
         }
     }
 }

@@ -25,7 +25,7 @@ from ._runtime import Production as Production
 
 @_dataclass(frozen=True, slots=True, kw_only=True)
 class AgentProfile:
-    agent: _Literal["codex", "claude", "kimi"]
+    agent: _Literal["codex", "claude", "kimi", "pi"]
     workspace: str | _PathLike[str]
     model: str
     effort: str | None
@@ -33,8 +33,8 @@ class AgentProfile:
     def __post_init__(self) -> None:
         if not isinstance(self.agent, str):
             raise TypeError("agent must be a str")
-        if self.agent not in {"codex", "claude", "kimi"}:
-            raise ValueError("agent must be one of: 'codex', 'claude', 'kimi'")
+        if self.agent not in {"codex", "claude", "kimi", "pi"}:
+            raise ValueError("agent must be one of: 'codex', 'claude', 'kimi', 'pi'")
         if not isinstance(self.model, str):
             raise TypeError("model must be a str")
         if not self.model:
@@ -43,6 +43,15 @@ class AgentProfile:
             raise TypeError("effort must be a str or None")
         if self.effort == "":
             raise ValueError("effort must not be empty")
+        if self.agent == "pi":
+            if self.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+                raise ValueError(
+                    "pi model must be one of: 'deepseek-v4-flash', 'deepseek-v4-pro'"
+                )
+            if self.effort not in {None, "low", "medium", "high", "xhigh", "max"}:
+                raise ValueError(
+                    "pi effort must be one of: None, 'low', 'medium', 'high', 'xhigh', 'max'"
+                )
 
 
 __all__ = [
