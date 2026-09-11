@@ -141,7 +141,7 @@ def test_readme_documents_actor_act_schema_and_callback_boundaries() -> None:
         '`agent="pi"`',
         "Node.js 22.19",
         "Pi 0.85.1",
-        "`deepseek-v4-flash`",
+        "`deepseek-flash`",
         "`deepseek-v4-pro`",
         "`DEEPSEEK_API_KEY`",
         "not an OS sandbox",

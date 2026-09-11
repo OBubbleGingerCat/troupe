@@ -749,7 +749,7 @@ def test_pi_live_example_and_acceptance_runner_are_wired() -> None:
     live_readme = expected[0].read_text(encoding="utf-8")
     assert "TROUPE_LIVE_PI_PROFILE" in live_readme
     assert "examples/live_agents/pi_actor" in live_readme
-    assert "deepseek-v4-flash" in live_readme
+    assert "deepseek-flash" in live_readme
     assert "deepseek-v4-pro" in live_readme
 
     production_source = expected[2].read_text(encoding="utf-8")
