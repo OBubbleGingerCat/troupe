@@ -18,7 +18,7 @@ const PI_RPC_ABORT_TIMEOUT_MS = 5_000;
 const PI_RPC_SETTLEMENT_TIMEOUT_MS = 10 * 60 * 1_000;
 const TOOL_INPUT_MAX = 1024 * 1024;
 const PI_ERROR_TEXT_MAX = 4 * 1024;
-const ALLOWED_MODELS = new Set(["deepseek-v4-flash", "deepseek-v4-pro"]);
+const ALLOWED_MODELS = new Set(["deepseek-flash", "deepseek-v4-pro"]);
 const ALLOWED_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 function parseArgs(argv) {
@@ -214,7 +214,7 @@ function configOptions() {
       type: "select",
       currentValue: config.model,
       options: [
-        { value: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+        { value: "deepseek-flash", name: "DeepSeek Flash" },
         { value: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
       ],
     },

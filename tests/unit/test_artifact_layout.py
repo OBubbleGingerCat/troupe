@@ -137,9 +137,9 @@ EXPECTED_WRAPPER = (
     b'        if self.effort == "":\n'
     b'            raise ValueError("effort must not be empty")\n'
     b'        if self.agent == "pi":\n'
-    b'            if self.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:\n'
+    b'            if self.model not in {"deepseek-flash", "deepseek-v4-pro"}:\n'
     b"                raise ValueError(\n"
-    b'                    "pi model must be one of: \'deepseek-v4-flash\', \'deepseek-v4-pro\'"\n'
+    b'                    "pi model must be one of: \'deepseek-flash\', \'deepseek-v4-pro\'"\n'
     b"                )\n"
     b'            if self.effort not in {None, "low", "medium", "high", "xhigh", "max"}:\n'
     b"                raise ValueError(\n"

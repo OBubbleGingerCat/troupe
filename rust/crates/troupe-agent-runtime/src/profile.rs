@@ -101,10 +101,10 @@ pub fn resolve_agent_profile(profile: &Bound<'_, PyAny>) -> PyResult<ResolvedAge
     if agent == AgentKind::Pi {
         if !matches!(
             requested_model.as_str(),
-            "deepseek-v4-flash" | "deepseek-v4-pro"
+            "deepseek-flash" | "deepseek-v4-pro"
         ) {
             return Err(PyValueError::new_err(
-                "pi model must be one of: 'deepseek-v4-flash', 'deepseek-v4-pro'",
+                "pi model must be one of: 'deepseek-flash', 'deepseek-v4-pro'",
             ));
         }
         if let Some(effort) = requested_effort.as_deref()

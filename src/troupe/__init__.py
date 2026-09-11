@@ -44,9 +44,9 @@ class AgentProfile:
         if self.effort == "":
             raise ValueError("effort must not be empty")
         if self.agent == "pi":
-            if self.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+            if self.model not in {"deepseek-flash", "deepseek-v4-pro"}:
                 raise ValueError(
-                    "pi model must be one of: 'deepseek-v4-flash', 'deepseek-v4-pro'"
+                    "pi model must be one of: 'deepseek-flash', 'deepseek-v4-pro'"
                 )
             if self.effort not in {None, "low", "medium", "high", "xhigh", "max"}:
                 raise ValueError(

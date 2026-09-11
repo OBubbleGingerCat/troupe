@@ -48,7 +48,7 @@ process.stdin.on("data", (chunk) => {
         id: command.id,
         type: "response",
         success: true,
-        data: { model: { provider: "deepseek", id: "deepseek-v4-flash" } },
+        data: { model: { provider: "deepseek", id: "deepseek-flash" } },
       });
     } else if (command.type === "prompt") {
       send({ id: command.id, type: "response", success: true });
@@ -83,7 +83,7 @@ process.stdin.on("data", (chunk) => {
         id: command.id,
         type: "response",
         success: true,
-        data: { model: { provider: "deepseek", id: "deepseek-v4-flash" } },
+        data: { model: { provider: "deepseek", id: "deepseek-flash" } },
       });
     } else if (command.type === "prompt") {
       send({
@@ -118,7 +118,7 @@ process.stdin.on("data", (chunk) => {
         id: command.id,
         type: "response",
         success: true,
-        data: { model: { provider: "deepseek", id: "deepseek-v4-flash" } },
+        data: { model: { provider: "deepseek", id: "deepseek-flash" } },
       });
     } else if (command.type === "prompt") {
       send({ id: command.id, type: "response", success: true });
@@ -156,7 +156,7 @@ process.stdin.on("data", (chunk) => {
         id: command.id,
         type: "response",
         success: true,
-        data: { model: { provider: "deepseek", id: "deepseek-v4-flash" } },
+        data: { model: { provider: "deepseek", id: "deepseek-flash" } },
       });
     } else if (command.type === "prompt") {
       send({ id: command.id, type: "response", success: true });
@@ -247,7 +247,7 @@ def test_pi_bridge_waits_for_agent_settled_before_finishing_prompt(
             "--extension",
             str(EXTENSION),
             "--model",
-            "deepseek-v4-flash",
+            "deepseek-flash",
         ],
         cwd=ROOT,
         stdin=subprocess.PIPE,
@@ -299,7 +299,7 @@ def test_pi_bridge_waits_for_agent_settled_before_finishing_prompt(
 
         for request_id, config_id, value in (
             (3, "mode", "default"),
-            (4, "model", "deepseek-v4-flash"),
+            (4, "model", "deepseek-flash"),
         ):
             send(
                 {
@@ -367,7 +367,7 @@ def _configured_bridge(
             "--extension",
             str(EXTENSION),
             "--model",
-            "deepseek-v4-flash",
+            "deepseek-flash",
         ],
         cwd=ROOT,
         stdin=subprocess.PIPE,
@@ -407,7 +407,7 @@ def _configured_bridge(
     session_id = session_response["result"]["sessionId"]
     for request_id, config_id, value in (
         (3, "mode", "default"),
-        (4, "model", "deepseek-v4-flash"),
+        (4, "model", "deepseek-flash"),
     ):
         send(
             {
@@ -454,7 +454,7 @@ def test_pi_bridge_classifies_provider_authentication_failure_without_raw_error(
         assert response["error"]["data"] == {
             "piErrorKind": "auth",
             "provider": "deepseek",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "reason": "authentication_failed",
         }
         assert "No API key" not in json.dumps(response)
@@ -490,7 +490,7 @@ def test_pi_bridge_classifies_capacity_failure_as_provider_error_without_raw_err
         assert response["error"]["data"] == {
             "piErrorKind": "provider",
             "provider": "deepseek",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "reason": "provider_request_failed",
         }
         assert "at capacity" not in json.dumps(response)

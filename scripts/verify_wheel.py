@@ -76,9 +76,9 @@ EXPECTED_WRAPPER = (
     b'        if self.effort == "":\n'
     b'            raise ValueError("effort must not be empty")\n'
     b'        if self.agent == "pi":\n'
-    b'            if self.model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:\n'
+    b'            if self.model not in {"deepseek-flash", "deepseek-v4-pro"}:\n'
     b"                raise ValueError(\n"
-    b'                    "pi model must be one of: \'deepseek-v4-flash\', \'deepseek-v4-pro\'"\n'
+    b'                    "pi model must be one of: \'deepseek-flash\', \'deepseek-v4-pro\'"\n'
     b"                )\n"
     b'            if self.effort not in {None, "low", "medium", "high", "xhigh", "max"}:\n'
     b"                raise ValueError(\n"
@@ -275,7 +275,7 @@ REALIZED_PACKAGE_FILES = (
     "py.typed",
 )
 REALIZED_PACKAGE_SHA256 = {
-    "__init__.py": "9fd82da63ac5203cd17295e894787c6ce2a3bdd0c9b744ef29137670db8d471c",
+    "__init__.py": "aeee73f536c26a7fe4ccc59a06b9cac990e05085e776b90a0042f2f32eb94d9c",
     "__init__.pyi": "a112315e2751e116cc87ae3601e0371fbaf942cb5f5a05781f2d32bc098834cc",
     "act_schema.pyi": EXPECTED_ACT_SCHEMA_STUB_SHA256,
     "diagnostics.pyi": "457852eeb32409b2faa8697d332a07fb9dbe9be67ab5331e4270947e4e0de418",

@@ -18,7 +18,7 @@ spans/events plus a `DiagnosticSink`. Pi's built-in file and shell tools are
 intentionally disabled by the backend.
 
 ```console
-export TROUPE_LIVE_PI_PROFILE='{"workspace":"/tmp","model":"deepseek-v4-flash","effort":"high"}'
+export TROUPE_LIVE_PI_PROFILE='{"workspace":"/tmp","model":"deepseek-flash","effort":"high"}'
 scripts/test_live_agent.sh pi
 ```
 
@@ -34,7 +34,7 @@ troupe --production examples/live_agents/pi_actor -- acceptance /tmp/pi-example-
 
 The command requires Pi 0.85.1 and Node.js 22.19+ on `PATH`, plus a configured
 DeepSeek credential (`DEEPSEEK_API_KEY` or Pi's own credential store). Use
-`deepseek-v4-flash` for a lower-cost smoke test or `deepseek-v4-pro` when you
+`deepseek-flash` for a lower-cost smoke test or `deepseek-v4-pro` when you
 want to exercise the Pro profile. Stop it with `Ctrl+C` after the report is
 published.
 

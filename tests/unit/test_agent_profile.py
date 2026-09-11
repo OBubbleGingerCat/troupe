@@ -159,7 +159,10 @@ def test_cast_agent_profile_rejects_invalid_effort(effort: object, tmp_path: Pat
         )
 
 
-@pytest.mark.parametrize("model", ["deepseek-v4-flash-vision-exp", "deepseek-chat", "model"])
+@pytest.mark.parametrize(
+    "model",
+    ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-chat", "model"],
+)
 def test_cast_pi_profile_rejects_unsupported_model(model: str, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="pi model"):
         troupe.AgentProfile(
@@ -175,9 +178,20 @@ def test_cast_pi_profile_rejects_unsupported_effort(tmp_path: Path) -> None:
         troupe.AgentProfile(
             agent="pi",
             workspace=tmp_path,
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             effort="off",
         )
+
+
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-pro"])
+def test_cast_pi_profile_accepts_current_models(model: str, tmp_path: Path) -> None:
+    profile = troupe.AgentProfile(
+        agent="pi",
+        workspace=tmp_path,
+        model=model,
+        effort="high",
+    )
+    assert profile.model == model
 
 
 def test_cast_requires_exact_agent_profile_before_actor_construction(
