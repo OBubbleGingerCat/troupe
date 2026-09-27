@@ -3,7 +3,7 @@
   "carrier": "acp.prompt_response.usage",
   "acp": {
     "crate": "agent-client-protocol",
-    "version": "2.0.0",
+    "version": "2.2.0",
     "features": ["unstable_end_turn_token_usage"]
   },
   "adapters": [
@@ -11,7 +11,7 @@
       "provider": "codex",
       "runner": "npx",
       "package": "@agentclientprotocol/codex-acp",
-      "version": "1.7.0",
+      "version": "1.13.1",
       "qualified": true,
       "evidence": ["single_request", "tool_loop"]
     },
@@ -19,7 +19,7 @@
       "provider": "claude",
       "runner": "npx",
       "package": "@agentclientprotocol/claude-agent-acp",
-      "version": "0.70.0",
+      "version": "0.81.2",
       "qualified": true,
       "evidence": ["single_request", "multi_request"]
     },
@@ -35,7 +35,7 @@
       "provider": "pi",
       "runner": "pi",
       "package": "pi",
-      "version": "0.85.1",
+      "version": "0.87.1",
       "qualified": false,
       "evidence": []
     }

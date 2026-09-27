@@ -1135,7 +1135,7 @@ def test_rust_manifest_and_source_boundary() -> None:
         "uuid",
     }
     assert agent_dependencies["agent-client-protocol"] == {
-        "version": "=2.0.0",
+        "version": "=2.2.0",
         "features": ["unstable_end_turn_token_usage"],
     }
     assert agent_dependencies["troupe-diagnostics-core"] == {

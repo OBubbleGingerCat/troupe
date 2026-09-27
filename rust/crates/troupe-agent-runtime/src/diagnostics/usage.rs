@@ -15,11 +15,11 @@ use crate::profile::AgentKind;
 
 pub const AGENT_TURN_USAGE_CANDIDATE_KIND: &str = "agent_turn_usage_terminal";
 pub const ACP_TURN_USAGE_SOURCE: &str = "acp.prompt_response.usage";
-pub const ACP_TURN_USAGE_CLIENT_SDK_VERSION: &str = "2.0.0";
+pub const ACP_TURN_USAGE_CLIENT_SDK_VERSION: &str = "2.2.0";
 pub const QUALIFIED_CODEX_ADAPTER_PACKAGE: &str = "@agentclientprotocol/codex-acp";
-pub const QUALIFIED_CODEX_ADAPTER_VERSION: &str = "1.7.0";
+pub const QUALIFIED_CODEX_ADAPTER_VERSION: &str = "1.13.1";
 pub const QUALIFIED_CLAUDE_ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
-pub const QUALIFIED_CLAUDE_ADAPTER_VERSION: &str = "0.70.0";
+pub const QUALIFIED_CLAUDE_ADAPTER_VERSION: &str = "0.81.2";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AgentUsageQualification {

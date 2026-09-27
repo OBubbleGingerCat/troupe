@@ -39,7 +39,7 @@ def test_mcp_official_acp_dependency_pins_the_sdk_and_turn_usage_feature() -> No
         manifest = tomllib.load(handle)
 
     assert manifest["dependencies"]["agent-client-protocol"] == {
-        "version": "=2.0.0",
+        "version": "=2.2.0",
         "features": ["unstable_end_turn_token_usage"],
     }
     assert manifest["dependencies"]["getrandom"] == "0.4"
@@ -55,10 +55,10 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
     assert snapshot == {
         "codex": {
             "program": "npx",
-            "args": ["--yes", "@agentclientprotocol/codex-acp@1.7.0"],
-            "version": "1.7.0",
+            "args": ["--yes", "@agentclientprotocol/codex-acp@1.13.1"],
+            "version": "1.13.1",
             "acp_wire_protocol": "stable-v1",
-            "client_sdk_version": "2.0.0",
+            "client_sdk_version": "2.2.0",
             "mcp_wire_protocol": "2025-06-18",
             "mcp_transport_profile": "McpTransportProfileV1",
             "environment_policy": "inherit_parent",
@@ -76,15 +76,15 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "configuration_order": ["mode", "model", "effort"],
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
-            "autonomous_request_profile": "codex-acp@1.7.0",
-            "settlement_profile": "codex-acp@1.7.0",
+            "autonomous_request_profile": "codex-acp@1.13.1",
+            "settlement_profile": "codex-acp@1.13.1",
         },
         "claude": {
             "program": "npx",
-            "args": ["--yes", "@agentclientprotocol/claude-agent-acp@0.70.0"],
-            "version": "0.70.0",
+            "args": ["--yes", "@agentclientprotocol/claude-agent-acp@0.81.2"],
+            "version": "0.81.2",
             "acp_wire_protocol": "stable-v1",
-            "client_sdk_version": "2.0.0",
+            "client_sdk_version": "2.2.0",
             "mcp_wire_protocol": "2025-11-25",
             "mcp_transport_profile": "McpTransportProfileV1",
             "environment_policy": "inherit_parent",
@@ -102,15 +102,15 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "configuration_order": ["mode", "model", "effort"],
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
-            "autonomous_request_profile": "claude-agent-acp@0.70.0",
-            "settlement_profile": "claude-agent-acp@0.70.0",
+            "autonomous_request_profile": "claude-agent-acp@0.81.2",
+            "settlement_profile": "claude-agent-acp@0.81.2",
         },
         "kimi": {
             "program": "kimi",
             "args": ["acp"],
             "version": "0.39.1",
             "acp_wire_protocol": "stable-v1",
-            "client_sdk_version": "2.0.0",
+            "client_sdk_version": "2.2.0",
             "mcp_wire_protocol": "2025-11-25",
             "mcp_transport_profile": "McpTransportProfileV1",
             "environment_policy": "inherit_parent",
@@ -142,9 +142,9 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
                 "--model",
                 "<allowlisted-deepseek-model>",
             ],
-            "version": "0.85.1",
+            "version": "0.87.1",
             "acp_wire_protocol": "stable-v1",
-            "client_sdk_version": "2.0.0",
+            "client_sdk_version": "2.2.0",
             "mcp_wire_protocol": "2025-11-25",
             "mcp_transport_profile": "McpTransportProfileV1",
             "environment_policy": "inherit_parent",
@@ -163,7 +163,7 @@ def test_ready_private_adapter_registry_is_closed_and_exact() -> None:
             "effective_value_validation": "exact_advertised_select",
             "mcp_registration": "session/new.mcpServers.http",
             "autonomous_request_profile": "troupe-pi-shim@0.1.0",
-            "settlement_profile": "pi-rpc-agent-settled@0.85.1",
+            "settlement_profile": "pi-rpc-agent-settled@0.87.1",
         },
     }
     assert "latest" not in repr(snapshot).lower()
@@ -182,15 +182,19 @@ def _permission_request(
     *,
     options: list[dict[str, object]],
     kind: str = "execute",
+    tool_name: str | None = None,
     meta: dict[str, object] | None = None,
 ) -> str:
+    tool_call: dict[str, object] = {
+        "toolCallId": "codex-tool-call",
+        "kind": kind,
+        "status": "pending",
+    }
+    if tool_name is not None:
+        tool_call["name"] = tool_name
     request: dict[str, object] = {
         "sessionId": "codex-session",
-        "toolCall": {
-            "toolCallId": "codex-tool-call",
-            "kind": kind,
-            "status": "pending",
-        },
+        "toolCall": tool_call,
         "options": options,
     }
     if meta is not None:
@@ -378,6 +382,37 @@ def test_codex_adapter_maps_only_pinned_terminal_error_evidence(
 @pytest.mark.parametrize(
     ("request_json", "expected"),
     [
+        (
+            _permission_request(
+                tool_name="ExitPlanMode",
+                options=[
+                    _option("exit-plan-auto", "allow_always"),
+                    _option("exit-plan-default", "allow_once"),
+                    _option("reject", "reject_once"),
+                ],
+            ),
+            "selected:exit-plan-default",
+        ),
+        (
+            _permission_request(
+                tool_name="EnterPlanMode",
+                options=[
+                    _option("allow-once", "allow_once"),
+                    _option("reject", "reject_once"),
+                ],
+            ),
+            "selected:allow-once",
+        ),
+        (
+            _permission_request(
+                options=[
+                    _option("allow-with-updates", "allow_always"),
+                    _option("reject", "reject_once"),
+                    _option("allow-once", "allow_once"),
+                ],
+            ),
+            "selected:allow-once",
+        ),
         (
             _permission_request(
                 options=[

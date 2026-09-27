@@ -1,5 +1,5 @@
 {
-  "adapterProfile": "codex-acp@1.7.0",
+  "adapterProfile": "codex-acp@1.13.1",
   "turns": [
     {
       "shape": "single_request",

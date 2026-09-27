@@ -22,7 +22,7 @@ use uuid::Uuid;
 pub(super) mod fd_registry;
 pub(super) mod process;
 
-const ACP_CLIENT_SDK_VERSION: &str = "2.0.0";
+const ACP_CLIENT_SDK_VERSION: &str = "2.2.0";
 
 pub(crate) enum LaunchRunner {
     Npx {
@@ -300,7 +300,7 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     mcp_transport_profile: McpTransportProfileId::V1,
     runner: LaunchRunner::Npx {
         package: "@agentclientprotocol/codex-acp",
-        exact_version: "1.7.0",
+        exact_version: "1.13.1",
         fixed_args: NO_ARGS,
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
@@ -317,8 +317,8 @@ const CODEX: AgentLaunchSpec = AgentLaunchSpec {
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
-    autonomous_request_profile: AutonomousRequestProfileId("codex-acp@1.7.0"),
-    settlement_profile: SettlementProfileId("codex-acp@1.7.0"),
+    autonomous_request_profile: AutonomousRequestProfileId("codex-acp@1.13.1"),
+    settlement_profile: SettlementProfileId("codex-acp@1.13.1"),
     opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
@@ -331,7 +331,7 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     mcp_transport_profile: McpTransportProfileId::V1,
     runner: LaunchRunner::Npx {
         package: "@agentclientprotocol/claude-agent-acp",
-        exact_version: "0.70.0",
+        exact_version: "0.81.2",
         fixed_args: NO_ARGS,
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
@@ -348,8 +348,8 @@ const CLAUDE: AgentLaunchSpec = AgentLaunchSpec {
     configuration_order: ConfigurationOrderV1::ModeModelEffort,
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
-    autonomous_request_profile: AutonomousRequestProfileId("claude-agent-acp@0.70.0"),
-    settlement_profile: SettlementProfileId("claude-agent-acp@0.70.0"),
+    autonomous_request_profile: AutonomousRequestProfileId("claude-agent-acp@0.81.2"),
+    settlement_profile: SettlementProfileId("claude-agent-acp@0.81.2"),
     opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };
@@ -395,7 +395,7 @@ const PI: AgentLaunchSpec = AgentLaunchSpec {
     runner: LaunchRunner::Pi {
         node_min_major: 22,
         node_min_minor: 19,
-        exact_version: "0.85.1",
+        exact_version: "0.87.1",
     },
     environment_policy: LaunchEnvironmentPolicy::InheritParent,
     fixed_environment: NO_ENVIRONMENT,
@@ -412,7 +412,7 @@ const PI: AgentLaunchSpec = AgentLaunchSpec {
     effective_value_validation: EffectiveValueValidationV1::ExactAdvertisedSelect,
     mcp_registration: McpRegistrationV1::SessionNewHttp,
     autonomous_request_profile: AutonomousRequestProfileId("troupe-pi-shim@0.1.0"),
-    settlement_profile: SettlementProfileId("pi-rpc-agent-settled@0.85.1"),
+    settlement_profile: SettlementProfileId("pi-rpc-agent-settled@0.87.1"),
     opening_transient_errors: NO_TRANSIENT_OPENING_ERRORS,
     authoritative_prompt_error_codes: NO_ERROR_CODES,
 };

@@ -1,5 +1,5 @@
 {
-  "adapterProfile": "claude-agent-acp@0.70.0",
+  "adapterProfile": "claude-agent-acp@0.81.2",
   "turns": [
     {
       "shape": "single_request",

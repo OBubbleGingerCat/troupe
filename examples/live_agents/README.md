@@ -6,7 +6,7 @@ Troupe does not perform authentication.
 
 Codex and Claude require Node.js with npm and `npx` because Troupe launches
 their pinned ACP adapter packages through `npx`. Kimi requires the pinned Kimi
-Code 0.39.1 CLI. Pi requires Node.js 22.19 or newer and the pinned Pi 0.85.1
+Code 0.39.1 CLI. Pi requires Node.js 22.19 or newer and the pinned Pi 0.87.1
 CLI on `PATH`; configure Pi for DeepSeek before the Production starts. All
 providers must already be authenticated. The live examples are explicit
 provider calls and can consume tokens.
@@ -32,7 +32,7 @@ export TROUPE_LIVE_PI_PROFILE='{"workspace":"/tmp","model":"deepseek-v4-pro","ef
 troupe --production examples/live_agents/pi_actor -- acceptance /tmp/pi-example-report.json pi-demo-token
 ```
 
-The command requires Pi 0.85.1 and Node.js 22.19+ on `PATH`, plus a configured
+The command requires Pi 0.87.1 and Node.js 22.19+ on `PATH`, plus a configured
 DeepSeek credential (`DEEPSEEK_API_KEY` or Pi's own credential store). Use
 `deepseek-flash` for a lower-cost smoke test or `deepseek-v4-pro` when you
 want to exercise the Pro profile. Stop it with `Ctrl+C` after the report is
