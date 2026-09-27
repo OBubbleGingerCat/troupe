@@ -31,6 +31,27 @@ impl ClaudeAcpAdapter {
                 .expect("the Claude ExitPlanMode default option was just verified");
         }
 
+        // Claude ACP 0.81.x uses explicit tool names for plan-mode permission
+        // requests.  The old adapter above intentionally remains unchanged for
+        // older releases; these IDs are the current equivalents.
+        if request.tool_call.fields.name.as_deref() == Some("ExitPlanMode")
+            && select_unique_id_and_kind(
+                request,
+                "exit-plan-default",
+                PermissionOptionKind::AllowOnce,
+            )
+            .is_some()
+            && select_unique_id_and_kind(request, "reject", PermissionOptionKind::RejectOnce)
+                .is_some()
+        {
+            return select_unique_id_and_kind(
+                request,
+                "exit-plan-default",
+                PermissionOptionKind::AllowOnce,
+            )
+            .expect("the current Claude plan default option was just verified");
+        }
+
         let ordinary_tool_permission =
             select_unique_id_and_kind(request, "allow", PermissionOptionKind::AllowOnce).is_some()
                 && select_unique_id_and_kind(request, "reject", PermissionOptionKind::RejectOnce)
@@ -44,6 +65,48 @@ impl ClaudeAcpAdapter {
         if ordinary_tool_permission {
             return select_unique_id_and_kind(request, "allow", PermissionOptionKind::AllowOnce)
                 .expect("the Claude allow-once option was just verified");
+        }
+
+        // Claude ACP 0.81.x renamed the ordinary tool permission options while
+        // keeping their wire-level kinds stable.  Accept the current names as
+        // well as the legacy names above so a provider upgrade does not turn a
+        // normal autonomous write into an implicit rejection.
+        let current_tool_permission =
+            select_unique_id_and_kind(request, "allow-once", PermissionOptionKind::AllowOnce)
+                .is_some()
+                && select_unique_id_and_kind(request, "reject", PermissionOptionKind::RejectOnce)
+                    .is_some()
+                && select_unique_id_and_kind(
+                    request,
+                    "allow-with-updates",
+                    PermissionOptionKind::AllowAlways,
+                )
+                .is_some();
+        if current_tool_permission {
+            return select_unique_id_and_kind(
+                request,
+                "allow-once",
+                PermissionOptionKind::AllowOnce,
+            )
+            .expect("the current Claude allow-once option was just verified");
+        }
+
+        // Some current tools (for example EnterPlanMode and WebFetch with no
+        // durable rule) offer only one allow-once and one reject option.  Keep
+        // the exact two-option shape closed so an unrelated future matrix is
+        // still rejected rather than implicitly authorized.
+        if request.options.len() == 2
+            && select_unique_id_and_kind(request, "allow-once", PermissionOptionKind::AllowOnce)
+                .is_some()
+            && select_unique_id_and_kind(request, "reject", PermissionOptionKind::RejectOnce)
+                .is_some()
+        {
+            return select_unique_id_and_kind(
+                request,
+                "allow-once",
+                PermissionOptionKind::AllowOnce,
+            )
+            .expect("the current Claude two-option allow-once matrix was just verified");
         }
 
         reject_unknown(request)

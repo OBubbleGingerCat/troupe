@@ -276,12 +276,12 @@ fn qualification_fixture_pins_only_proven_whole_turn_adapters() {
         QUALIFIED_CODEX_ADAPTER_PACKAGE,
         "@agentclientprotocol/codex-acp"
     );
-    assert_eq!(QUALIFIED_CODEX_ADAPTER_VERSION, "1.7.0");
+    assert_eq!(QUALIFIED_CODEX_ADAPTER_VERSION, "1.13.1");
     assert_eq!(
         QUALIFIED_CLAUDE_ADAPTER_PACKAGE,
         "@agentclientprotocol/claude-agent-acp"
     );
-    assert_eq!(QUALIFIED_CLAUDE_ADAPTER_VERSION, "0.70.0");
+    assert_eq!(QUALIFIED_CLAUDE_ADAPTER_VERSION, "0.81.2");
 }
 
 #[test]
@@ -294,7 +294,7 @@ fn manifest_enables_only_the_single_required_acp_feature() {
     assert_eq!(
         dependency,
         [
-            "agent-client-protocol = { version = \"=2.0.0\", features = [\"unstable_end_turn_token_usage\"] }"
+            "agent-client-protocol = { version = \"=2.2.0\", features = [\"unstable_end_turn_token_usage\"] }"
         ]
     );
     assert_eq!(manifest.matches("unstable_end_turn_token_usage").count(), 1);
@@ -305,7 +305,7 @@ fn codex_and_claude_terminal_fixtures_are_qualified_only_after_whole_turn_settle
     let codex = assert_qualified_fixture(
         CODEX_AVAILABLE_FIXTURE,
         AgentDiagnosticProvider::Codex,
-        "codex-acp@1.7.0",
+        "codex-acp@1.13.1",
         &["single_request", "tool_loop"],
     );
     assert_eq!(
@@ -320,7 +320,7 @@ fn codex_and_claude_terminal_fixtures_are_qualified_only_after_whole_turn_settle
     let claude = assert_qualified_fixture(
         CLAUDE_PARTIAL_FIXTURE,
         AgentDiagnosticProvider::Claude,
-        "claude-agent-acp@0.70.0",
+        "claude-agent-acp@0.81.2",
         &["single_request", "multi_request"],
     );
     assert_eq!(

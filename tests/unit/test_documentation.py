@@ -140,7 +140,7 @@ def test_readme_documents_actor_act_schema_and_callback_boundaries() -> None:
         "Kimi Code 0.39.1",
         '`agent="pi"`',
         "Node.js 22.19",
-        "Pi 0.85.1",
+        "Pi 0.87.1",
         "`deepseek-flash`",
         "`deepseek-v4-pro`",
         "`DEEPSEEK_API_KEY`",
